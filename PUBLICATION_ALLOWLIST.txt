@@ -1,5 +1,6 @@
 dev.conf.example
 .github/workflows/ci.yml
+tests/test_ci_builds.py
 CONTRIBUTING.md
 docs/ARCHITECTURE.md
 docs/CASE_STUDY_PINBALL.md
@@ -499,6 +500,9 @@ tests/test_vk_generated_stage.py
 tests/lab/vk_generated_replay.c
 
 tests/lab/vk_batch_owned.c
+
+wine/ps5/pw_ws2_32_resolver.h
+tests/test_pw_ws2_32_console.c
 
 tests/test_build_tls_ps5.py
 tools/build_tls_ps5.sh

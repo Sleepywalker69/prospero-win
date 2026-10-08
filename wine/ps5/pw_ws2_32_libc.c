@@ -6,27 +6,45 @@
  * (measured: GTA IV, tens of thousands of times a minute). gethostbyaddr and
  * h_errno are in no stub at all.
  *
- * A title has no DNS either, so these answer what needs no name server:
- * numeric addresses, the wildcard and loopback addresses, and "localhost"
- * and the console's own host name, both loopback. Any other name is
- * EAI_NONAME, including the computer name a prefix made on a PC carries:
- * resolving that name made GTA IV believe it was online and wait forever on
- * "Starting a new game" (measured), while the failure Wine reports for it
- * (one "Failed to resolve your host name IP" line per lookup) is what lets
- * the game carry on offline. There is no services database, so a service must be a port
- * number. gethostname, inet_pton and inet_ntop are the title's own.
+ * These answer what needs no name server themselves: numeric addresses,
+ * the wildcard and loopback addresses, and "localhost" and the console's
+ * own host name, both loopback. A name with a dot in it goes to the
+ * console's own resolver, libSceNet's, the way the payload SDK's libc does
+ * it (a pool and a resolver per lookup; libSceNet is the title's, which
+ * ps5log already uses for its sockets), with explicit timeout and retry
+ * inputs below: Battle.net's client, offline until then, resolved nothing
+ * ("Could not resolve host:
+ * account.battle.net"). A name without a dot is EAI_NONAME at once, as
+ * every name was before: the computer name a prefix made on a PC carries is
+ * single-label and is not the console's (gethostname reports the console's),
+ * GTA IV looks it up tens of thousands of times a minute, and resolving it,
+ * which a home router that answers for DHCP host names would, made the game
+ * believe it was online and wait forever on "Starting a new game"
+ * (measured), while the failure Wine reports for it (one "Failed to resolve
+ * your host name IP" line per lookup) is what lets the game carry on
+ * offline. Resolver failures are remembered briefly with their error class
+ * so repeated calls do not block on the same outage. Native lookup errors
+ * remain retryable: without a verified native NXDOMAIN mapping, a timeout
+ * must not tell Winsock that the host does not exist. There is no services
+ * database, so a service must be a port number. gethostname, inet_pton and
+ * inet_ntop are the title's own.
  *
  * The host test builds this file with these names prefixed (Makefile), so
  * glibc's stay in place. */
 #include <arpa/inet.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+#include "pw_ws2_32_resolver.h"
 
 /* getnameinfo's buffer sizes: size_t on FreeBSD, socklen_t in glibc. */
 #ifdef __GLIBC__
@@ -43,10 +61,129 @@ int *__h_errno(void)
 }
 
 /* One answer: an address family and the address's bytes. */
-struct pw_address {
+#define pw_address pw_ws2_address
+
+#ifdef __PROSPERO__
+/* The console's resolver. libSceNet's declarations are not in the payload
+ * SDK's headers; these are the calls the payload SDK's libc makes. */
+int sceNetInit(void);
+int sceNetPoolCreate(const char *name, int size, int flags);
+int sceNetPoolDestroy(int pool);
+int sceNetResolverCreate(const char *name, int pool, int flags);
+int sceNetResolverDestroy(int resolver);
+int sceNetResolverStartNtoa(int resolver, const char *name, struct in_addr *address,
+                            int timeout_us, int retries, int flags);
+int sceNetResolverStartNtoa6(int resolver, const char *name, struct in6_addr *address,
+                             int timeout_us, int retries, int flags);
+
+/* Explicit per-call timeout/retry inputs. Actual elapsed-time bounds still
+ * need validation on the console; the two families are queried serially. */
+#define PW_RESOLVE_TIMEOUT_US 5000000
+#define PW_RESOLVE_RETRIES 2
+
+static int pw_console_resolve(const char *name, int family, struct pw_address answers[2], int *count)
+{
+    int pool, resolver, found = 0;
+
+    *count = 0;
+    /* Initialises libSceNet once; every later call returns SCE_NET_EBUSY,
+     * which is the expected answer here, so the result is not looked at. */
+    sceNetInit();
+    if ((pool = sceNetPoolCreate("prospero-win", 0x4000, 0)) < 0)
+        return EAI_FAIL;
+    if ((resolver = sceNetResolverCreate("prospero-win", pool, 0)) < 0) {
+        sceNetPoolDestroy(pool);
+        return EAI_FAIL;
+    }
+    if (family != AF_INET6) {
+        struct in_addr address;
+        if (sceNetResolverStartNtoa(resolver, name, &address, PW_RESOLVE_TIMEOUT_US, PW_RESOLVE_RETRIES, 0) >= 0) {
+            answers[found].family = AF_INET;
+            memcpy(answers[found].bytes, &address, sizeof(address));
+            found++;
+        }
+    }
+    if (family != AF_INET) {
+        struct in6_addr address;
+        if (sceNetResolverStartNtoa6(resolver, name, &address, PW_RESOLVE_TIMEOUT_US, PW_RESOLVE_RETRIES, 0) >= 0) {
+            answers[found].family = AF_INET6;
+            memcpy(answers[found].bytes, &address, sizeof(address));
+            found++;
+        }
+    }
+    sceNetResolverDestroy(resolver);
+    sceNetPoolDestroy(pool);
+    *count = found;
+    return found ? 0 : EAI_AGAIN;
+}
+
+int (*pw_ws2_32_resolve)(const char *, int, struct pw_address[2], int *) = pw_console_resolve;
+#else
+/* The host test installs a backend; without one every other name is unknown. */
+int (*pw_ws2_32_resolve)(const char *, int, struct pw_address[2], int *) = NULL;
+#endif
+
+static long long pw_monotonic_seconds(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now))
+        return -1;
+    return now.tv_sec;
+}
+
+long long (*pw_ws2_32_now)(void) = pw_monotonic_seconds;
+
+/* Unknown names and temporary failures, separately for each address
+ * family, kept PW_WS2_32_NEGATIVE_SECONDS. Preserve the error so an outage
+ * never becomes HOST_NOT_FOUND. The oldest entry is replaced under a lock. */
+#define PW_NEGATIVE_SLOTS 16
+struct pw_negative {
+    char name[256];
     int family;
-    unsigned char bytes[sizeof(struct in6_addr)];
+    int error;
+    long long until;
 };
+static struct pw_negative pw_negatives[PW_NEGATIVE_SLOTS];
+static unsigned pw_negative_next;
+static pthread_mutex_t pw_negative_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int pw_negative_known(const char *name, int family)
+{
+    long long now = pw_ws2_32_now();
+    int error = 0;
+    unsigned i;
+
+    if (now < 0 || now > LLONG_MAX - PW_WS2_32_NEGATIVE_SECONDS)
+        return 0;
+    pthread_mutex_lock(&pw_negative_lock);
+    for (i = 0; i < PW_NEGATIVE_SLOTS; i++) {
+        if (pw_negatives[i].until > now && pw_negatives[i].family == family &&
+            !strcasecmp(pw_negatives[i].name, name)) {
+            error = pw_negatives[i].error;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&pw_negative_lock);
+    return error;
+}
+
+static void pw_negative_remember(const char *name, int family, int error)
+{
+    struct pw_negative *slot;
+    long long now = pw_ws2_32_now();
+
+    if (strlen(name) >= sizeof(slot->name) || now < 0 ||
+        now > LLONG_MAX - PW_WS2_32_NEGATIVE_SECONDS)
+        return;
+    pthread_mutex_lock(&pw_negative_lock);
+    slot = &pw_negatives[pw_negative_next++ % PW_NEGATIVE_SLOTS];
+    strcpy(slot->name, name);
+    slot->family = family;
+    slot->error = error;
+    slot->until = now + PW_WS2_32_NEGATIVE_SECONDS;
+    pthread_mutex_unlock(&pw_negative_lock);
+}
 
 /* An addrinfo and everything it points to, freed in one piece. */
 struct pw_addrinfo {
@@ -101,16 +238,46 @@ static int pw_lookup(const char *node, int family, int flags, struct pw_address 
     memset(addresses, 0, 2 * sizeof(*addresses));
     *count = 1;
     if (node) {
-        if (family != AF_INET6 && inet_pton(AF_INET, node, addresses[0].bytes) == 1) {
+        if (inet_pton(AF_INET, node, addresses[0].bytes) == 1) {
+            if (family == AF_INET6)
+                return EAI_NONAME;
             addresses[0].family = AF_INET;
             return 0;
         }
-        if (family != AF_INET && inet_pton(AF_INET6, node, addresses[0].bytes) == 1) {
+        if (inet_pton(AF_INET6, node, addresses[0].bytes) == 1) {
+            if (family == AF_INET)
+                return EAI_NONAME;
             addresses[0].family = AF_INET6;
             return 0;
         }
-        if ((flags & AI_NUMERICHOST) || !pw_is_local_name(node))
+        if (flags & AI_NUMERICHOST)
             return EAI_NONAME;
+        if (!pw_is_local_name(node)) {
+            int error;
+            /* Only a dotted name is asked of the resolver (see the top). */
+            if (!*node || !strchr(node, '.') || !pw_ws2_32_resolve)
+                return EAI_NONAME;
+            if ((error = pw_negative_known(node, family)))
+                return error;
+            *count = 0;
+            error = pw_ws2_32_resolve(node, family, addresses, count);
+            if (error) {
+                if (error == EAI_NONAME || error == EAI_AGAIN)
+                    pw_negative_remember(node, family, error);
+                return error;
+            }
+            if (*count < 0 || *count > 2)
+                return EAI_FAIL;
+            if (!*count) {
+                pw_negative_remember(node, family, EAI_NONAME);
+                return EAI_NONAME;
+            }
+            for (int i = 0; i < *count; i++)
+                if ((addresses[i].family != AF_INET && addresses[i].family != AF_INET6) ||
+                    (family != AF_UNSPEC && addresses[i].family != family))
+                    return EAI_FAIL;
+            return 0;
+        }
     }
     *count = 0;
     if (family != AF_INET6) {
@@ -296,12 +463,15 @@ struct hostent *gethostbyname(const char *name)
 {
     struct addrinfo hints = {0}, *info;
     struct hostent *host;
+    int error;
 
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_CANONNAME;
-    if (!name || getaddrinfo(name, NULL, &hints, &info)) {
-        pw_h_errno = HOST_NOT_FOUND;
+    error = name ? getaddrinfo(name, NULL, &hints, &info) : EAI_NONAME;
+    if (error) {
+        pw_h_errno = error == EAI_NONAME ? HOST_NOT_FOUND :
+                     error == EAI_AGAIN ? TRY_AGAIN : NO_RECOVERY;
         return NULL;
     }
     host = pw_hostent(info->ai_canonname, AF_INET, &((struct sockaddr_in *)info->ai_addr)->sin_addr,

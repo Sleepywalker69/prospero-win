@@ -1115,10 +1115,23 @@ The runtime is staged beside the title:
   `getnameinfo` and `gethostbyname` in `libScePosixForWebKit`, which only
   the WebKit process gets, so in a title they stayed NULL and every lookup
   faulted (GTA IV, tens of thousands a minute). `wine/ps5/pw_ws2_32_libc.c`
-  provides them, with `gethostbyaddr` and `h_errno`. There is no DNS: they
-  answer numeric addresses, the wildcard and loopback addresses, and
-  `localhost` and the console's own host name (loopback); any other name is
-  not found, and a service must be a port number; `secur32.prx`,
+  provides them, with `gethostbyaddr` and `h_errno`. They answer numeric
+  addresses, the wildcard and loopback addresses, and `localhost` and the
+  console's own host name (loopback) themselves, and take a name with a dot
+  in it to the console's own resolver, libSceNet's (`sceNetResolverStartNtoa`
+  and `Ntoa6`, a pool and a resolver per lookup, as the payload SDK's libc
+  does, with an explicit 5 s timeout and two retries; elapsed-time bounds
+  still need console validation). A numeric address of the wrong family
+  fails locally without a DNS request. A name without a dot is not found at
+  once: the computer name a prefix made on a PC carries is one, GTA IV looks it up tens of
+  thousands of times a minute, and a router that resolved it would make the
+  game believe it is online. Unknown names and temporary failures are
+  remembered for 5 s (16 names, per address family), retaining their error
+  class. Native resolver errors remain retryable (`EAI_AGAIN`, or `TRY_AGAIN`
+  through `gethostbyname`) because a native NXDOMAIN mapping has not been
+  verified; a network outage must not become a host-not-found answer.
+  Failure of the monotonic clock disables this cache. A service must be a
+  port number. `ws2_32.prx` therefore needs `libSceNet.sprx`; `secur32.prx`,
   schannel's Unix side, with `libgnutls.prx`, GnuTLS and nettle built by
   `tools/build_tls_ps5.sh` into static archives that the module exports from
   (what `schannel_gnutls.c` and crypt32's `unixlib.c` load with dlsym), and
