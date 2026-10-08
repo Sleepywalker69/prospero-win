@@ -87,6 +87,50 @@ rebuilds; use `make clean` when you explicitly want to remove generated files.
 checkout and the staged host runtime, failing instead of skipping when they
 are absent.
 
+## GitHub Actions builds
+
+The [CI workflow](../.github/workflows/ci.yml) runs `host-contracts` and
+`wine-source-contracts` on pull requests and pushes to `main`. The host job
+keeps `make all` and `make sanitize` as required, fail-closed checks. The
+sanitizer step still runs after a host-test failure when setup succeeded;
+neither job disables leak detection or converts failures into passes.
+
+The source job fetches the exact Wine commit named by the build scripts,
+checks that the pins agree, applies every patch in order to a private copy,
+and stages the owned Vulkan/clock/input sources. It then runs the three
+source-backed contract suites. This is actual patch application; the
+`--check-patches` option alone validates only series names and subjects.
+The source job does not build or run a host Wine runtime, so it does not
+replace `make wine-check` or its runtime-dependent evidence.
+
+Both jobs retain their raw logs for seven days. Dependencies and generated
+binaries are deliberately not cached: every runner starts clean, and the
+first hosted runs establish trustworthy timings before cache design is
+considered. Tool versions, repository identity, Wine identity, and patch
+hashes are recorded. Logs stay outside the repository's publication audit.
+
+A maintainer can add the `build-native-title` label to a pull request whose
+head branch is in the same repository, or manually run CI on a selected ref
+with `build_native_title` enabled. The label route can test this workflow in
+a pull request before it is merged; manual dispatch becomes available once
+the workflow exists on the default branch.
+After both validation jobs pass, a separate 60-minute job builds the native
+title using the pinned public foundation, payload SDK, zlib, and Lapy helper.
+The successful `native-title-only` artifact is a tarball containing the title
+folder, notices, project/foundation source archives, dependency provenance,
+and checksums. Tar preserves executable permissions. The ELF inspected by
+this job is `build/native/eboot.elf`; `eboot.bin` is its converted SELF output.
+
+This optional artifact has no Wine/graphics runtime and is not a complete
+installer kit. It proves a hosted cross-build only: no console execution,
+installer, login, TLS, game compatibility, or performance claim is made.
+Full Wine/PRX/graphics builds remain the separate packaging workflow below.
+The workflow uses read-only repository permissions, no repository secrets,
+no release publishing, and no console deployment. The optional job runs only
+for an explicit manual request or a labeled same-repository pull request.
+Fork pull requests cannot opt themselves in. Removing the label starts a new
+run and cancels the old run through the workflow concurrency group.
+
 ## Building for the console
 
 ```sh

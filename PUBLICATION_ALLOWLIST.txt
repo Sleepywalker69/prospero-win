@@ -1,5 +1,6 @@
 dev.conf.example
 .github/workflows/ci.yml
+tests/test_ci_builds.py
 CONTRIBUTING.md
 docs/ARCHITECTURE.md
 docs/CASE_STUDY_PINBALL.md
