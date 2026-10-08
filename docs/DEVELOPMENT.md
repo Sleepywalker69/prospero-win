@@ -131,6 +131,30 @@ for an explicit manual request or a labeled same-repository pull request.
 Fork pull requests cannot opt themselves in. Removing the label starts a new
 run and cancels the old run through the workflow concurrency group.
 
+The separate `build-tls-dependencies` label (same-repository pull requests
+only), or manual `build_tls_dependencies` input, opts into a 60-minute TLS
+cross-build. It bootstraps the same pinned public SDK, selects LLVM 18
+explicitly, and runs `tools/build_tls_ps5.sh` against the real pinned source
+archives and Ed448 backport. It also compiles the actual DNS and TLS libc
+adapters with the SDK target and `__PROSPERO__`, checks their symbols and
+object headers, and verifies that GnuTLS configured and compiled the
+expected `sysrng-netbsd` entropy backend. Missing outputs or another backend
+fail the job; configure answers are never forced to make it pass.
+This optional lane requires the TLS dependency builder, native resolver and
+TLS adapters, and LLVM-selection changes to be present on the selected ref.
+Do not opt into it on the isolated CI-only branch before those prerequisites
+are integrated; missing inputs fail explicitly rather than producing a skip.
+
+Configuration, make and install logs are retained even when the build fails.
+A successful `tls-dependencies-only` tarball includes the libraries, adapter
+objects, manifest, original source archives, exact patch, staged notices,
+project/foundation source, compiler provenance and checksums. The SDK itself
+is not redistributed in that bundle. Manifest paths identify the build
+runner, so this is validation material rather than a portable installed
+runtime. A successful job establishes cross-compilation and selected backend
+only. It does not establish working console entropy, a TLS handshake,
+certificate rejection, Battle.net login, or a Wine PRX/full-runtime build.
+
 ## Building for the console
 
 ```sh
