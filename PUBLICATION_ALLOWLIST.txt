@@ -500,3 +500,6 @@ tests/test_vk_generated_stage.py
 tests/lab/vk_generated_replay.c
 
 tests/lab/vk_batch_owned.c
+
+tools/check_wine_prx_build.py
+tests/test_check_wine_prx_build.py
