@@ -503,4 +503,5 @@ tests/lab/vk_batch_owned.c
 tests/test_build_tls_ps5.py
 tools/build_tls_ps5.sh
 tools/tls_manifest.py
+tools/patches/gnutls-3.8.13-kern-arnd-headers.patch
 tools/patches/nettle-3.10.1-ed448-canonical.patch

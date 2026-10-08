@@ -87,6 +87,19 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def patch_context(path: Path, *, applied: bool = False) -> dict[str, str]:
+    """Read the exact old/new hunk text, never an independently copied probe."""
+    result = {}
+    for section in path.read_text().split("diff --git ")[1:]:
+        target = section.splitlines()[0].split(" b/", 1)[1]
+        text = []
+        for hunk in re.split(r"(?m)^@@ ", section)[1:]:
+            _, *lines = hunk.splitlines()
+            text.extend(line[1:] for line in lines if line.startswith((" ", "+" if applied else "-")))
+        result[target] = "\n".join(text) + "\n"
+    return result
+
+
 def make_toolchain_fixture(sdk: Path, host: Path) -> Path:
     """Original shell fixtures modeling SDK dispatch to a host LLVM install."""
     binary, resource = host / "bin", host / "lib/clang/18"
@@ -132,9 +145,10 @@ class Fixture:
         self.script.parent.mkdir()
         self.original = SCRIPT.read_text()
         self.script.with_name("tls_manifest.py").write_text(SCRIPT.with_name("tls_manifest.py").read_text())
-        patch = Path("patches/nettle-3.10.1-ed448-canonical.patch")
-        (self.script.parent / patch).parent.mkdir()
-        (self.script.parent / patch).write_bytes((SCRIPT.parent / patch).read_bytes())
+        for name in ("nettle-3.10.1-ed448-canonical.patch", "gnutls-3.8.13-kern-arnd-headers.patch"):
+            patch = Path("patches") / name
+            (self.script.parent / patch).parent.mkdir(exist_ok=True)
+            (self.script.parent / patch).write_bytes((SCRIPT.parent / patch).read_bytes())
         self.versions = {name: re.search(rf"^{name}_VERSION=([^\n]+)", self.original,
                                          re.M).group(1) for name in ("NETTLE", "GNUTLS")}
         self.llvm_config = make_toolchain_fixture(self.sdk, root / "host-llvm")
@@ -165,8 +179,8 @@ class Fixture:
             install += "\n\tmkdir -p $(PREFIX)/include/gnutls\n"
             install += f"\tprintf '%s\\n' {shlex.quote(marker)} > $(PREFIX)/include/gnutls/gnutls.h"
         configure = directory / "configure"
-        configure.write_text("#!/bin/sh\nset -eu\nprefix=\nfor arg in \"$@\"; do\n"
-                             " case $arg in --prefix=*) prefix=${arg#--prefix=} ;; esac\ndone\n"
+        configure.write_text("#!/bin/sh\nset -eu\nprefix=\nmaintainer=yes\nfor arg in \"$@\"; do\n"
+                             " case $arg in --prefix=*) prefix=${arg#--prefix=} ;; --disable-maintainer-mode) maintainer=no ;; esac\ndone\n"
                              "test -n \"$prefix\"\ntest -z \"${ac_cv_injected:-}\"\n"
                              "test -z \"$CPPFLAGS\"\ntest -z \"$LIBS\"\n"
                              "test \"$CONFIG_SITE\" = /dev/null\n"
@@ -196,6 +210,26 @@ class Fixture:
                 "\tmkdir -p $(PREFIX)/lib/pkgconfig\n" +
                 "\tprintf 'synthetic pkg-config metadata\\n' > $(PREFIX)/lib/pkgconfig/gnutls.pc\n" +
                 "MAKE\n")
+        if name == "GNUTLS":
+            contexts = patch_context(SCRIPT.parent / "patches/gnutls-3.8.13-kern-arnd-headers.patch")
+            # The native compile/link probe is tested below. Keep its exact
+            # patch context inert in this build/cache-only shell fixture.
+            configure.write_text(configure.read_text() + ": <<'PW_PROBE_CONTEXT'\n" +
+                                 contexts["configure"] + "PW_PROBE_CONTEXT\n")
+            (directory / "configure.ac").write_text(contexts["configure.ac"])
+            # GnuTLS defaults maintainer mode on. Patching configure.ac
+            # makes this older release-generated input stale. Model the
+            # actual Makefile.in conditional prerequisite, not a sleep or
+            # a source-token assertion: disabled mode leaves no dependency.
+            (directory / "aclocal.m4").write_text("synthetic release-generated aclocal input\n")
+            os.utime(directory / "aclocal.m4", (1000000000, 1000000000))
+            configure.write_text(configure.read_text() +
+                "printf '%s\\n' \"$maintainer\" > maintainer-mode.txt\n" +
+                "guard=; test \"$maintainer\" = yes || guard='#'\n" +
+                "printf 'all: ../aclocal.m4\\n../aclocal.m4: %s ../configure.ac\\n' \"$guard\" >> gl/Makefile\n" +
+                "cat >> gl/Makefile <<'MAKE'\n" +
+                "\t@echo 'unexpected maintainer regeneration' >&2\n" +
+                "\t../missing-aclocal-1.18\nMAKE\n")
         configure.chmod(0o755)
         notices = ["COPYING.LESSERv3", "COPYINGv2", "COPYINGv3", "AUTHORS"] if name == "NETTLE" else [
             "COPYING.LESSERv2", "COPYING", "AUTHORS", "lib/inih/LICENSE.txt"]
@@ -244,6 +278,45 @@ class Fixture:
 
 
 class TlsCacheContracts(unittest.TestCase):
+    def test_patched_release_does_not_regenerate_maintainer_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-maintainer-") as directory:
+            fixture = Fixture(Path(directory))
+            result = fixture.run()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source = fixture.work / f"gnutls-{fixture.versions['GNUTLS']}"
+            self.assertEqual((source / "maintainer-mode.txt").read_text().strip(), "no")
+            self.assertGreater((source / "configure.ac").stat().st_mtime_ns,
+                               (source / "aclocal.m4").stat().st_mtime_ns)
+            self.assertNotIn("unexpected maintainer regeneration", (source / "make.log").read_text())
+            # Positive control: omitting only the explicit mode selection
+            # must make the same timestamp graph request the absent tool.
+            fixture.original = fixture.original.replace("--disable-maintainer-mode", "")
+            fixture.update_script()
+            unsafe = fixture.run()
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertIn("GnuTLS did not build", unsafe.stderr)
+            self.assertIn("unexpected maintainer regeneration", (source / "make.log").read_text())
+            self.assertIn("missing-aclocal-1.18", (source / "make.log").read_text())
+            self.assertFalse((fixture.work / "root/tls-build-manifest.json").exists())
+
+    def test_entropy_probe_patch_is_applied_and_bound_to_cache(self):
+        import json
+        with tempfile.TemporaryDirectory(prefix="pw-tls-probe-patch-") as directory:
+            fixture = Fixture(Path(directory))
+            result = fixture.run()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source = fixture.work / f"gnutls-{fixture.versions['GNUTLS']}"
+            for name in ("configure", "configure.ac"):
+                self.assertIn("#include <sys/types.h>\n#include <sys/sysctl.h>", (source / name).read_text())
+            patch = fixture.script.parent / "patches/gnutls-3.8.13-kern-arnd-headers.patch"
+            patch.write_text(patch.read_text() + "\n")
+            changed = fixture.run()
+            self.assertEqual(changed.returncode, 0, changed.stdout + changed.stderr)
+            self.assertIn("built GnuTLS", changed.stdout)
+            manifest = json.loads((fixture.work / "root/tls-build-manifest.json").read_text())
+            self.assertEqual(manifest["inputs"]["patches"]["tools/" + str(patch.relative_to(fixture.script.parent))],
+                             digest(patch))
+
     def test_library_only_build_installs_runtime_and_headers(self):
         with tempfile.TemporaryDirectory(prefix="pw-tls-library-") as directory:
             fixture = Fixture(Path(directory))
@@ -384,6 +457,53 @@ class TlsCacheContracts(unittest.TestCase):
             rerun = fixture.run()
             self.assertEqual(rerun.returncode, 0, rerun.stdout + rerun.stderr)
             self.assertTrue(output.is_file(), "libhogweed alone must not validate nettle's cache")
+
+
+class KernArndProbeContracts(unittest.TestCase):
+    def test_real_probe_detects_only_a_declared_and_linkable_interface(self):
+        patch = SCRIPT.parent / "patches/gnutls-3.8.13-kern-arnd-headers.patch"
+        before, after = patch_context(patch), patch_context(patch, applied=True)
+        def program(context):
+            return re.search(r"(?ms)^#include <sys/.*?^}", context["configure"]).group(0) + "\n"
+        old, fixed = program(before), program(after)
+        self.assertEqual(fixed.replace("#include <sys/types.h>\n", ""), old)
+        self.assertIn("#include <sys/types.h>\n#include <sys/sysctl.h>", after["configure.ac"])
+        with tempfile.TemporaryDirectory(prefix="pw-kern-arnd-") as directory:
+            root = Path(directory)
+            include = root / "sys"
+            include.mkdir()
+            (include / "types.h").write_text("typedef __SIZE_TYPE__ size_t;\n")
+            header = ("#define CTL_KERN 1\n#define KERN_ARND 2\n"
+                      "int sysctl(const int *, unsigned int, void *, size_t *, const void *, size_t);\n")
+            (include / "sysctl.h").write_text(header)
+            stub = root / "sysctl.c"
+            stub.write_text("#include <sys/types.h>\n#include <sys/sysctl.h>\n"
+                            "int sysctl(const int *a, unsigned int b, void *c, size_t *d, "
+                            "const void *e, size_t f) { return -1; }\n")
+            source = root / "probe.c"
+            def link(code, available=True):
+                source.write_text(code)
+                # This is compile/link detection, not execution or evidence
+                # that a kernel supplies entropy. No host headers are used.
+                command = shlex.split(os.environ.get("CC", "cc")) + ["-nostdinc", "-U__linux__", "-I", str(root),
+                           "-Dsysctl=pw_fixture_sysctl",
+                           "-Werror=implicit-function-declaration", str(source)]
+                if available:
+                    command.append(str(stub))
+                command += ["-o", str(root / "probe")]
+                return subprocess.run(command, capture_output=True, text=True)
+            broken = link(old)
+            self.assertNotEqual(broken.returncode, 0)
+            self.assertIn("size_t", broken.stderr)
+            present = link(fixed)
+            self.assertEqual(present.returncode, 0, present.stderr)
+            unavailable = link(fixed, available=False)
+            self.assertNotEqual(unavailable.returncode, 0)
+            self.assertIn("sysctl", unavailable.stderr)
+            (include / "sysctl.h").write_text(header.replace("#define KERN_ARND 2\n", ""))
+            absent_constant = link(fixed)
+            self.assertNotEqual(absent_constant.returncode, 0)
+            self.assertIn("KERN_ARND", absent_constant.stderr)
 
 
 
