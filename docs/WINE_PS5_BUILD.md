@@ -840,6 +840,16 @@ missing or changed TLS modules, trust bundles and notices, and writes those
 recorded versions to `SOURCES.txt`; changing a version pin cannot relabel an
 old archive. These hashes establish local provenance, not console validation.
 
+The supported compiler backend is LLVM 18. `LLVM_CONFIG` may name its
+executable; otherwise `llvm-config-18` is selected explicitly. Its canonical
+path is propagated through the SDK wrappers and the clean dependency-build
+environment. The manifest also records the actual host LLVM executable
+hashes and clang resource headers, so unchanged SDK wrapper scripts cannot
+hide changes to those inputs. Invalid selections and other LLVM majors fail rather
+than falling back to whichever compiler happens to be installed.
+This is not a complete host image snapshot: dynamically loaded host libraries
+and the host kernel are outside this manifest's scope.
+
 The `gmtime_r` shim performs bounded Gregorian UTC conversion without libc's
 shared `gmtime` buffer. Host tests compare calendar boundaries, overflow and
 160,000 concurrent conversions with the host libc. The entropy backend remains
