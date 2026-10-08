@@ -152,7 +152,7 @@ class Fixture:
         curl.write_text("#!/bin/sh\necho 'unexpected fixture network access' >&2\nexit 97\n")
         curl.chmod(0o755)
 
-    def archive(self, name: str, generation: str) -> None:
+    def archive(self, name: str, generation: str, failure: str = "") -> None:
         version = self.versions[name]
         directory = self.root / (name.lower() + "-source-" + generation)
         directory.mkdir()
@@ -176,6 +176,26 @@ class Fixture:
                              "cat >> Makefile <<'MAKE'\nall:\n\t@:\ninstall:\n"
                              "\tmkdir -p $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/lib/pkgconfig\n"
                              + install + "\nMAKE\n")
+        if name == "GNUTLS":
+            # Model the pinned tree: gl provides libgnu, lib builds/installs
+            # the runtime and headers. Top-level recursion enters unrelated
+            # src/gl tests even with --disable-tools and --disable-tests.
+            stages = {stage: ("\techo 'synthetic " + stage + " failure' >&2; exit 9\n")
+                      if stage == failure else "" for stage in ("gl", "lib", "install")}
+            configure.write_text(configure.read_text() +
+                "mkdir -p gl lib\nmv Makefile lib/Makefile\n" +
+                "cat > Makefile <<'MAKE'\nall install:\n" +
+                "\techo 'unexpected tool-support subtree' >&2; exit 8\nMAKE\n" +
+                "cat > gl/Makefile <<'MAKE'\nall:\n" + stages["gl"] +
+                "\ttouch ../built-gl\nMAKE\n" +
+                "cat >> lib/Makefile <<'MAKE'\n" +
+                "all: runtime\nruntime:\n\ttest -f ../built-gl\n" + stages["lib"] +
+                "\ttouch ../built-lib\n" +
+                "install: install-check\ninstall-check:\n\ttest -f ../built-lib\n" +
+                stages["install"] +
+                "\tmkdir -p $(PREFIX)/lib/pkgconfig\n" +
+                "\tprintf 'synthetic pkg-config metadata\\n' > $(PREFIX)/lib/pkgconfig/gnutls.pc\n" +
+                "MAKE\n")
         configure.chmod(0o755)
         notices = ["COPYING.LESSERv3", "COPYINGv2", "COPYINGv3", "AUTHORS"] if name == "NETTLE" else [
             "COPYING.LESSERv2", "COPYING", "AUTHORS", "lib/inih/LICENSE.txt"]
@@ -224,6 +244,33 @@ class Fixture:
 
 
 class TlsCacheContracts(unittest.TestCase):
+    def test_library_only_build_installs_runtime_and_headers(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-library-") as directory:
+            fixture = Fixture(Path(directory))
+            result = fixture.run()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            root = fixture.work / "root"
+            for name in ("lib/libgnutls.a", "include/gnutls/gnutls.h", "lib/pkgconfig/gnutls.pc"):
+                self.assertTrue((root / name).is_file(), name)
+            source = fixture.work / f"gnutls-{fixture.versions['GNUTLS']}"
+            self.assertTrue((source / "built-gl").is_file())
+            self.assertTrue((source / "built-lib").is_file())
+            self.assertNotIn("unexpected tool-support subtree", (source / "make.log").read_text())
+
+    def test_required_library_build_and_install_failures_propagate(self):
+        for stage in ("gl", "lib", "install"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(prefix="pw-tls-fail-") as directory:
+                fixture = Fixture(Path(directory))
+                fixture.archive("GNUTLS", "failed-" + stage, failure=stage)
+                fixture.update_script()
+                result = fixture.run()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("GnuTLS did not build", result.stderr)
+                self.assertFalse((fixture.work / "root/tls-build-manifest.json").exists())
+                source = fixture.work / f"gnutls-{fixture.versions['GNUTLS']}"
+                log = "install.log" if stage == "install" else "make.log"
+                self.assertIn("synthetic " + stage + " failure", (source / log).read_text())
+
     def test_selected_llvm_survives_the_clean_build_environment(self):
         with tempfile.TemporaryDirectory(prefix="pw-tls-llvm-select-") as directory:
             fixture = Fixture(Path(directory))

@@ -116,7 +116,12 @@ if [ ! -f "$out/lib/libgnutls.a" ]; then
             NETTLE_CFLAGS="-I$out/include" NETTLE_LIBS="-L$out/lib -lnettle" \
             HOGWEED_CFLAGS="-I$out/include" HOGWEED_LIBS="-L$out/lib -lhogweed" \
             GMP_CFLAGS="-I$out/include" GMP_LIBS="-L$out/lib -lhogweed" > configure.log 2>&1 &&
-        build_env make -j"$jobs" > make.log 2>&1 && build_env make install > install.log 2>&1) ||
+        # Top-level make still enters src/gl/tests with --disable-tools
+        # and --disable-tests. Build only the runtime library: gl supplies
+        # libgnu.la; lib owns all crypto backends, public headers and .pc.
+        build_env make -C gl -j"$jobs" > make.log 2>&1 &&
+        build_env make -C lib -j"$jobs" >> make.log 2>&1 &&
+        build_env make -C lib install > install.log 2>&1) ||
         fail "GnuTLS did not build; see $work/gnutls-$GNUTLS_VERSION/*.log"
     echo "built GnuTLS $GNUTLS_VERSION"
 fi

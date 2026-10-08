@@ -111,7 +111,11 @@ from the BDF driver. Their notices, from the FreeType source:
 
 ## TLS: `libgnutls.prx`, `secur32.prx` and `share/wine/ca-certificates.crt`
 
-`tools/build_tls_ps5.sh` builds dependencies for Wine's schannel.
+`tools/build_tls_ps5.sh` builds dependencies for Wine's schannel. The
+GnuTLS recipe builds its `gl` convenience archive and `lib` runtime subtree,
+then installs the library, public headers and pkg-config metadata from `lib`.
+It does not build the command-line tool support or run the upstream
+GnuTLS/gnulib test suites.
 In a runtime package, `secur32.prx` is Wine's own code, covered above.
 `libgnutls.prx` statically links [GnuTLS](https://www.gnutls.org) 3.8.13,
 under the GNU Lesser General Public License version 2.1 or later
