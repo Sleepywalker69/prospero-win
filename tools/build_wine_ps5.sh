@@ -60,6 +60,8 @@
 #       [--source DIR] [--host-tools DIR] [--foundation DIR] [--sdk DIR]
 #       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR]
 #       [--ps5-opengl-sdk DIR] [--jobs N]
+# LLVM_CONFIG selects LLVM 18 (default llvm-config-18); the same canonical
+# backend is used by the SDK and by TLS dependency provenance verification.
 set -eu
 
 WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8
@@ -194,6 +196,9 @@ fi
 
 sdk=${sdk:-$foundation/.deps/native/ps5-payload-sdk}
 [ -x "$sdk/bin/prospero-clang" ] || fail "no PS5 payload SDK at $sdk"
+LLVM_CONFIG=$(python3 "$root/tools/tls_manifest.py" select-llvm --sdk "$sdk") ||
+    fail "cannot select the supported LLVM 18 toolchain"
+export LLVM_CONFIG
 [ -x "$host_tools/tools/winebuild/winebuild" ] ||
     fail "no host Wine tools at $host_tools (run tools/build_wine_runtime.sh)"
 [ "$(git -C "$source_dir" rev-parse HEAD 2>/dev/null)" = "$WINE_COMMIT" ] ||

@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+from unittest.mock import patch
 import tempfile
 from pathlib import Path
 
@@ -120,6 +121,8 @@ def check_tls_reporting() -> None:
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(ROOT / "tools"))
     import tls_manifest
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_build_tls_ps5 import make_toolchain_fixture
     code = SCRIPT.read_text().split("$ordered <<'PY'\n", 1)[1].split("\nPY", 1)[0]
     with tempfile.TemporaryDirectory(prefix="pw-tls-report-") as directory:
         base = Path(directory)
@@ -129,7 +132,8 @@ def check_tls_reporting() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value)
 
-        for name in ("llvm-nm", "prospero-clang"):
+        llvm_config = make_toolchain_fixture(sdk, base / "host-llvm")
+        for name in ("llvm-nm",):
             path = sdk / "bin" / name
             write(path, "#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -138,7 +142,8 @@ def check_tls_reporting() -> None:
             write(tls / name, f"synthetic {name}")
         for name in (*tls_manifest.MODULES, *tls_manifest.NOTICES, "ca-certificates.crt"):
             write(prx / name, f"synthetic {name}")
-        tls_manifest.record(tls, tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk))
+        with patch.dict(os.environ, {"LLVM_CONFIG": str(llvm_config)}):
+            tls_manifest.record(tls, tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk))
         log, report = base / "make.log", base / "report.json"
         log.write_text("")
         env = dict(os.environ, PW_TLS_ROOT=str(tls), PW_TOOLS_ROOT=str(ROOT / "tools"),

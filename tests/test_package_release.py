@@ -9,6 +9,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from unittest.mock import patch
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,8 @@ SCRIPT = ROOT / "tools" / "package_release.sh"
 sys.path.insert(0, str(ROOT / "tools"))
 sys.dont_write_bytecode = True
 import tls_manifest
+sys.path.insert(0, str(ROOT / "tests"))
+from test_build_tls_ps5 import make_toolchain_fixture
 
 
 def write(path: Path, data: str = "x") -> None:
@@ -66,14 +69,15 @@ def main() -> int:
         # versions come from this record, never the packager's current pins.
         tls_root = root / "tls"
         sdk = root / "sdk"
-        write(sdk / "bin/prospero-clang", "synthetic compiler")
+        llvm_config = make_toolchain_fixture(sdk, root / "host-llvm")
         for name in tls_manifest.ARCHIVES:
             write(tls_root / name, f"synthetic archive {name}")
         write(tls_root / "include/gnutls/gnutls.h", "synthetic GnuTLS public header")
         for name in tls_manifest.NOTICES:
             write(tls_root / name, (ps5 / "prx" / name).read_text())
         write(tls_root / "ca-certificates.crt", "roots")
-        built_inputs = tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk)
+        with patch.dict("os.environ", {"LLVM_CONFIG": str(llvm_config)}):
+            built_inputs = tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk)
         tls_manifest.record(tls_root, built_inputs)
         report["tls"] = tls_manifest.runtime_record(tls_root, ps5 / "prx")
         write(ps5 / "report.json", json.dumps(report))

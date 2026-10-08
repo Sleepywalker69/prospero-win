@@ -16,6 +16,9 @@
 # Usage: tools/build_tls_ps5.sh [--work DIR] [--sdk DIR] [--jobs N]
 #   work   .deps/wine-ps5/tls by default: tarballs, source trees and root/
 #   sdk    the payload SDK (PS5_PAYLOAD_SDK, or the pinned foundation's)
+# LLVM_CONFIG may select an LLVM 18 executable (default llvm-config-18).
+# Other LLVM majors are unsupported. Its canonical path, real backend tools
+# and clang resource headers become part of the verified build identity.
 # root/ holds lib/ and include/ for the Wine build, ca-certificates.crt and
 # licenses/{gnutls,nettle}.
 set -eu
@@ -54,6 +57,12 @@ fetch() {
 fetch "$NETTLE_URL" "nettle-$NETTLE_VERSION.tar.gz" "$NETTLE_SHA256"
 fetch "$GNUTLS_URL" "gnutls-$GNUTLS_VERSION.tar.xz" "$GNUTLS_SHA256"
 fetch "$CA_BUNDLE_URL" "cacert-$CA_BUNDLE_DATE.pem" "$CA_BUNDLE_SHA256"
+# The SDK wrappers dispatch to host LLVM. Pin their one supported backend
+# before any SDK command; a bare LLVM_CONFIG name is resolved here rather
+# than left to the SDK wrapper's working-directory-relative readlink.
+LLVM_CONFIG=$(python3 "$root/tools/tls_manifest.py" select-llvm --sdk "$sdk") ||
+    fail "cannot select the supported LLVM 18 toolchain"
+export LLVM_CONFIG
 # An archive's existence says nothing about which source or SDK built it.
 # Check all installed artifacts and their input identity before reusing any
 # of them; replace a stale/incomplete installation as one dependency set.
@@ -77,6 +86,7 @@ build_env() {
     env -i PATH="$PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
         LC_ALL=C TZ=UTC SOURCE_DATE_EPOCH=1000000000 CONFIG_SITE=/dev/null \
         PS5_PAYLOAD_SDK="$sdk" \
+        LLVM_CONFIG="$LLVM_CONFIG" \
         CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP=true \
         CFLAGS="$CFLAGS" CXXFLAGS="$CFLAGS" CPPFLAGS= LIBS= LDFLAGS="$LDFLAGS" \
         PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" PKG_CONFIG_PATH="$PKG_CONFIG_PATH" "$@"
