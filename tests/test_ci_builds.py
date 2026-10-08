@@ -120,6 +120,35 @@ target_run = next(step["run"] for step in tls["steps"] if step.get("name") ==
                   "Cross-compile native adapters and check target outputs")
 probe = next(line for line in target_run.splitlines() if " -dM " in line)
 assert "-D__PROSPERO__" not in probe, "target predefines must be observed, not supplied"
+# Original fixture for the public SDK v0.42 wrapper policy: -E alone
+# appends crt1.o, and the active '-x c' would parse it as C. The real SDK
+# defines target macros; this fixture tests only invocation/CRT handling.
+with tempfile.TemporaryDirectory(prefix="pw-ci-sdk-probe-") as directory:
+    root = Path(directory)
+    (root / "sdk/bin").mkdir(parents=True)
+    (root / "tls-evidence").mkdir()
+    wrapper = root / "sdk/bin/prospero-clang"
+    wrapper.write_text("#!/bin/sh\ncrt=crt1.o\n"
+                       "for arg in \"$@\"; do\n"
+                       " case $arg in -c|-nostartfiles|-shared) crt= ;; esac\ndone\n"
+                       "printf '%s\\n' \"$@\" \"$crt\" > \"$PW_ARGUMENT_LOG\"\n"
+                       "if [ -n \"$crt\" ]; then echo 'CRT object passed to C preprocessor' >&2; exit 41; fi\n"
+                       "printf '#define __FreeBSD__ 9\\n#define __x86_64__ 1\\n#define __PROSPERO__ 1\\n'\n")
+    wrapper.chmod(0o755)
+    arguments = root / "arguments.txt"
+    env = dict(os.environ, sdk=str(root / "sdk"), RUNNER_TEMP=directory, PW_ARGUMENT_LOG=str(arguments))
+    def run_probe(command):
+        return subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+                              env=env, capture_output=True, text=True)
+    good = run_probe(probe)
+    assert good.returncode == 0, good.stderr
+    forwarded = arguments.read_text().splitlines()
+    assert all(flag in forwarded for flag in ("-c", "-dM", "-E", "-x", "c", "/dev/null"))
+    assert "crt1.o" not in forwarded
+    assert not any(arg.startswith("-D") for arg in forwarded), "do not fabricate observed target macros"
+    bad = run_probe(probe.replace(" -c ", " "))
+    assert bad.returncode == 41 and "CRT object" in bad.stderr
+    assert "crt1.o" in arguments.read_text().splitlines()
 with tempfile.TemporaryDirectory(prefix="pw-ci-rejection-") as directory:
     root = Path(directory)
     (root / "tls-evidence/objects").mkdir(parents=True)
