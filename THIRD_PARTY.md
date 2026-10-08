@@ -121,7 +121,11 @@ The local `tools/patches/gnutls-3.8.13-kern-arnd-headers.patch` adds
 and its released generated script. This fixes the declaration order for
 `size_t`; it preserves compile/link detection and does not force an entropy
 backend or establish that the console kernel supplies usable entropy.
-The exact patch digest is part of the TLS build manifest and `SOURCES.txt`.
+The release recipe uses GnuTLS's `--disable-maintainer-mode` because both
+source and generated configure are patched; it does not regenerate upstream
+Autotools files. Required library compilation and installation still fail
+normally on errors. The exact patch digest is part of the TLS build manifest
+and `SOURCES.txt`.
 In a runtime package, `secur32.prx` is Wine's own code, covered above.
 `libgnutls.prx` statically links [GnuTLS](https://www.gnutls.org) 3.8.13,
 under the GNU Lesser General Public License version 2.1 or later
