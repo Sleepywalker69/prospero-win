@@ -1,0 +1,259 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Software GDI diagnostic kit
+'on':
+  pull_request:
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - labeled
+    - unlabeled
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: diagnostic-kit-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  diagnostic-kit:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name
+      == github.repository && contains(github.event.pull_request.labels.*.name, 'build-diagnostic-kit')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      BUILD_JOBS: '4'
+      LLVM_CONFIG: /usr/bin/llvm-config-18
+      FOUNDATION: ${{ github.workspace }}/.deps/diagnostic-kit/prx-foundation
+      WINE_SOURCE: ${{ github.workspace }}/.deps/diagnostic-kit/wine-source
+      HOST_BUILD: ${{ github.workspace }}/.deps/diagnostic-kit/host/build
+      WINE_WORK: ${{ github.workspace }}/.deps/diagnostic-kit/wine-prx
+      TLS_WORK: ${{ github.workspace }}/.deps/diagnostic-kit/tls
+      XDG_CACHE_HOME: ${{ github.workspace }}/.deps/diagnostic-kit/cache
+      LC_ALL: C
+      TZ: UTC
+      SOURCE_DATE_EPOCH: '1000000000'
+      HOST_WORK: ${{ github.workspace }}/.deps/diagnostic-kit/host
+      CPU_OUT: ${{ github.workspace }}/.deps/diagnostic-kit/cpus
+      SDK_SOURCE: ${{ github.workspace }}/.deps/diagnostic-kit/sdk-source
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        persist-credentials: 'false'
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      with:
+        python-version: '3.12'
+    - name: Install complete build and prefix-smoke prerequisites
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends build-essential clang clang-18 lld-18 llvm-18 llvm-18-dev \
+          bison flex gcc-mingw-w64 g++-mingw-w64 pkg-config m4 patch curl wget unzip zip xvfb xauth \
+          libx11-dev libxext-dev libfreetype-dev libfontconfig-dev libvulkan-dev libgnutls28-dev \
+          libasound2-dev libpulse-dev zlib1g-dev
+        python3 -m pip install pyyaml==6.0.1
+        mkdir -p "$RUNNER_TEMP/diagnostic-evidence"
+        python3 tools/check_setup.py --wine
+    - name: Require ordinary host and sanitizer gates
+      timeout-minutes: 20
+      run: |
+        make -j2 all 2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/all.log"
+        make -j2 sanitize 2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/sanitize.log"
+    - name: Build the full matching host Wine first
+      timeout-minutes: 180
+      run: |
+        {
+          git log -1 --format='%H%n%T'
+          pin=$(sed -n 's/^WINE_COMMIT=//p' tools/build_wine_ps5.sh)
+          [[ $pin == 490f6d5dcbb2a5047345b8af88d114bbcaad69a8 ]]
+          git init --quiet "$WINE_SOURCE"
+          git -C "$WINE_SOURCE" remote add origin https://github.com/wine-mirror/wine.git
+          git -C "$WINE_SOURCE" fetch --depth=1 origin "$pin"
+          git -C "$WINE_SOURCE" checkout --detach FETCH_HEAD
+          [[ $(git -C "$WINE_SOURCE" rev-parse HEAD) == "$pin" ]]
+          CC=clang-18 CXX=clang++-18 tools/build_host_wine.sh --source "$WINE_SOURCE" --work "$HOST_WORK" --jobs "$BUILD_JOBS"
+          "$HOST_WORK/install/usr/bin/wine" --version
+        } 2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/host-wine.log"
+    - name: Checkpoint host runtime with matching source and notices
+      run: |
+        python3 tools/package_diagnostic_kit.py host-checkpoint --host-work "$HOST_WORK" \
+          --wine-source "$WINE_SOURCE" --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+          --out "$RUNNER_TEMP/host-checkpoint"
+        tar -czf "$RUNNER_TEMP/host-wine-checkpoint.tar.gz" -C "$RUNNER_TEMP/host-checkpoint" .
+    - name: Retain completed host prerequisite even if later steps fail
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: host-wine-checkpoint-${{ github.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/host-wine-checkpoint.tar.gz
+        if-no-files-found: error
+        retention-days: 3
+    - name: Initialize a real disposable Notepad prefix without vendor code
+      timeout-minutes: 10
+      run: |
+        xvfb-run -a python3 tools/pw_install.py "$RUNNER_TEMP/host-checkpoint/pc/recipes/diagnostic-notepad.yml" \
+          --library "$RUNNER_TEMP/prefix-smoke" --wine "$RUNNER_TEMP/host-checkpoint/pc/host-wine/usr/bin/wine" --resolution 800x600 \
+          2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/prefix-smoke.log"
+        for registry in system.reg user.reg userdef.reg; do
+          test -s "$RUNNER_TEMP/prefix-smoke/prefixes/diagnostic-notepad/$registry"
+        done
+    - name: Build the native title using its unchanged pinned foundation
+      timeout-minutes: 20
+      env:
+        PS5LOG_DEV_CONF: ${{ runner.temp }}/no-private-dev-conf
+      run: |
+        tools/build_native.sh 2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/native-title.log"
+        readelf -h build/native/eboot.elf
+        test -x dist/PPSA99995/eboot.bin
+        test ! -e dist/PPSA99995/dev.conf
+    - name: Build the pinned public converter and SDK
+      run: |
+        mkdir -p "$RUNNER_TEMP/prx-evidence"
+        {
+          git rev-parse HEAD
+          uname -a
+          dpkg-query -W clang-18 lld-18 llvm-18 llvm-18-dev gcc-mingw-w64 g++-mingw-w64 bison flex
+          pin=$(sed -n 's/^MODULE_EXPORTS_COMMIT=//p' tools/build_wine_ps5.sh)
+          [[ $pin == 30597512539e7edfde079cbcaf4a626bc0a948c5 ]]
+          git init --quiet "$FOUNDATION"
+          git -C "$FOUNDATION" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+          git -C "$FOUNDATION" fetch --depth=1 origin "$pin"
+          git -C "$FOUNDATION" checkout --detach FETCH_HEAD
+          [[ $(git -C "$FOUNDATION" rev-parse HEAD) == "$pin" ]]
+          bash "$FOUNDATION/tools/setup-native-dependencies.sh"
+          sdk="$FOUNDATION/.deps/native/ps5-payload-sdk"
+          python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
+          printf 'PS5_PAYLOAD_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+          native="$FOUNDATION/tooling/native"
+          zroot="$FOUNDATION/.deps/native/zlib/root"
+          zarchive=$(find "$zroot" -type f -name libz.a -print -quit)
+          test -n "$zarchive"
+          mkdir -p "$FOUNDATION/build/host"
+          # The exact converter-only command in the pinned build-module.sh.
+          clang++-18 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zroot/usr/include" \
+            "$native/native_app_builder.cpp" "$native/self_container.cpp" \
+            "$native/elf_object.cpp" "$native/sce_module_writer.cpp" \
+            "$zarchive" -o "$FOUNDATION/build/host/ps5-native-tool"
+          sha256sum "$FOUNDATION/build/host/ps5-native-tool" "$zarchive"
+        } 2>&1 | tee "$RUNNER_TEMP/prx-evidence/bootstrap.log"
+    - name: Build real TLS dependencies for this SDK path
+      run: |
+        tools/build_tls_ps5.sh --sdk "$PS5_PAYLOAD_SDK" --work "$TLS_WORK" --jobs "$BUILD_JOBS" \
+          2>&1 | tee "$RUNNER_TEMP/prx-evidence/tls-build.log"
+        python3 tools/tls_manifest.py verify --root "$TLS_WORK/root" \
+          --script tools/build_tls_ps5.sh --sdk "$PS5_PAYLOAD_SDK"
+    - name: Require the observed SDK target and compiled BSD entropy backend
+      run: |
+        "$PS5_PAYLOAD_SDK/bin/prospero-clang" -c -dM -E -x c /dev/null > "$RUNNER_TEMP/prx-evidence/predefines.txt"
+        for macro in __FreeBSD__ __x86_64__ __PROSPERO__; do
+          grep -q "^#define $macro " "$RUNNER_TEMP/prx-evidence/predefines.txt"
+        done
+        python3 - "$TLS_WORK" "$("$LLVM_CONFIG" --bindir)" <<'PY'
+        from pathlib import Path
+        import re, subprocess, sys
+        version = re.search(r'^GNUTLS_VERSION=(.+)$', Path('tools/build_tls_ps5.sh').read_text(), re.M).group(1)
+        source = Path(sys.argv[1]) / ('gnutls-' + version)
+        config = (source / 'config.h').read_text().splitlines()
+        if '#define HAVE_KERN_ARND 1' not in config or '#define HAVE_GETENTROPY 1' in config:
+            raise SystemExit('unexpected configured entropy backend')
+        objects = list((source / 'lib/nettle').rglob('*sysrng-netbsd*.o'))
+        if not objects:
+            raise SystemExit('BSD entropy object was not compiled')
+        for obj in objects:
+            result = subprocess.run([str(Path(sys.argv[2]) / 'llvm-nm'), '--undefined-only', str(obj)],
+                                    check=True, capture_output=True, text=True)
+            if not re.search(r'\bU\s+sysctl$', result.stdout, re.M):
+                raise SystemExit('BSD entropy object has no sysctl import')
+            print(obj, result.stdout.strip())
+        PY
+    - name: Run the existing Wine PRX builder without external graphics
+      run: |
+        env -u PS5VK_SDK -u PROSPERO_RADV -u PS5_OPENGL_SDK -u PROSPERO_CA_BUNDLE \
+          PROSPERO_TLS_ROOT="$TLS_WORK/root" CFLAGS='-O2 -g' \
+          tools/build_wine_ps5.sh --source "$WINE_SOURCE" --host-tools "$HOST_BUILD" \
+          --foundation "$FOUNDATION" --prx-foundation "$FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" \
+          --work "$WINE_WORK" --jobs "$BUILD_JOBS" 2>&1 | tee "$RUNNER_TEMP/prx-evidence/wine-build.log"
+      timeout-minutes: 90
+    - name: Reject skipped modules and independently inspect actual artifacts
+      run: |
+        python3 tools/check_wine_prx_build.py --work "$WINE_WORK" --sdk "$PS5_PAYLOAD_SDK" \
+          --foundation "$FOUNDATION" --llvm-bindir "$("$LLVM_CONFIG" --bindir)" \
+          --output "$RUNNER_TEMP/prx-evidence/inspection" 2>&1 | tee "$RUNNER_TEMP/prx-evidence/acceptance.log"
+    - name: Build both real CPU backends with explicit matching inputs
+      timeout-minutes: 20
+      run: |
+        {
+          tools/build_wowprospero.sh --source "$HOST_WORK/source" --build "$HOST_BUILD" \
+            --output "$CPU_OUT/wowprospero" --jobs "$BUILD_JOBS"
+          stubs="$CPU_OUT/title-stubs"
+          mkdir -p "$stubs"
+          # Exact public SDK files, as required by build_wow64native.sh; no invented providers.
+          for file in "$PS5_PAYLOAD_SDK"/target/lib/*.so; do
+            case "${file##*/}" in libkernel_web.so|libkernel_stub_weak.so|libkernel_sys.so|libScePosixForWebKit.so) continue ;; esac
+            cp -L "$file" "$stubs/"
+          done
+          tools/build_wow64native.sh --source "$HOST_WORK/source" --build "$HOST_BUILD" \
+            --output "$CPU_OUT/wow64native" --ps5-sdk "$PS5_PAYLOAD_SDK" --ps5-wine "$WINE_WORK" \
+            --ps5-ntdll "$WINE_WORK/prx/ntdll.shared.elf" --ps5-foundation "$FOUNDATION" --ps5-stubs "$stubs"
+          readelf -h "$CPU_OUT/wow64native/ps5/wow64native.shared.elf"
+          "$FOUNDATION/build/host/ps5-native-tool" self --inspect --file "$CPU_OUT/wow64native/ps5/wow64native.prx"
+          sha256sum "$CPU_OUT/wowprospero/x86_64-windows/wowprospero.dll" \
+            "$CPU_OUT/wow64native/x86_64-windows/wow64native.dll" "$CPU_OUT/wow64native/ps5/wow64native.prx"
+        } 2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/cpu-backends.log"
+    - name: Bind the public SDK source matching the pinned release
+      run: |
+        git init --quiet "$SDK_SOURCE"
+        git -C "$SDK_SOURCE" remote add origin https://github.com/ps5-payload-dev/sdk.git
+        git -C "$SDK_SOURCE" fetch --depth=1 origin 4eb701204fc3f8d31e84cf8ca272974e2be9c867
+        git -C "$SDK_SOURCE" checkout --detach FETCH_HEAD
+        [[ $(git -C "$SDK_SOURCE" rev-parse HEAD) == 4eb701204fc3f8d31e84cf8ca272974e2be9c867 ]]
+    - name: Assemble the software-GDI diagnostic kit using supported package inputs
+      run: |
+        python3 tools/package_diagnostic_kit.py software-gdi-kit --host-work "$HOST_WORK" \
+          --wine-source "$WINE_SOURCE" --wine-work "$WINE_WORK" --tls-work "$TLS_WORK" \
+          --native-foundation "$GITHUB_WORKSPACE/.deps/ps5-native-app-boilerplate" --prx-foundation "$FOUNDATION" \
+          --native-cpu "$CPU_OUT/wow64native" --cpu-dll "$CPU_OUT/wowprospero/x86_64-windows/wowprospero.dll" \
+          --sdk "$PS5_PAYLOAD_SDK" --sdk-source "$SDK_SOURCE" --smoke-prefix "$RUNNER_TEMP/prefix-smoke/prefixes/diagnostic-notepad" \
+          --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/software-gdi-kit" \
+          2>&1 | tee "$RUNNER_TEMP/diagnostic-evidence/package.log"
+        (cd "$RUNNER_TEMP/software-gdi-kit" && sha256sum --check SHA256SUMS)
+        tar -czf "$RUNNER_TEMP/prospero-software-gdi-diagnostic.tar.gz" -C "$RUNNER_TEMP/software-gdi-kit" .
+    - name: Upload the completed diagnostic kit only after successful prerequisites
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: software-gdi-diagnostic-${{ github.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/prospero-software-gdi-diagnostic.tar.gz
+        if-no-files-found: error
+        retention-days: 7
+    - name: Preserve raw producer evidence even when later stages fail
+      if: ${{ always() }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/diagnostic-evidence/configuration"
+        python3 - "$HOST_WORK" "$WINE_WORK" "$TLS_WORK" "$RUNNER_TEMP/diagnostic-evidence/configuration" <<'PYCODE'
+        from pathlib import Path
+        import shutil, sys
+        out = Path(sys.argv[-1])
+        for index, name in enumerate(sys.argv[1:-1]):
+            root = Path(name)
+            if not root.is_dir():
+                continue
+            for pattern in ('**/config.log', '**/configure.log', '**/make.log', '**/install.log', '**/*.link.log', '**/report.json'):
+                for path in root.glob(pattern):
+                    if path.is_file() and path.stat().st_size < 32 * 1024 * 1024:
+                        target = out / str(index) / path.relative_to(root)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(path, target)
+        PYCODE
+    - name: Retain diagnostic and PRX checker logs
+      if: ${{ always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: diagnostic-kit-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |-
+          ${{ runner.temp }}/diagnostic-evidence/
+          ${{ runner.temp }}/prx-evidence/
+          ${{ runner.temp }}/software-gdi-kit/provenance/native-cpu-inspection/
+        if-no-files-found: warn
+        retention-days: 7
