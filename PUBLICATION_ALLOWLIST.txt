@@ -518,3 +518,8 @@ wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
 
 tools/check_wine_prx_build.py
 tests/test_check_wine_prx_build.py
+
+.github/workflows/diagnostic-kit.yml
+tools/package_diagnostic_kit.py
+tests/test_diagnostic_kit.py
+docs/DIAGNOSTIC_KIT.md
