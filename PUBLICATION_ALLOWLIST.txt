@@ -499,3 +499,8 @@ tests/test_vk_generated_stage.py
 tests/lab/vk_generated_replay.c
 
 tests/lab/vk_batch_owned.c
+
+tests/test_build_tls_ps5.py
+tools/build_tls_ps5.sh
+tools/tls_manifest.py
+tools/patches/nettle-3.10.1-ed448-canonical.patch
