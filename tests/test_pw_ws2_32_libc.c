@@ -3,6 +3,7 @@
  * reach wine/ps5/pw_ws2_32_libc.c and not glibc's resolver. */
 #include <arpa/inet.h>
 #include <assert.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -12,6 +13,7 @@
 #include <unistd.h>
 
 int *__h_errno(void);
+#include "../wine/ps5/pw_ws2_32_resolver.h"
 
 static int count(const struct addrinfo *info)
 {
@@ -46,6 +48,193 @@ static struct addrinfo hints_of(int family, int socktype, int protocol, int flag
     hints.ai_protocol = protocol;
     hints.ai_flags = flags;
     return hints;
+}
+
+/* A resolver backend as the console's: example.com has one address per
+ * family; anything else is unknown. Counts its calls, so the names the
+ * stub answers itself are seen to stay away from it. */
+static int backend_calls;
+static long long fake_now = 1000;
+static long long fake_clock(void) { return fake_now; }
+static int fake_resolve(const char *name, int family, struct pw_ws2_address answers[2], int *found)
+{
+    backend_calls++;
+    *found = 0;
+    if (strcmp(name, "example.com"))
+        return EAI_NONAME;
+    if (family != AF_INET6) {
+        answers[*found].family = AF_INET;
+        memcpy(answers[*found].bytes, "\x5d\xb8\xd8\x22", 4);     /* 93.184.216.34 */
+        (*found)++;
+    }
+    if (family != AF_INET) {
+        static const unsigned char six[16] = { 0x26, 0x06, 0x28, 0x00, [15] = 0x46 };
+        answers[*found].family = AF_INET6;
+        memcpy(answers[*found].bytes, six, 16);
+        (*found)++;
+    }
+    return 0;
+}
+
+static void test_resolver_backend(void)
+{
+    struct addrinfo hints = {0}, *info;
+    struct hostent *host;
+
+    pw_ws2_32_resolve = fake_resolve;
+    pw_ws2_32_now = fake_clock;
+    backend_calls = 0;
+    /* A real name: the backend's answers, IPv4 first, TCP and UDP each. */
+    assert(!getaddrinfo("example.com", "443", NULL, &info));
+    assert(count(info) == 4 && info->ai_family == AF_INET && !strcmp(text(info), "93.184.216.34"));
+    assert(info->ai_socktype == SOCK_STREAM && ntohs(((struct sockaddr_in *)info->ai_addr)->sin_port) == 443);
+    assert(info->ai_next->ai_next->ai_family == AF_INET6);
+    freeaddrinfo(info);
+    assert(backend_calls == 1);
+    /* The family asked for is passed on, and the canonical name is the name. */
+    hints.ai_family = AF_INET6; hints.ai_socktype = SOCK_STREAM; hints.ai_flags = AI_CANONNAME;
+    assert(!getaddrinfo("example.com", NULL, &hints, &info));
+    assert(count(info) == 1 && info->ai_family == AF_INET6 && !strcmp(info->ai_canonname, "example.com"));
+    freeaddrinfo(info);
+    /* gethostbyname goes through it too, IPv4 only. */
+    host = gethostbyname("example.com");
+    assert(host && host->h_addrtype == AF_INET && !strcmp(host->h_name, "example.com") &&
+           !memcmp(host->h_addr_list[0], "\x5d\xb8\xd8\x22", 4));
+    /* What the backend does not know stays unknown; what needs no backend
+     * never reaches it: numeric addresses, AI_NUMERICHOST and localhost. */
+    assert(backend_calls == 3);
+    assert(getaddrinfo("nowhere.invalid", "80", NULL, &info) == EAI_NONAME && !info && backend_calls == 4);
+    memset(&hints, 0, sizeof(hints)); hints.ai_flags = AI_NUMERICHOST;
+    assert(getaddrinfo("example.com", "80", &hints, &info) == EAI_NONAME && !info);
+    assert(!getaddrinfo("127.0.0.1", "80", NULL, &info)); freeaddrinfo(info);
+    assert(!getaddrinfo("localhost", "80", NULL, &info)); freeaddrinfo(info);
+    assert(backend_calls == 4);
+    /* A single-label name never reaches the backend: not found at once,
+     * through getaddrinfo and gethostbyname alike (the PC's computer name
+     * in a prefix, which GTA IV asks for tens of thousands of times a
+     * minute), while a dotted one does. */
+    assert(getaddrinfo("DESKTOP-PC", "80", NULL, &info) == EAI_NONAME && !info);
+    assert(!gethostbyname("desktop-pc") && *__h_errno() == HOST_NOT_FOUND);
+    assert(getaddrinfo("desktop-pc", NULL, NULL, &info) == EAI_NONAME && !info);
+    assert(backend_calls == 4);
+    assert(getaddrinfo("desktop-pc.lan", "80", NULL, &info) == EAI_NONAME && !info && backend_calls == 5);
+    pw_ws2_32_resolve = NULL;
+}
+
+/* A name the backend did not know is answered from the negative cache for
+ * PW_WS2_32_NEGATIVE_SECONDS, per family asked, then asked again; the
+ * table holds 16 names and replaces the oldest. */
+static void test_negative_cache(void)
+{
+    struct addrinfo hints = {0}, *info;
+    char name[32];
+    int i;
+
+    pw_ws2_32_resolve = fake_resolve;
+    pw_ws2_32_now = fake_clock;
+    fake_now = 5000;
+    backend_calls = 0;
+    assert(getaddrinfo("gone.invalid", "80", NULL, &info) == EAI_NONAME && backend_calls == 1);
+    assert(getaddrinfo("gone.invalid", "80", NULL, &info) == EAI_NONAME && backend_calls == 1);
+    assert(getaddrinfo("GONE.invalid", "443", NULL, &info) == EAI_NONAME && backend_calls == 1);
+    assert(!gethostbyname("gone.invalid") && *__h_errno() == HOST_NOT_FOUND && backend_calls == 2);  /* AF_INET: its own entry */
+    assert(!gethostbyname("gone.invalid") && backend_calls == 2);
+    hints.ai_family = AF_INET6;
+    assert(getaddrinfo("gone.invalid", "80", &hints, &info) == EAI_NONAME && backend_calls == 3);
+    fake_now += PW_WS2_32_NEGATIVE_SECONDS - 1;
+    assert(getaddrinfo("gone.invalid", "80", NULL, &info) == EAI_NONAME && backend_calls == 3);
+    fake_now += 1;
+    assert(getaddrinfo("gone.invalid", "80", NULL, &info) == EAI_NONAME && backend_calls == 4);
+    /* A known name is not cached as unknown, and the window is per entry. */
+    assert(!getaddrinfo("example.com", "80", NULL, &info) && backend_calls == 5); freeaddrinfo(info);
+    assert(!getaddrinfo("example.com", "80", NULL, &info) && backend_calls == 6); freeaddrinfo(info);
+    /* Sixteen fresh failures push the oldest entry out. */
+    backend_calls = 0;
+    for (i = 0; i < 16; i++) {
+        snprintf(name, sizeof(name), "host%d.invalid", i);
+        assert(getaddrinfo(name, "80", NULL, &info) == EAI_NONAME);
+    }
+    assert(backend_calls == 16);
+    assert(getaddrinfo("gone.invalid", "80", NULL, &info) == EAI_NONAME && backend_calls == 17);
+    assert(getaddrinfo("host15.invalid", "80", NULL, &info) == EAI_NONAME && backend_calls == 17);
+    pw_ws2_32_resolve = NULL;
+}
+
+static int backend_error, backend_count, backend_family;
+static int controlled_resolve(const char *name, int family, struct pw_ws2_address answers[2], int *found)
+{
+    (void)name;
+    (void)family;
+    backend_calls++;
+    *found = backend_count;
+    answers[0].family = backend_family;
+    return backend_error;
+}
+
+static void test_resolver_failures(void)
+{
+    struct addrinfo hints = hints_of(AF_INET, SOCK_STREAM, 0, 0), *info;
+
+    pw_ws2_32_resolve = controlled_resolve;
+    pw_ws2_32_now = fake_clock;
+    fake_now = 10000;
+    backend_calls = 0;
+    backend_count = 0;
+    backend_error = EAI_AGAIN;
+    /* A short outage backoff must keep the temporary-failure error. */
+    assert(getaddrinfo("retry.invalid", "443", &hints, &info) == EAI_AGAIN && !info);
+    assert(getaddrinfo("RETRY.invalid", "443", &hints, &info) == EAI_AGAIN && !info);
+    assert(backend_calls == 1);
+    assert(!gethostbyname("retry.invalid") && *__h_errno() == TRY_AGAIN);
+    assert(backend_calls == 1);
+    fake_now += PW_WS2_32_NEGATIVE_SECONDS;
+    backend_error = 0;
+    backend_count = 1;
+    backend_family = AF_INET;
+    assert(!getaddrinfo("retry.invalid", "443", &hints, &info));
+    freeaddrinfo(info);
+    assert(backend_calls == 2);
+    backend_error = EAI_FAIL;
+    assert(!gethostbyname("broken.invalid") && *__h_errno() == NO_RECOVERY);
+    backend_error = EAI_NONAME;
+    assert(!gethostbyname("absent.invalid") && *__h_errno() == HOST_NOT_FOUND);
+
+    /* A backend's invalid count/family must not reach the result builder. */
+    backend_error = 0;
+    backend_count = -1;
+    assert(getaddrinfo("negative-count.invalid", NULL, &hints, &info) == EAI_FAIL && !info);
+    backend_count = 3;
+    assert(getaddrinfo("large-count.invalid", NULL, &hints, &info) == EAI_FAIL && !info);
+    backend_count = 1;
+    backend_family = AF_UNIX;
+    assert(getaddrinfo("bad-family.invalid", NULL, &hints, &info) == EAI_FAIL && !info);
+    backend_family = AF_INET6;
+    assert(getaddrinfo("wrong-family.invalid", NULL, &hints, &info) == EAI_FAIL && !info);
+
+    /* Failed or unrepresentable clocks disable caching, without overflow. */
+    backend_error = EAI_NONAME;
+    backend_count = 0;
+    for (int i = 0; i < 2; i++) {
+        fake_now = i ? LLONG_MAX : -1;
+        int calls = backend_calls;
+        assert(getaddrinfo("clock.invalid", NULL, &hints, &info) == EAI_NONAME && !info);
+        assert(getaddrinfo("clock.invalid", NULL, &hints, &info) == EAI_NONAME && !info);
+        assert(backend_calls == calls + 2);
+    }
+    pw_ws2_32_resolve = NULL;
+}
+
+static void test_numeric_without_backend(void)
+{
+    struct addrinfo hints = hints_of(AF_INET6, SOCK_STREAM, 0, 0), *info;
+
+    pw_ws2_32_resolve = fake_resolve;
+    backend_calls = 0;
+    assert(getaddrinfo("127.0.0.2", NULL, &hints, &info) == EAI_NONAME && !info);
+    hints.ai_family = AF_INET;
+    assert(getaddrinfo("::ffff:127.0.0.2", NULL, &hints, &info) == EAI_NONAME && !info);
+    assert(backend_calls == 0);
+    pw_ws2_32_resolve = NULL;
 }
 
 static void test_numeric(void)
@@ -276,6 +465,10 @@ int main(void)
     test_free_chain();
     test_getnameinfo();
     test_hostent();
+    test_resolver_backend();
+    test_negative_cache();
+    test_numeric_without_backend();
+    test_resolver_failures();
     puts("pw_ws2_32_libc: ok");
     return 0;
 }
