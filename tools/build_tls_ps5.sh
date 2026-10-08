@@ -107,6 +107,9 @@ fi
 if [ ! -f "$out/lib/libgnutls.a" ]; then
     rm -rf "$work/gnutls-$GNUTLS_VERSION"
     tar -xJf "$work/gnutls-$GNUTLS_VERSION.tar.xz" -C "$work"
+    patch --batch --forward --fuzz=0 -p1 -d "$work/gnutls-$GNUTLS_VERSION" \
+        < "$root/tools/patches/gnutls-3.8.13-kern-arnd-headers.patch" ||
+        fail "cannot apply the GnuTLS BSD entropy-probe header fix"
     (cd "$work/gnutls-$GNUTLS_VERSION" &&
         build_env ./configure --host=$host --prefix="$out" --disable-shared --enable-static \
             --with-included-libtasn1 --with-included-unistring --without-p11-kit --without-idn \

@@ -116,6 +116,12 @@ GnuTLS recipe builds its `gl` convenience archive and `lib` runtime subtree,
 then installs the library, public headers and pkg-config metadata from `lib`.
 It does not build the command-line tool support or run the upstream
 GnuTLS/gnulib test suites.
+The local `tools/patches/gnutls-3.8.13-kern-arnd-headers.patch` adds
+`sys/types.h` before `sys/sysctl.h` in both the BSD entropy configure probe
+and its released generated script. This fixes the declaration order for
+`size_t`; it preserves compile/link detection and does not force an entropy
+backend or establish that the console kernel supplies usable entropy.
+The exact patch digest is part of the TLS build manifest and `SOURCES.txt`.
 In a runtime package, `secur32.prx` is Wine's own code, covered above.
 `libgnutls.prx` statically links [GnuTLS](https://www.gnutls.org) 3.8.13,
 under the GNU Lesser General Public License version 2.1 or later
