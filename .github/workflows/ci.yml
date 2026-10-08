@@ -285,7 +285,8 @@ jobs:
           cp -a "$TLS_WORK/root" "$stage/dependencies"
           cp -a "$TLS_WORK/adapters" "$stage/"
           cp "$TLS_WORK"/nettle-*.tar.gz "$TLS_WORK"/gnutls-*.tar.xz "$TLS_WORK"/cacert-*.pem "$stage/sources/"
-          cp tools/patches/nettle-3.10.1-ed448-canonical.patch "$stage/sources/"
+          cp tools/patches/nettle-3.10.1-ed448-canonical.patch \
+            tools/patches/gnutls-3.8.13-kern-arnd-headers.patch "$stage/sources/"
           cp tools/build_tls_ps5.sh tools/tls_manifest.py "$stage/provenance/"
           foundation="$GITHUB_WORKSPACE/.deps/tls-foundation"
           cp "$foundation/tools/setup-native-dependencies.sh" "$stage/provenance/"
