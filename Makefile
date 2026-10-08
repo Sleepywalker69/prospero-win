@@ -80,6 +80,10 @@ $(eval $(call test_rule,test_pw_wine_compat,tests/test_pw_wine_compat.c wine/ps5
 PW_WS2_32_TEST_FLAGS := -D_DEFAULT_SOURCE $(foreach name,getaddrinfo freeaddrinfo getnameinfo gethostbyname \
 	gethostbyaddr,-D$(name)=pw_test_$(name))
 $(eval $(call test_rule,test_pw_ws2_32_libc,tests/test_pw_ws2_32_libc.c wine/ps5/pw_ws2_32_libc.c,$(PW_WS2_32_TEST_FLAGS)))
+PW_GNUTLS_LIBC_TEST_FLAGS := -std=gnu11 -pthread -Dgmtime=pw_test_shared_gmtime \
+	-Dgmtime_r=pw_test_gmtime_r -Dgetpwuid_r=pw_test_getpwuid_r \
+	-Dthrd_exit=pw_test_thrd_exit -D__assert=pw_test_assert
+$(eval $(call test_rule,test_pw_gnutls_libc,tests/test_pw_gnutls_libc.c wine/ps5/pw_gnutls_libc.c,$(PW_GNUTLS_LIBC_TEST_FLAGS)))
 $(eval $(call test_rule,test_pw_launcher_render,tests/test_pw_launcher_render.c src/pw_launcher_render.c,))
 $(eval $(call test_rule,test_pw_pad,tests/test_pw_pad.c src/pw_pad.c,))
 $(eval $(call test_rule,test_pw_vm,tests/test_pw_vm.c src/pw_vm.c src/pw_vm_posix.c src/pw_result.c,))
@@ -142,7 +146,7 @@ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_ho
 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle \
 	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount \
-	test_pw_data_mount_native test_pw_lapy_elevation
+	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc
 
 # The Python suites drive the built DBT tools and check the contracts the
 # host compiler cannot.
