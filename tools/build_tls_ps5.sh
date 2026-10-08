@@ -111,8 +111,11 @@ if [ ! -f "$out/lib/libgnutls.a" ]; then
         < "$root/tools/patches/gnutls-3.8.13-kern-arnd-headers.patch" ||
         fail "cannot apply the GnuTLS BSD entropy-probe header fix"
     (cd "$work/gnutls-$GNUTLS_VERSION" &&
+        # Both configure.ac and the released configure are patched above.
+        # Use the supported release-build mode: otherwise the newer source
+        # input triggers aclocal/Autoconf even though no regeneration is needed.
         build_env ./configure --host=$host --prefix="$out" --disable-shared --enable-static \
-            --with-included-libtasn1 --with-included-unistring --without-p11-kit --without-idn \
+            --disable-maintainer-mode --with-included-libtasn1 --with-included-unistring --without-p11-kit --without-idn \
             --without-tpm --without-tpm2 --without-zlib --without-brotli --without-zstd \
             --disable-doc --disable-tests --disable-tools --disable-cxx --disable-libdane \
             --disable-nls --disable-guile --disable-gcc-warnings --disable-hardware-acceleration \

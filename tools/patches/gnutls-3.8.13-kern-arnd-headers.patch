@@ -6,9 +6,9 @@ prerequisite before testing KERN_ARND so a header-order error does not
 misclassify the entropy interface as unavailable. Preserve the real
 compile/link test and all failure paths; no feature answer is forced.
 
-Apply to configure.ac before the released generated configure so builds
-without Autoconf do not regenerate it. Based on the pinned GnuTLS 3.8.13
-release (https://www.gnutls.org/download.html).
+Patch both configure.ac and the released generated configure so release
+builds can use --disable-maintainer-mode without losing the correction.
+Based on the pinned GnuTLS 3.8.13 release (https://www.gnutls.org/download.html).
 
 diff --git a/configure.ac b/configure.ac
 --- a/configure.ac

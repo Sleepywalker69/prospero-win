@@ -179,8 +179,8 @@ class Fixture:
             install += "\n\tmkdir -p $(PREFIX)/include/gnutls\n"
             install += f"\tprintf '%s\\n' {shlex.quote(marker)} > $(PREFIX)/include/gnutls/gnutls.h"
         configure = directory / "configure"
-        configure.write_text("#!/bin/sh\nset -eu\nprefix=\nfor arg in \"$@\"; do\n"
-                             " case $arg in --prefix=*) prefix=${arg#--prefix=} ;; esac\ndone\n"
+        configure.write_text("#!/bin/sh\nset -eu\nprefix=\nmaintainer=yes\nfor arg in \"$@\"; do\n"
+                             " case $arg in --prefix=*) prefix=${arg#--prefix=} ;; --disable-maintainer-mode) maintainer=no ;; esac\ndone\n"
                              "test -n \"$prefix\"\ntest -z \"${ac_cv_injected:-}\"\n"
                              "test -z \"$CPPFLAGS\"\ntest -z \"$LIBS\"\n"
                              "test \"$CONFIG_SITE\" = /dev/null\n"
@@ -217,6 +217,19 @@ class Fixture:
             configure.write_text(configure.read_text() + ": <<'PW_PROBE_CONTEXT'\n" +
                                  contexts["configure"] + "PW_PROBE_CONTEXT\n")
             (directory / "configure.ac").write_text(contexts["configure.ac"])
+            # GnuTLS defaults maintainer mode on. Patching configure.ac
+            # makes this older release-generated input stale. Model the
+            # actual Makefile.in conditional prerequisite, not a sleep or
+            # a source-token assertion: disabled mode leaves no dependency.
+            (directory / "aclocal.m4").write_text("synthetic release-generated aclocal input\n")
+            os.utime(directory / "aclocal.m4", (1000000000, 1000000000))
+            configure.write_text(configure.read_text() +
+                "printf '%s\\n' \"$maintainer\" > maintainer-mode.txt\n" +
+                "guard=; test \"$maintainer\" = yes || guard='#'\n" +
+                "printf 'all: ../aclocal.m4\\n../aclocal.m4: %s ../configure.ac\\n' \"$guard\" >> gl/Makefile\n" +
+                "cat >> gl/Makefile <<'MAKE'\n" +
+                "\t@echo 'unexpected maintainer regeneration' >&2\n" +
+                "\t../missing-aclocal-1.18\nMAKE\n")
         configure.chmod(0o755)
         notices = ["COPYING.LESSERv3", "COPYINGv2", "COPYINGv3", "AUTHORS"] if name == "NETTLE" else [
             "COPYING.LESSERv2", "COPYING", "AUTHORS", "lib/inih/LICENSE.txt"]
@@ -265,6 +278,27 @@ class Fixture:
 
 
 class TlsCacheContracts(unittest.TestCase):
+    def test_patched_release_does_not_regenerate_maintainer_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-maintainer-") as directory:
+            fixture = Fixture(Path(directory))
+            result = fixture.run()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source = fixture.work / f"gnutls-{fixture.versions['GNUTLS']}"
+            self.assertEqual((source / "maintainer-mode.txt").read_text().strip(), "no")
+            self.assertGreater((source / "configure.ac").stat().st_mtime_ns,
+                               (source / "aclocal.m4").stat().st_mtime_ns)
+            self.assertNotIn("unexpected maintainer regeneration", (source / "make.log").read_text())
+            # Positive control: omitting only the explicit mode selection
+            # must make the same timestamp graph request the absent tool.
+            fixture.original = fixture.original.replace("--disable-maintainer-mode", "")
+            fixture.update_script()
+            unsafe = fixture.run()
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertIn("GnuTLS did not build", unsafe.stderr)
+            self.assertIn("unexpected maintainer regeneration", (source / "make.log").read_text())
+            self.assertIn("missing-aclocal-1.18", (source / "make.log").read_text())
+            self.assertFalse((fixture.work / "root/tls-build-manifest.json").exists())
+
     def test_entropy_probe_patch_is_applied_and_bound_to_cache(self):
         import json
         with tempfile.TemporaryDirectory(prefix="pw-tls-probe-patch-") as directory:
