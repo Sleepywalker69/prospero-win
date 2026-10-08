@@ -128,8 +128,8 @@ def inputs(script: Path, sdk: Path) -> dict:
     if not sdk_files or not (sdk / "bin/prospero-clang").is_file():
         raise ValueError(f"missing SDK inputs: {sdk}")
     return {"schema": "pw-tls-inputs/1", "sources": sources,
-            "patches": {"tools/patches/nettle-3.10.1-ed448-canonical.patch": digest(
-                script.parent / "patches/nettle-3.10.1-ed448-canonical.patch")},
+            "patches": {"tools/patches/" + name: digest(script.parent / "patches" / name) for name in
+                        ("nettle-3.10.1-ed448-canonical.patch", "gnutls-3.8.13-kern-arnd-headers.patch")},
             "recipe_sha256": digest(script), "helper_sha256": digest(Path(__file__)),
             "sdk_path": str(sdk.resolve()), "sdk_files": sdk_files,
             "host_path": os.environ.get("PATH", ""), "host_llvm": llvm_identity(sdk)}

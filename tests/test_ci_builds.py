@@ -83,11 +83,32 @@ for required in ("llvm-18-dev", "tools/setup-native-dependencies.sh", "tools/bui
                  "pw_gnutls_libc", "pw_ws2_32_libc", "sceNetResolverStartNtoa",
                  "HAVE_KERN_ARND 1", "sysrng-netbsd", "llvm-readelf", "llvm-ar",
                  "nettle-*.tar.gz", "gnutls-*.tar.xz", "cacert-*.pem",
-                 "nettle-3.10.1-ed448-canonical.patch", "git archive HEAD", "THIRD_PARTY.md",
+                 "nettle-3.10.1-ed448-canonical.patch", "gnutls-3.8.13-kern-arnd-headers.patch",
+                 "git archive HEAD", "THIRD_PARTY.md",
                  "configure.log", "make.log", "install.log", "SHA256SUMS",
                  "No console execution", "No Wine PRXs"):
     assert required in tls_runs, required
 assert "|| true" not in tls_runs and "gnutls_cv_" not in tls_runs and "! grep" not in tls_runs
+# Execute the real patch-staging command with original fixture bytes. Both
+# patches must accompany their source archives, and absence must fail.
+patch_copy = "cp tools/patches/" + tls_runs.split("cp tools/patches/", 1)[1].split(
+    "cp tools/build_tls_ps5.sh", 1)[0].strip()
+with tempfile.TemporaryDirectory(prefix="pw-ci-source-patches-") as directory:
+    root = Path(directory)
+    (root / "tools/patches").mkdir(parents=True)
+    (root / "bundle/sources").mkdir(parents=True)
+    names = ("nettle-3.10.1-ed448-canonical.patch", "gnutls-3.8.13-kern-arnd-headers.patch")
+    for name in names:
+        (root / "tools/patches" / name).write_text("synthetic source patch " + name)
+    def stage_patches():
+        return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", patch_copy], cwd=root,
+                              env=dict(os.environ, stage=str(root / "bundle")), capture_output=True, text=True)
+    assert stage_patches().returncode == 0
+    for name in names:
+        assert (root / "bundle/sources" / name).read_bytes() == (root / "tools/patches" / name).read_bytes()
+        (root / "tools/patches" / name).unlink()
+        assert stage_patches().returncode != 0, "a missing source patch must stop publication"
+        (root / "tools/patches" / name).write_text("synthetic source patch " + name)
 collect = next(step for step in tls["steps"] if step.get("name", "").startswith("Collect raw"))
 assert "always()" in collect["if"]
 tls_bundle = tls["steps"][-1]

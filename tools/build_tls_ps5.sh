@@ -107,6 +107,9 @@ fi
 if [ ! -f "$out/lib/libgnutls.a" ]; then
     rm -rf "$work/gnutls-$GNUTLS_VERSION"
     tar -xJf "$work/gnutls-$GNUTLS_VERSION.tar.xz" -C "$work"
+    patch --batch --forward --fuzz=0 -p1 -d "$work/gnutls-$GNUTLS_VERSION" \
+        < "$root/tools/patches/gnutls-3.8.13-kern-arnd-headers.patch" ||
+        fail "cannot apply the GnuTLS BSD entropy-probe header fix"
     (cd "$work/gnutls-$GNUTLS_VERSION" &&
         build_env ./configure --host=$host --prefix="$out" --disable-shared --enable-static \
             --with-included-libtasn1 --with-included-unistring --without-p11-kit --without-idn \
@@ -116,7 +119,12 @@ if [ ! -f "$out/lib/libgnutls.a" ]; then
             NETTLE_CFLAGS="-I$out/include" NETTLE_LIBS="-L$out/lib -lnettle" \
             HOGWEED_CFLAGS="-I$out/include" HOGWEED_LIBS="-L$out/lib -lhogweed" \
             GMP_CFLAGS="-I$out/include" GMP_LIBS="-L$out/lib -lhogweed" > configure.log 2>&1 &&
-        build_env make -j"$jobs" > make.log 2>&1 && build_env make install > install.log 2>&1) ||
+        # Top-level make still enters src/gl/tests with --disable-tools
+        # and --disable-tests. Build only the runtime library: gl supplies
+        # libgnu.la; lib owns all crypto backends, public headers and .pc.
+        build_env make -C gl -j"$jobs" > make.log 2>&1 &&
+        build_env make -C lib -j"$jobs" >> make.log 2>&1 &&
+        build_env make -C lib install > install.log 2>&1) ||
         fail "GnuTLS did not build; see $work/gnutls-$GNUTLS_VERSION/*.log"
     echo "built GnuTLS $GNUTLS_VERSION"
 fi
