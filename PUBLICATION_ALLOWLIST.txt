@@ -1,5 +1,6 @@
 dev.conf.example
 .github/workflows/ci.yml
+tests/test_ci_builds.py
 CONTRIBUTING.md
 docs/ARCHITECTURE.md
 docs/CASE_STUDY_PINBALL.md
@@ -499,3 +500,21 @@ tests/test_vk_generated_stage.py
 tests/lab/vk_generated_replay.c
 
 tests/lab/vk_batch_owned.c
+
+wine/ps5/pw_ws2_32_resolver.h
+tests/test_pw_ws2_32_console.c
+
+tests/test_build_tls_ps5.py
+tools/build_tls_ps5.sh
+tools/tls_manifest.py
+tools/patches/gnutls-3.8.13-kern-arnd-headers.patch
+tools/patches/nettle-3.10.1-ed448-canonical.patch
+
+tests/test_pw_gnutls_libc.c
+wine/ps5/pw_gnutls_libc.c
+
+LICENSES/MPL-2.0.txt
+wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
+
+tools/check_wine_prx_build.py
+tests/test_check_wine_prx_build.py

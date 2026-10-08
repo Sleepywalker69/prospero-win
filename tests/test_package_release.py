@@ -5,12 +5,20 @@ left out (the builder's dev.conf, import libraries, PC-only drivers), what
 the PS5 build overrides, and the licences and source revisions it carries."""
 
 from pathlib import Path
+import hashlib
 import json
 import subprocess
+import sys
+from unittest.mock import patch
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "package_release.sh"
+sys.path.insert(0, str(ROOT / "tools"))
+sys.dont_write_bytecode = True
+import tls_manifest
+sys.path.insert(0, str(ROOT / "tests"))
+from test_build_tls_ps5 import make_toolchain_fixture
 
 
 def write(path: Path, data: str = "x") -> None:
@@ -31,8 +39,15 @@ def main() -> int:
         write(title / "sce_sys" / "param.json", "{}")
         write(title / "sce_module" / "libc.prx", "libc")
         write(title / "dev.conf", "DEV_SERVER=builder-pc")
-        for name in ("ntdll.prx", "win32u.prx", "libvulkan.prx"):
+        for name in ("ntdll.prx", "win32u.prx", "libvulkan.prx", "libgnutls.prx", "secur32.prx"):
             write(ps5 / "prx" / "sce_module" / name, name)
+        # A build with schannel: the bundle it staged (not the pinned one
+        # here) and the licence texts tools/build_tls_ps5.sh copied.
+        write(ps5 / "prx" / "ca-certificates.crt", "roots")
+        for name in ("COPYING.LESSERv2", "COPYING", "AUTHORS", "lib-inih-LICENSE.txt"):
+            write(ps5 / "prx" / "licenses" / "gnutls" / name, f"gnutls {name}")
+        for name in ("COPYING.LESSERv3", "COPYINGv2", "COPYINGv3", "AUTHORS"):
+            write(ps5 / "prx" / "licenses" / "nettle" / name, f"nettle {name}")
         write(ps5 / "prx" / "fonts" / "tahoma.ttf", "font")
         write(ps5 / "pe" / "i386-windows" / "xinput1_3.dll", "patched")
         for arch in ("i386-windows", "x86_64-windows"):
@@ -50,6 +65,21 @@ def main() -> int:
                   "sources": {"prx_foundation": "b" * 40, "ps5_mesa": "c" * 40, "ps5_vulkan": "d" * 40,
                               "radv_payload_sdk": "9" * 40, "ps5vk": None, "ps5_opengl_sdk": None,
                               "ps5_opengl": None}}
+        # Original fixture artifacts with their build identity. Runtime
+        # versions come from this record, never the packager's current pins.
+        tls_root = root / "tls"
+        sdk = root / "sdk"
+        llvm_config = make_toolchain_fixture(sdk, root / "host-llvm")
+        for name in tls_manifest.ARCHIVES:
+            write(tls_root / name, f"synthetic archive {name}")
+        write(tls_root / "include/gnutls/gnutls.h", "synthetic GnuTLS public header")
+        for name in tls_manifest.NOTICES:
+            write(tls_root / name, (ps5 / "prx" / name).read_text())
+        write(tls_root / "ca-certificates.crt", "roots")
+        with patch.dict("os.environ", {"LLVM_CONFIG": str(llvm_config)}):
+            built_inputs = tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk)
+        tls_manifest.record(tls_root, built_inputs)
+        report["tls"] = tls_manifest.runtime_record(tls_root, ps5 / "prx")
         write(ps5 / "report.json", json.dumps(report))
         for name in ("LICENSE", "COPYING.LIB", "AUTHORS", "NOTICES.md"):
             write(ps5 / "source" / name, f"wine {name}")
@@ -89,16 +119,17 @@ def main() -> int:
         assert (lib / "x86_64-windows" / "wow64native.dll").read_text() == "native cpu"
         assert (lib / "x86_64-unix" / "wow64native.prx").read_text() == "native prx"
         assert sorted(p.name for p in (lib / "x86_64-unix").iterdir()) == \
-            ["libvulkan.prx", "ntdll.prx", "win32u.prx", "wow64native.prx"]
+            ["libgnutls.prx", "libvulkan.prx", "ntdll.prx", "secur32.prx", "win32u.prx", "wow64native.prx"]
         assert (share / "nls" / "locale.nls").exists() and (share / "fonts" / "tahoma.ttf").exists()
-        assert "PPSA99995: 33 files" in result.stdout, result.stdout
+        assert (share / "ca-certificates.crt").read_text() == "roots"
+        assert "PPSA99995: 45 files" in result.stdout, result.stdout
         # The licences: the project's own texts verbatim, Wine's and its
         # libraries' from the built source, FreeType's.
         for name in ("LICENSE", "THIRD_PARTY.md"):
             assert (app / name).read_bytes() == (ROOT / name).read_bytes(), name
         committed = sorted(p.name for p in (ROOT / "LICENSES").iterdir())
         assert committed == ["Apache-2.0-WITH-LLVM-exception.txt", "GPL-3.0.txt", "Lapy-MIT.txt",
-                             "Mesa-MIT.txt"], committed
+                             "MPL-2.0.txt", "Mesa-MIT.txt"], committed
         for name in committed:
             assert (app / "LICENSES" / name).read_bytes() == (ROOT / "LICENSES" / name).read_bytes(), name
         licences = app / "LICENSES"
@@ -109,6 +140,11 @@ def main() -> int:
         assert (licences / "wine" / "libs" / "faudio" / "LICENSE").read_text() == "faudio licence"
         assert (licences / "wine" / "libs" / "ldap" / "COPYRIGHT").read_text() == "ldap copyright"
         assert sorted(p.name for p in (licences / "freetype").iterdir()) == ["FTL.TXT", "LICENSE.TXT"]
+        assert sorted(p.name for p in (licences / "gnutls").iterdir()) == \
+            ["AUTHORS", "COPYING", "COPYING.LESSERv2", "lib-inih-LICENSE.txt"]
+        assert sorted(p.name for p in (licences / "nettle").iterdir()) == \
+            ["AUTHORS", "COPYING.LESSERv3", "COPYINGv2", "COPYINGv3"]
+        assert (licences / "gnutls" / "COPYING.LESSERv2").read_text() == "gnutls COPYING.LESSERv2"
         # SOURCES.txt: every revision the build recorded, and no OpenGL.
         sources = (app / "SOURCES.txt").read_text()
         head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
@@ -123,8 +159,19 @@ def main() -> int:
                          "https://example.invalid/v9.9.9  release v9.9.9",
                          f"PS5_Mesa  commit {'c' * 40}", f"PS5_Vulkan  commit {'d' * 40}",
                          f"PS5_PayloadSDK  commit {'9' * 40}",
-                         "OpenGL  not included"):
+                         "OpenGL  not included",
+                         # schannel's pins, from tools/build_tls_ps5.sh; the bundle
+                         # here is not the pinned one, so only its hash is known.
+                         "GnuTLS 3.8.13 (libgnutls.prx)  https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/"
+                         "gnutls-3.8.13.tar.xz",
+                         "SHA-256 ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e",
+                         "nettle 3.10.1 (libgnutls.prx)  https://ftp.gnu.org/gnu/nettle/nettle-3.10.1.tar.gz",
+                         "SHA-256 b0fcdd7fc0cdea6e80dcf1dd85ba794af0d5b4a57e26397eee3bc193272d9132",
+                         "Root certificates (share/wine/ca-certificates.crt)  the builder's own bundle,"
+                         " not curl's cacert-2026-09-25.pem",
+                         f"SHA-256 {hashlib.sha256(b'roots').hexdigest()}"):
             assert expected in sources, (expected, sources)
+        assert "https://curl.se/ca/" not in sources
         # The console refuses to exec an eboot or load a PRX without execute
         # permission, whatever mode the inputs had; data files stay as they were.
         for name in ("eboot.bin", "sce_module/libc.prx", "win/wine/lib/wine/x86_64-unix/ntdll.prx",
@@ -139,14 +186,56 @@ def main() -> int:
         assert run(*inputs, "--out", str(out)).returncode == 0
         assert not (app / "stale.txt").exists()
 
-        # An OpenGL build says so, with the SDK it linked.
-        report["sources"].update(ps5_opengl_sdk="e" * 64, ps5_opengl="8" * 40)
+        # Missing provenance and altered module bytes fail closed. A build
+        # labeled with a different version remains labeled with that version.
+        original_tls = report.pop("tls")
+        write(ps5 / "report.json", json.dumps(report))
+        bad = run(*inputs, "--out", str(out))
+        assert bad.returncode == 2 and "provenance" in bad.stderr, bad.stderr
+        report["tls"] = original_tls
+        actual_source = report["tls"]["build"]["inputs"]["sources"]["gnutls"]
+        actual_source["version"] = "9.9.9-fixture"
         write(ps5 / "report.json", json.dumps(report))
         assert run(*inputs, "--out", str(out)).returncode == 0
+        assert "GnuTLS 9.9.9-fixture" in (app / "SOURCES.txt").read_text()
+        actual_source["version"] = "3.8.13"
+        write(ps5 / "report.json", json.dumps(report))
+        changed_module = ps5 / "prx/sce_module/libgnutls.prx"
+        original_bytes = changed_module.read_bytes()
+        changed_module.write_bytes(original_bytes + b"changed")
+        bad = run(*inputs, "--out", str(out))
+        assert bad.returncode == 2 and "libgnutls.prx" in bad.stderr, bad.stderr
+        changed_module.write_bytes(original_bytes)
+
+        # A build with schannel but without the bundle or the licence texts
+        # it must ship is refused, naming what is missing.
+        (ps5 / "prx" / "ca-certificates.crt").rename(ps5 / "prx" / "bundle.bak")
+        bad = run(*inputs, "--out", str(out))
+        assert bad.returncode == 2 and "ca-certificates.crt" in bad.stderr, bad.stderr
+        (ps5 / "prx" / "bundle.bak").rename(ps5 / "prx" / "ca-certificates.crt")
+        (ps5 / "prx" / "licenses" / "nettle" / "COPYING.LESSERv3").unlink()
+        bad = run(*inputs, "--out", str(out))
+        assert bad.returncode == 2 and "nettle/COPYING.LESSERv3" in bad.stderr, bad.stderr
+
+        # An OpenGL build says so, with the SDK it linked; one without
+        # schannel ships neither its notices nor a bundle, and says so.
+        report["sources"].update(ps5_opengl_sdk="e" * 64, ps5_opengl="8" * 40)
+        write(ps5 / "report.json", json.dumps(report))
+        for name in ("sce_module/libgnutls.prx", "sce_module/secur32.prx", "ca-certificates.crt"):
+            (ps5 / "prx" / name).unlink()
+        bad = run(*inputs, "--out", str(out))
+        assert bad.returncode == 2 and "TLS" in bad.stderr, bad.stderr
+        report.pop("tls")  # A genuine no-TLS build records no TLS dependency.
+        write(ps5 / "report.json", json.dumps(report))
+        assert run(*inputs, "--out", str(out)).returncode == 0
+        assert not (app / "LICENSES" / "gnutls").exists() and not (app / "LICENSES" / "nettle").exists()
+        assert not (share / "ca-certificates.crt").exists()
         sources = (app / "SOURCES.txt").read_text()
+        assert "schannel (GnuTLS, nettle, root certificates)  not included" in sources, sources
+        assert "GnuTLS 3.8.13" not in sources
         assert f"OpenGL (in win32u.prx)  https://github.com/mpereiraesaa/ps5-opengl  commit {'8' * 40}" \
             in sources, sources
-        assert f"SDK manifest SHA-256 {'e' * 64}" in sources and "not included" not in sources
+        assert f"SDK manifest SHA-256 {'e' * 64}" in sources and "OpenGL  not included" not in sources
         # A libvulkan.prx that is not RADV has no notice here: refused.
         report["sources"].update(ps5_mesa=None, ps5_vulkan=None, ps5vk="f" * 64)
         write(ps5 / "report.json", json.dumps(report))
@@ -170,8 +259,9 @@ def main() -> int:
         bad = run(*inputs, "--out", str(out))
         assert bad.returncode == 2 and "NOTICES.md" in bad.stderr, bad.stderr
     print("package release passed: layout, dev.conf and PC-only modules left out, patched xinput, "
-          "eboot and PRX modules executable, licences and source revisions, OpenGL noted, "
-          "non-RADV Vulkan refused, a clean folder each time, missing inputs named")
+          "eboot and PRX modules executable, licences and source revisions, schannel's notices and "
+          "bundle with it and not without, OpenGL noted, non-RADV Vulkan refused, a clean folder "
+          "each time, missing inputs named")
     return 0
 
 

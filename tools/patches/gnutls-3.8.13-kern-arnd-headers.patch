@@ -1,0 +1,80 @@
+From: prospero-win contributors
+Subject: [PATCH] configure: declare size_t before the BSD sysctl probe
+
+The SDK's BSD sys/sysctl.h uses size_t from sys/types.h. Include that
+prerequisite before testing KERN_ARND so a header-order error does not
+misclassify the entropy interface as unavailable. Preserve the real
+compile/link test and all failure paths; no feature answer is forced.
+
+Patch both configure.ac and the released generated configure so release
+builds can use --disable-maintainer-mode without losing the correction.
+Based on the pinned GnuTLS 3.8.13 release (https://www.gnutls.org/download.html).
+
+diff --git a/configure.ac b/configure.ac
+--- a/configure.ac
++++ b/configure.ac
+@@ -341,29 +341,30 @@
+       [[#include <sys/random.h>
+       ]],
+       [[getrandom(0, 0, 0);]])],
+     [gnutls_cv_func_getrandom=yes],
+     [gnutls_cv_func_getrandom=no])])
+ 
+ AS_IF([test "$gnutls_cv_func_getrandom" = yes], [
+   AC_DEFINE([HAVE_GETRANDOM], 1, [Enable the Linux getrandom function])
+   rnd_variant=getrandom
+ ])
+ 
+ AC_CACHE_CHECK([for KERN_ARND], [gnutls_cv_kern_arnd],
+   [AC_LINK_IFELSE(
+     [AC_LANG_PROGRAM(
+-      [[#include <sys/sysctl.h>
++      [[#include <sys/types.h>
++#include <sys/sysctl.h>
+         #ifdef __linux__
+         #error 1
+         #endif
+         static int name[] = {CTL_KERN, KERN_ARND};
+       ]],
+       [[sysctl(0, 0, 0, 0, 0, 0);]])],
+     [gnutls_cv_kern_arnd=yes],
+     [gnutls_cv_kern_arnd=no])])
+ 
+ AM_CONDITIONAL(HAVE_KERN_ARND, test "$gnutls_cv_kern_arnd" = yes)
+ AM_COND_IF([HAVE_KERN_ARND],
+   [AC_DEFINE([HAVE_KERN_ARND], 1, [Enable the BSD sysctl(KERN_ARND) function])
+    rnd_variant=kern_arnd])
+ 
+diff --git a/configure b/configure
+--- a/configure
++++ b/configure
+@@ -14319,28 +14319,29 @@
+ printf "%s\n" "#define HAVE_GETRANDOM 1" >>confdefs.h
+ 
+   rnd_variant=getrandom
+ 
+ fi
+ 
+ { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for KERN_ARND" >&5
+ printf %s "checking for KERN_ARND... " >&6; }
+ if test ${gnutls_cv_kern_arnd+y}
+ then :
+   printf %s "(cached) " >&6
+ else case e in #(
+   e) cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
++#include <sys/types.h>
+ #include <sys/sysctl.h>
+         #ifdef __linux__
+         #error 1
+         #endif
+         static int name[] = {CTL_KERN, KERN_ARND};
+ 
+ int
+ main (void)
+ {
+ sysctl(0, 0, 0, 0, 0, 0);
+   ;
+   return 0;
+ }
+ _ACEOF

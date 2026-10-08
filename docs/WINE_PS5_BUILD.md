@@ -101,6 +101,7 @@ before evaluating a candidate built from that cache.
 | 0611 | `wow64`: `WINE_PS5_WOW64_CPU` names the process's CPU backend (`wow64native.dll` or `wowprospero.dll`); when the named one cannot be loaded, the prefix's own choice is used instead of ending the process |
 | 0770 | `server`, `ntdll`: on PS5, the client thread runs sync-object and handle requests itself under a server lock instead of waking the server thread twice through the pipes; see [Sync requests on the client threads](#sync-requests-on-the-client-threads) |
 | 0790 | `server`, `ntdll`: opt-in immediate mutex acquire/release using the authoritative server object without request marshalling or waiter allocation; see [Immediate mutex calls](#immediate-mutex-calls) |
+| 0878 | `crypt32`: on PS5 the root store is filled from `share/wine/ca-certificates.crt` beside the runtime, found from crypt32.prx's own path, before the system paths a title cannot see; a bundle that is not there is an error in the log, since no chain then verifies |
 | 0881 | `ntdll`: the number of processors is the CPUs the process may run on (`cpuset_getaffinity`), 13 for a game on the console, not the 16 online; threads of one priority there never share a CPU, so a program that started a worker per reported CPU had three that did not run until another blocked |
 | 0882 | `server`: Windows threads run SCHED_RR, so threads of one priority take turns on the CPUs, and priorities above normal raise the native priority one step per band (normal and below stay at the title's 700); a title's threads are otherwise SCHED_FIFO at one priority, where a 14th busy thread waits for one of the game's 13 CPUs and a Windows priority change does nothing. Opt-in: `WINE_PS5_SCHED=1` or the file `/data/prospero-win/pw_sched` |
 | 0884 | `server`: a watched directory is polled for changes (25 ms to 2 s apart, slower for a directory that takes long to list) and the differences are reported as inotify would, renames included; the console has no inotify, dnotify or kqueue, and change notifications never fired |
@@ -803,6 +804,84 @@ Imports bound only to the WebKit process's `libkernel_web` or
 too (`webkit_unbound`), and the build prints a warning for each module that
 has any.
 
+## TLS
+
+Wine's schannel is its GnuTLS backend (`dlls/secur32/schannel_gnutls.c`),
+and the PS5 build was configured `--without-gnutls`: every HTTPS request a
+program made through Windows' own networking failed with
+`SEC_E_SECPKG_NOT_FOUND` (Battle.net's client, through libcurl's schannel),
+and Wine logged `no schannel support`. `tools/build_tls_ps5.sh` cross-builds
+nettle 3.10.1 (with its own mini-gmp, so no GMP) and GnuTLS 3.8.13 (with its
+included libtasn1 and libunistring; no p11-kit, IDN, TPM, zlib, brotli or
+zstd) with the payload SDK into static archives under
+`.deps/wine-ps5/tls/root`, each tarball pinned by SHA-256; the SDK has no
+libm, so an empty one stands in for the `-lm` the builds ask, as the Wine
+build already does for win32u. GnuTLS is built without hardware
+acceleration and without compression. When the archives and their manifest verify,
+`build_wine_ps5.sh` configures Wine with them (soname `libgnutls.so`, which
+`pw_wine_dl` loads as `libgnutls.prx`), builds `secur32.so`, and links two
+more modules: `libgnutls.prx` from the archives, exporting what
+`schannel_gnutls.c` and crypt32's `unixlib.c` load with dlsym (the list is
+read from the patched sources, so a patch that loads one more symbol
+exports it), with `wine/ps5/pw_gnutls_libc.c` for the `__assert`,
+`gmtime_r`, `getpwuid_r` and `thrd_exit` the system libraries lack and the
+SDK's emulated TLS; and `secur32.prx`. The report covers both. Without the
+TLS build Wine is configured `--without-gnutls`, as before; either way the
+configure arguments differ from the earlier series, so a build tree from
+before this change reconfigures and rebuilds once.
+
+**Build identity.** `tls-build-manifest.json` records the pinned source URLs
+and hashes, the build recipe, SDK tool/header/library hashes, and every
+installed archive, header and licence file. A changed or incomplete cache is
+rebuilt as a whole; a changed recipe or SDK during a build prevents publishing
+its manifest. The Wine build verifies that identity and includes the actual
+source versions and TLS module hashes in `report.json`. Packaging refuses
+missing or changed TLS modules, trust bundles and notices, and writes those
+recorded versions to `SOURCES.txt`; changing a version pin cannot relabel an
+old archive. These hashes establish local provenance, not console validation.
+
+The supported compiler backend is LLVM 18. `LLVM_CONFIG` may name its
+executable; otherwise `llvm-config-18` is selected explicitly. Its canonical
+path is propagated through the SDK wrappers and the clean dependency-build
+environment. The manifest also records the actual host LLVM executable
+hashes and clang resource headers, so unchanged SDK wrapper scripts cannot
+hide changes to those inputs. Invalid selections and other LLVM majors fail rather
+than falling back to whichever compiler happens to be installed.
+This is not a complete host image snapshot: dynamically loaded host libraries
+and the host kernel are outside this manifest's scope.
+
+The `gmtime_r` shim performs bounded Gregorian UTC conversion without libc's
+shared `gmtime` buffer. Host tests compare calendar boundaries, overflow and
+160,000 concurrent conversions with the host libc. The entropy backend remains
+GnuTLS's fail-closed OS backend; no time/PID or pseudorandom fallback is added.
+The generated configuration, linked imports and entropy failures still need
+checking with the actual PS5 build and console.
+
+**Trust.** crypt32 fills its root store from system paths a title cannot
+see, so it stayed empty. Patch 0878 reads `share/wine/ca-certificates.crt`
+beside the runtime first, found from `crypt32.prx`'s own path with
+`dladdr`, and logs an error if it is not there. The bundle is Mozilla's
+root store as curl publishes it, a dated file pinned by URL and SHA-256 in
+`build_tls_ps5.sh` (`cacert-2026-09-25.pem`, 121 roots), so a release
+carries the same roots whoever builds it; `PROSPERO_CA_BUNDLE` names
+another, and `SOURCES.txt` then records only its SHA-256. `build_tls_ps5.sh`
+also stages the licence texts of what `libgnutls.prx` links, which
+`package_release.sh` ships under `LICENSES/gnutls` and `LICENSES/nettle`
+with the bundle's `LICENSES/MPL-2.0.txt` (THIRD_PARTY.md). Wine's schannel
+does not verify the peer's chain itself: the program does, through crypt32
+(`CertGetCertificateChain`), which is why Chromium (Battle.net's login page)
+refused every connection with `ERR_CERT_AUTHORITY_INVALID` until the store
+had roots, and why the console's clock matters: validation uses Windows
+time, the console's, and a date behind the certificates' makes every chain
+not yet valid while the handshake itself still completes.
+
+**Console checks still open.** A validating client (Chromium) against a
+host with an untrusted root, `untrusted-root.badssl.com`, must be refused
+while a normal site passes, which shows the store is consulted and not only
+that handshakes complete; `PFXImportCertStore` (crypt32's GnuTLS side,
+PKCS#12), which this build turns on too; and a strict-validation run with
+the console's date checked.
+
 ## Data directory
 
 A title can write only its own `/download0` sandbox, where `/data` is absent,
@@ -1046,10 +1125,29 @@ The runtime is staged beside the title:
   `getnameinfo` and `gethostbyname` in `libScePosixForWebKit`, which only
   the WebKit process gets, so in a title they stayed NULL and every lookup
   faulted (GTA IV, tens of thousands a minute). `wine/ps5/pw_ws2_32_libc.c`
-  provides them, with `gethostbyaddr` and `h_errno`. There is no DNS: they
-  answer numeric addresses, the wildcard and loopback addresses, and
-  `localhost` and the console's own host name (loopback); any other name is
-  not found, and a service must be a port number; and `crypt32.prx`, CryptoAPI's
+  provides them, with `gethostbyaddr` and `h_errno`. They answer numeric
+  addresses, the wildcard and loopback addresses, and `localhost` and the
+  console's own host name (loopback) themselves, and take a name with a dot
+  in it to the console's own resolver, libSceNet's (`sceNetResolverStartNtoa`
+  and `Ntoa6`, a pool and a resolver per lookup, as the payload SDK's libc
+  does, with an explicit 5 s timeout and two retries; elapsed-time bounds
+  still need console validation). A numeric address of the wrong family
+  fails locally without a DNS request. A name without a dot is not found at
+  once: the computer name a prefix made on a PC carries is one, GTA IV looks it up tens of
+  thousands of times a minute, and a router that resolved it would make the
+  game believe it is online. Unknown names and temporary failures are
+  remembered for 5 s (16 names, per address family), retaining their error
+  class. Native resolver errors remain retryable (`EAI_AGAIN`, or `TRY_AGAIN`
+  through `gethostbyname`) because a native NXDOMAIN mapping has not been
+  verified; a network outage must not become a host-not-found answer.
+  Failure of the monotonic clock disables this cache. A service must be a
+  port number. `ws2_32.prx` therefore needs `libSceNet.sprx`; `secur32.prx`,
+  schannel's Unix side, with `libgnutls.prx`, GnuTLS and nettle built by
+  `tools/build_tls_ps5.sh` into static archives that the module exports from
+  (what `schannel_gnutls.c` and crypt32's `unixlib.c` load with dlsym), and
+  `share/wine/ca-certificates.crt`, the root certificates crypt32 reads on
+  the console (patch 0878); without the TLS build, as before, there is no
+  schannel; and `crypt32.prx`, CryptoAPI's
   Unix side, without which `crypt32.dll` refuses to load: FFmpeg's
   `avformat` imports it, so LAV Filters, the DirectShow splitter and
   decoders Warcraft III's cinematics play through, need it (the console's

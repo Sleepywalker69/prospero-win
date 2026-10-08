@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
+from unittest.mock import patch
 import tempfile
 from pathlib import Path
 
@@ -75,6 +77,7 @@ make() {
 
 
 def main() -> int:
+    check_tls_reporting()
     check_vk_runtime_staging()
     check_patched_pe_staging()
     # The committed series itself.
@@ -110,6 +113,60 @@ def main() -> int:
         assert "WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8" in (ROOT / "tools" / tool).read_text()
     print(f"wine ps5 patch series passed: {len(listed)} patch(es)")
     return 0
+
+
+def check_tls_reporting() -> None:
+    # Execute the actual report generator. Fake SDK inspection tools report
+    # no imports, while the TLS provenance code consumes real fixture bytes.
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(ROOT / "tools"))
+    import tls_manifest
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_build_tls_ps5 import make_toolchain_fixture
+    code = SCRIPT.read_text().split("$ordered <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    with tempfile.TemporaryDirectory(prefix="pw-tls-report-") as directory:
+        base = Path(directory)
+        sdk, build, prx, tls = (base / name for name in ("sdk", "build", "prx", "tls"))
+
+        def write(path, value):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value)
+
+        llvm_config = make_toolchain_fixture(sdk, base / "host-llvm")
+        for name in ("llvm-nm",):
+            path = sdk / "bin" / name
+            write(path, "#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        for name in (*tls_manifest.ARCHIVES, *tls_manifest.NOTICES,
+                     "include/gnutls/gnutls.h", "ca-certificates.crt"):
+            write(tls / name, f"synthetic {name}")
+        for name in (*tls_manifest.MODULES, *tls_manifest.NOTICES, "ca-certificates.crt"):
+            write(prx / name, f"synthetic {name}")
+        with patch.dict(os.environ, {"LLVM_CONFIG": str(llvm_config)}):
+            tls_manifest.record(tls, tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk))
+        log, report = base / "make.log", base / "report.json"
+        log.write_text("")
+        env = dict(os.environ, PW_TLS_ROOT=str(tls), PW_TOOLS_ROOT=str(ROOT / "tools"),
+                   PW_TLS_ENABLED="1")
+
+        def run():
+            return subprocess.run([sys.executable, "-c", code, str(build), str(log), str(report),
+                                   str(sdk), "synthetic-commit", str(prx), "0"],
+                                  env=env, capture_output=True, text=True)
+
+        result = run()
+        assert result.returncode == 0, result.stderr
+        # Deleting a runtime module must fail the build report itself,
+        # before the separate packaging check has an opportunity to run.
+        (prx / tls_manifest.MODULES[0]).unlink()
+        result = run()
+        assert result.returncode == 5 and "TLS provenance error" in result.stderr, result.stderr
+        (prx / tls_manifest.MODULES[1]).unlink()
+        result = run()
+        assert result.returncode == 5, result.stderr
+        env["PW_TLS_ENABLED"] = "0"
+        result = run()
+        assert result.returncode == 0, result.stderr
 
 
 def check_vk_runtime_staging() -> None:

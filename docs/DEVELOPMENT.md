@@ -87,6 +87,110 @@ rebuilds; use `make clean` when you explicitly want to remove generated files.
 checkout and the staged host runtime, failing instead of skipping when they
 are absent.
 
+## GitHub Actions builds
+
+The [CI workflow](../.github/workflows/ci.yml) runs `host-contracts` and
+`wine-source-contracts` on pull requests and pushes to `main`. The host job
+keeps `make all` and `make sanitize` as required, fail-closed checks. The
+sanitizer step still runs after a host-test failure when setup succeeded;
+neither job disables leak detection or converts failures into passes.
+
+The source job fetches the exact Wine commit named by the build scripts,
+checks that the pins agree, applies every patch in order to a private copy,
+and stages the owned Vulkan/clock/input sources. It then runs the three
+source-backed contract suites. This is actual patch application; the
+`--check-patches` option alone validates only series names and subjects.
+The source job does not build or run a host Wine runtime, so it does not
+replace `make wine-check` or its runtime-dependent evidence.
+
+Both jobs retain their raw logs for seven days. Dependencies and generated
+binaries are deliberately not cached: every runner starts clean, and the
+first hosted runs establish trustworthy timings before cache design is
+considered. Tool versions, repository identity, Wine identity, and patch
+hashes are recorded. Logs stay outside the repository's publication audit.
+
+A maintainer can add the `build-native-title` label to a pull request whose
+head branch is in the same repository, or manually run CI on a selected ref
+with `build_native_title` enabled. The label route can test this workflow in
+a pull request before it is merged; manual dispatch becomes available once
+the workflow exists on the default branch.
+After both validation jobs pass, a separate 60-minute job builds the native
+title using the pinned public foundation, payload SDK, zlib, and Lapy helper.
+The successful `native-title-only` artifact is a tarball containing the title
+folder, notices, project/foundation source archives, dependency provenance,
+and checksums. Tar preserves executable permissions. The ELF inspected by
+this job is `build/native/eboot.elf`; `eboot.bin` is its converted SELF output.
+
+This optional artifact has no Wine/graphics runtime and is not a complete
+installer kit. It proves a hosted cross-build only: no console execution,
+installer, login, TLS, game compatibility, or performance claim is made.
+The opt-in PRX lane below checks a broader Wine build; complete graphics and
+installed runtime packaging remain separate workflows.
+The workflow uses read-only repository permissions, no repository secrets,
+no release publishing, and no console deployment. The optional job runs only
+for an explicit manual request or a labeled same-repository pull request.
+Fork pull requests cannot opt themselves in. Removing the label starts a new
+run and cancels the old run through the workflow concurrency group.
+
+The separate `build-tls-dependencies` label (same-repository pull requests
+only), or manual `build_tls_dependencies` input, opts into a 60-minute TLS
+cross-build. It bootstraps the same pinned public SDK, selects LLVM 18
+explicitly, and runs `tools/build_tls_ps5.sh` against the real pinned source
+archives and Ed448 backport. It also compiles the actual DNS and TLS libc
+adapters with the SDK target and `__PROSPERO__`, checks their symbols and
+object headers, and verifies that GnuTLS configured and compiled the
+expected `sysrng-netbsd` entropy backend. Missing outputs or another backend
+fail the job; configure answers are never forced to make it pass.
+This optional lane requires the TLS dependency builder, native resolver and
+TLS adapters, and LLVM-selection changes to be present on the selected ref.
+Do not opt into it on the isolated CI-only branch before those prerequisites
+are integrated; missing inputs fail explicitly rather than producing a skip.
+
+Configuration, make and install logs are retained even when the build fails.
+A successful `tls-dependencies-only` tarball includes the libraries, adapter
+objects, manifest, original source archives, exact patch, staged notices,
+project/foundation source, compiler provenance and checksums. The SDK itself
+is not redistributed in that bundle. Manifest paths identify the build
+runner, so this is validation material rather than a portable installed
+runtime. A successful job establishes cross-compilation and selected backend
+only. It does not establish working console entropy, a TLS handshake,
+certificate rejection, Battle.net login, or a Wine PRX/full-runtime build.
+
+The `build-wine-prxs` label on a same-repository pull request, or manual
+`build_wine_prxs` input, enables a separate 60-minute compile/link/conversion
+check. It uses public foundation `30597512539e7edfde079cbcaf4a626bc0a948c5`,
+the same v0.42 SDK and LLVM 18, genuine pinned Wine host tools, and newly
+built TLS dependencies. It invokes the existing production Wine builder
+without optional external graphics SDKs. This still builds its fixed Wine
+Unix/PE/PRX set, including real ntdll; it is not a fake TLS-only dependency
+graph. The runtime/TLS/DNS/LLVM prerequisite changes must be present before
+opting in; an isolated CI-only branch fails explicitly if they are absent.
+
+The [PRX acceptance checker](../tools/check_wine_prx_build.py) rejects skipped
+conversion, missing or changed artifacts, nonempty diagnostics, and failed
+LLVM inspections. It independently checks shared-ELF dynamic imports and
+exports, provider visibility, data imports and raw syscalls. Application-PRX
+and unknown data imports fail. The four public SDK globals `__isthreaded`,
+`__stderrp`, `__stdoutp` and `environ` require their exact libc/kernel first
+provider, matching OBJECT types and checked zero-addend R64/GLOB_DAT
+relocations writing eight bytes inside a writable LOAD segment. This follows
+the existing [system-data distinction](WINE_PS5_BUILD.md#measured-result);
+it does not establish fresh console resolution of these artifacts.
+The checker also checks SELF-format inspection and digest results, extraction, module headers,
+program metadata and loaded bytes. Container hash integrity is not official
+platform signature authentication. Converted export NID correctness and
+actual native module loading remain unverified.
+
+Raw configure, build, link and inspection logs survive failure. The workflow
+also captures actual shared-ELF symbols, relocations and disassembly for every
+built module even if an earlier acceptance check fails; analyzer errors stay
+failures while the remaining metadata is collected. A successful
+`wine-prx-conversion` artifact includes outputs, hashes, exact project/Wine/
+foundation source, dependency archives/patches and notices. It is validation
+material, not a complete installed runtime or installer kit. It has no
+external graphics driver and makes no console execution, working entropy,
+TLS handshake, certificate validation, login or game-compatibility claim.
+
 ## Building for the console
 
 ```sh

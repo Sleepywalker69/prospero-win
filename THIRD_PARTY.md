@@ -109,6 +109,70 @@ from the BDF driver. Their notices, from the FreeType source:
  * THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+## TLS: `libgnutls.prx`, `secur32.prx` and `share/wine/ca-certificates.crt`
+
+`tools/build_tls_ps5.sh` builds dependencies for Wine's schannel. The
+GnuTLS recipe builds its `gl` convenience archive and `lib` runtime subtree,
+then installs the library, public headers and pkg-config metadata from `lib`.
+It does not build the command-line tool support or run the upstream
+GnuTLS/gnulib test suites.
+The local `tools/patches/gnutls-3.8.13-kern-arnd-headers.patch` adds
+`sys/types.h` before `sys/sysctl.h` in both the BSD entropy configure probe
+and its released generated script. This fixes the declaration order for
+`size_t`; it preserves compile/link detection and does not force an entropy
+backend or establish that the console kernel supplies usable entropy.
+The release recipe uses GnuTLS's `--disable-maintainer-mode` because both
+source and generated configure are patched; it does not regenerate upstream
+Autotools files. Required library compilation and installation still fail
+normally on errors. The exact patch digest is part of the TLS build manifest
+and `SOURCES.txt`.
+In a runtime package, `secur32.prx` is Wine's own code, covered above.
+`libgnutls.prx` statically links [GnuTLS](https://www.gnutls.org) 3.8.13,
+under the GNU Lesser General Public License version 2.1 or later
+(`LICENSES/gnutls/COPYING.LESSERv2`; `COPYING` is the GPL-3.0 text GnuTLS's
+other parts name, and `AUTHORS` its authors), with the libraries GnuTLS
+includes in that build:
+
+- [libtasn1](https://www.gnu.org/software/libtasn1/), LGPL-2.1-or-later
+  (the same text);
+- parts of [libunistring](https://www.gnu.org/software/libunistring/),
+  LGPL-2.1-or-later, its Unicode tables dual-licensed LGPL-3.0-or-later or
+  GPL-2.0-or-later;
+- inih, Ben Hoyt's INI parser, under the BSD-3-Clause licence
+  (`LICENSES/gnutls/lib-inih-LICENSE.txt`).
+
+It also links [GNU Nettle](https://www.lysator.liu.se/~nisse/nettle/)
+3.10.1, with its hogweed public-key library and its copy of GMP's mini-gmp,
+each dual-licensed LGPL-3.0-or-later (`LICENSES/nettle/COPYING.LESSERv3`)
+or GPL-2.0-or-later (`LICENSES/nettle/COPYINGv2`; `COPYINGv3` is the GPL-3
+text, `AUTHORS` its authors); prospero-win uses them under the LGPL. Like
+the other PS5 modules, `libgnutls.prx` links the payload SDK's emulated TLS
+from LLVM's runtime (above).
+
+`share/wine/ca-certificates.crt` is Mozilla's root certificate store as
+[curl publishes it](https://curl.se/docs/caextract.html), under the Mozilla
+Public License 2.0 (`LICENSES/MPL-2.0.txt`); `SOURCES.txt` names the dated
+file and its SHA-256. A package without `libgnutls.prx` carries none of
+these.
+
+The Nettle build applies the signature-canonicality check and public Ed448
+regression from upstream commit
+[`10a428d4e9b3e74901d8e74685945dce7e394b0c`](https://github.com/gnutls/nettle/commit/10a428d4e9b3e74901d8e74685945dce7e394b0c).
+The backport is `tools/patches/nettle-3.10.1-ed448-canonical.patch`; its hash
+is part of the build manifest and `SOURCES.txt`. The source retains Nettle's
+licensing above. This corrects acceptance of a noncanonical Ed448 encoding.
+
+**Configuration limits.** Nettle's mini-gmp configuration has different ABI
+and side-channel properties from ordinary GMP; upstream warns it is more
+likely to leak side-channel information. Host contract tests and successful
+TLS handshakes do not establish side-channel resistance. GnuTLS 3.8.13's
+included libtasn1 identifies itself as 4.20.0. Its
+`asn1_expand_octet_string` has the issue described in
+[CVE-2025-13151](https://lists.gnu.org/archive/html/info-gnu/2026-01/msg00003.html),
+but that function is not called by GnuTLS's C sources in the pinned tarball.
+This is a source-level applicability assessment, not a claim that the bundled
+libtasn1 is patched or that every application using it is unaffected.
+
 ## The Vulkan driver: `libvulkan.prx`
 
 `libvulkan.prx` is RADV, Mesa's Vulkan driver for AMD GPUs, from the
