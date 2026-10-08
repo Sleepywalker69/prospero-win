@@ -507,3 +507,6 @@ tools/patches/nettle-3.10.1-ed448-canonical.patch
 
 tests/test_pw_gnutls_libc.c
 wine/ps5/pw_gnutls_libc.c
+
+LICENSES/MPL-2.0.txt
+wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch

@@ -76,6 +76,20 @@ for file in LICENSE COPYING.LIB AUTHORS NOTICES.md; do
 done
 [ -f "$wine_ps5/freetype/src/docs/FTL.TXT" ] ||
     fail "--wine-ps5: no FreeType source (freetype/src/docs/FTL.TXT) in '$wine_ps5'"
+# A PS5 build with schannel (tools/build_tls_ps5.sh) carries the root
+# certificates and the licence texts of what libgnutls.prx links.
+tls=0
+if [ -f "$wine_ps5/prx/sce_module/libgnutls.prx" ]; then
+    tls=1
+    [ -f "$wine_ps5/prx/ca-certificates.crt" ] ||
+        fail "--wine-ps5: libgnutls.prx without prx/ca-certificates.crt in '$wine_ps5'"
+    for file in gnutls/COPYING.LESSERv2 nettle/COPYING.LESSERv3; do
+        [ -f "$wine_ps5/prx/licenses/$file" ] ||
+            fail "--wine-ps5: libgnutls.prx without prx/licenses/$file in '$wine_ps5'"
+    done
+fi
+python3 "$root/tools/tls_manifest.py" verify-runtime --root "$wine_ps5" ||
+    fail "--wine-ps5: TLS runtime provenance does not match its files"
 [ -n "$out" ] || fail "--out DIR is required"
 
 if [ -n "$mesa_zink" ]; then
@@ -119,9 +133,13 @@ cp "$wine_ps5"/prx/fonts/* "$share/fonts/"
 # loader refuses a PRX without it, so every executable module is 0755.
 chmod 755 "$app/eboot.bin"
 find "$app" -type f -name '*.prx' -exec chmod 755 {} +
+# The root certificates crypt32 reads on the console (patch 0878), when
+# the PS5 build has schannel.
+if [ "$tls" = 1 ]; then cp "$wine_ps5/prx/ca-certificates.crt" "$share/"; fi
 
 # The licences (THIRD_PARTY.md says which covers what): the project's own
-# texts, then Wine's and FreeType's from the sources that were built.
+# texts, then Wine's, FreeType's and, with schannel, GnuTLS's and nettle's
+# from the sources that were built.
 cp "$root/LICENSE" "$root/THIRD_PARTY.md" "$app/"
 cp -R "$root/LICENSES" "$app/LICENSES"
 mkdir -p "$app/LICENSES/wine/libs" "$app/LICENSES/freetype"
@@ -134,10 +152,14 @@ for file in "$wine_ps5"/source/libs/*/LICENSE* "$wine_ps5"/source/libs/*/COPYING
     cp "$file" "$app/LICENSES/wine/libs/$library/"
 done
 cp "$wine_ps5/freetype/src/LICENSE.TXT" "$wine_ps5/freetype/src/docs/FTL.TXT" "$app/LICENSES/freetype/"
+if [ "$tls" = 1 ]; then
+    cp -R "$wine_ps5/prx/licenses/gnutls" "$app/LICENSES/gnutls"
+    cp -R "$wine_ps5/prx/licenses/nettle" "$app/LICENSES/nettle"
+fi
 
 # SOURCES.txt: the revision of each part, from the build's own records.
 python3 - "$root" "$wine_ps5/report.json" "$lapy_release" "$app" <<'PY' || exit 2
-import json, re, subprocess, sys
+import hashlib, json, re, subprocess, sys
 from pathlib import Path
 root, report, lapy, app = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text()), \
     json.loads(Path(sys.argv[3]).read_text()), Path(sys.argv[4])
@@ -183,6 +205,33 @@ if sources.get("ps5_opengl_sdk"):
               f"  SDK manifest SHA-256 {sources['ps5_opengl_sdk']}"]
 else:
     lines += ["OpenGL  not included"]
+# schannel: the libraries libgnutls.prx links and the root certificates,
+# as recorded by the build, never inferred from the current build script;
+# the bundle staged is the pinned one
+# unless the build named another (PROSPERO_CA_BUNDLE), in which case only
+# its SHA-256 is known.
+bundle = app / "win/wine/share/wine/ca-certificates.crt"
+if (app / "win/wine/lib/wine/x86_64-unix/libgnutls.prx").exists():
+    actual = report["tls"]["build"]["inputs"]["sources"]
+    staged = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    pinned = actual["ca_bundle"]["sha256"]
+    date = actual["ca_bundle"]["date"]
+    for name, key in (("GnuTLS", "gnutls"), ("nettle", "nettle")):
+        source = actual[key]
+        version = source["version"]
+        lines += [f"{name} {version} (libgnutls.prx)  "
+                  f"{source['url']}", f"  SHA-256 {source['sha256']}"]
+    for patch, sha in sorted(report["tls"]["build"]["inputs"]["patches"].items()):
+        lines += [f"  TLS source patch {patch}  SHA-256 {sha}"]
+    if staged == pinned:
+        lines += [f"Root certificates (share/wine/ca-certificates.crt)  "
+                  f"{actual['ca_bundle']['url']}",
+                  f"  SHA-256 {staged}"]
+    else:
+        lines += ["Root certificates (share/wine/ca-certificates.crt)  the builder's own bundle,"
+                  f" not curl's cacert-{date}.pem", f"  SHA-256 {staged}"]
+else:
+    lines += ["schannel (GnuTLS, nettle, root certificates)  not included"]
 (app / "SOURCES.txt").write_text("\n".join(lines) + "\n")
 PY
 
