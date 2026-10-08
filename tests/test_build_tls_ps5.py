@@ -87,6 +87,40 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def make_toolchain_fixture(sdk: Path, host: Path) -> Path:
+    """Original shell fixtures modeling SDK dispatch to a host LLVM install."""
+    binary, resource = host / "bin", host / "lib/clang/18"
+    binary.mkdir(parents=True)
+    resource.joinpath("include").mkdir(parents=True)
+    resource.joinpath("include/stddef.h").write_text("synthetic compiler resource header\n")
+    config = binary / "llvm-config"
+    config.write_text("#!/bin/sh\ncase $1 in\n"
+                      f" --bindir) printf '%s\\n' '{binary}' ;;\n"
+                      " --version) echo 18.1.8 ;;\n *) exit 2 ;;\nesac\n")
+    config.chmod(0o755)
+    (binary / "llvm-config-18").symlink_to("llvm-config")
+    for name in ("clang", "clang++", "ld.lld", "llvm-ar", "llvm-nm", "llvm-ranlib"):
+        path = binary / name
+        path.write_text("#!/bin/sh\ncase $1 in\n"
+                        f" -print-resource-dir) printf '%s\\n' '{resource}' ;;\n"
+                        " --version) echo 'clang version 18.1.8 (synthetic LLVM)' ;;\n"
+                        + (" rcs) : > \"$2\" ;;\n" if name == "llvm-ar" else "") +
+                        " *) exit 0 ;;\nesac\n")
+        path.chmod(0o755)
+    sdk.joinpath("bin").mkdir(parents=True, exist_ok=True)
+    dispatcher = sdk / "bin/prospero-llvm-config"
+    dispatcher.write_text(f'#!/bin/sh\nexec "${{LLVM_CONFIG:-{config}}}" "$@"\n')
+    dispatcher.chmod(0o755)
+    for name, backend in (("prospero-clang", "clang"), ("prospero-clang++", "clang++"),
+                          ("llvm-ar", "llvm-ar"), ("llvm-nm", "llvm-nm"),
+                          ("llvm-ranlib", "llvm-ranlib")):
+        path = sdk / "bin" / name
+        path.write_text(f'#!/bin/sh\nbindir=$("{dispatcher}" --bindir) || exit\n'
+                        f'exec "$bindir/{backend}" "$@"\n')
+        path.chmod(0o755)
+    return config
+
+
 class Fixture:
     def __init__(self, root: Path):
         self.root = root
@@ -103,11 +137,7 @@ class Fixture:
         (self.script.parent / patch).write_bytes((SCRIPT.parent / patch).read_bytes())
         self.versions = {name: re.search(rf"^{name}_VERSION=([^\n]+)", self.original,
                                          re.M).group(1) for name in ("NETTLE", "GNUTLS")}
-        for name in ("prospero-clang", "prospero-clang++", "llvm-ar", "llvm-ranlib", "llvm-nm"):
-            tool = self.sdk / "bin" / name
-            tool.write_text("#!/bin/sh\n" + (": > \"$2\"\n" if name == "llvm-ar" else
-                                             "printf 'synthetic SDK v1\\n'\n"))
-            tool.chmod(0o755)
+        self.llvm_config = make_toolchain_fixture(self.sdk, root / "host-llvm")
         self.bundle = self.work / ("cacert-" + re.search(r"^CA_BUNDLE_DATE=([^\n]+)",
                                                         self.original, re.M).group(1) + ".pem")
         self.bundle.write_text("synthetic public certificate bundle fixture\n")
@@ -140,6 +170,8 @@ class Fixture:
                              "test -n \"$prefix\"\ntest -z \"${ac_cv_injected:-}\"\n"
                              "test -z \"$CPPFLAGS\"\ntest -z \"$LIBS\"\n"
                              "test \"$CONFIG_SITE\" = /dev/null\n"
+                             "printf '%s\\n' \"$LLVM_CONFIG\" > selected-llvm.txt\n"
+                             "\"$CC\" --version > selected-compiler.txt\n"
                              "printf 'PREFIX := %s\\n' \"$prefix\" > Makefile\n"
                              "cat >> Makefile <<'MAKE'\nall:\n\t@:\ninstall:\n"
                              "\tmkdir -p $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/lib/pkgconfig\n"
@@ -180,16 +212,79 @@ class Fixture:
             assert count == 1
         self.script.write_text(text)
 
-    def run(self) -> subprocess.CompletedProcess[str]:
-        env = dict(os.environ, PATH=str(self.no_network) + os.pathsep + os.environ["PATH"])
+    def run(self, llvm_config: str | None = None) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ, PATH=os.pathsep.join((str(self.no_network), str(self.llvm_config.parent),
+                                                     os.environ["PATH"])))
         env.update(CPPFLAGS="unexpected preprocessor options", LIBS="unexpected libraries",
-                   CONFIG_SITE="unexpected site file", ac_cv_injected="unexpected cache override")
+                   CONFIG_SITE="unexpected site file", ac_cv_injected="unexpected cache override",
+                   LLVM_CONFIG=llvm_config if llvm_config is not None else str(self.llvm_config))
         return subprocess.run(["sh", str(self.script), "--work", str(self.work),
                                "--sdk", str(self.sdk), "--jobs", "1"], env=env,
                               capture_output=True, text=True, timeout=30)
 
 
 class TlsCacheContracts(unittest.TestCase):
+    def test_selected_llvm_survives_the_clean_build_environment(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-llvm-select-") as directory:
+            fixture = Fixture(Path(directory))
+            alternate = make_toolchain_fixture(fixture.root / "unused-sdk", fixture.root / "other-llvm")
+            result = fixture.run(str(alternate))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name, version in fixture.versions.items():
+                selected = fixture.work / f"{name.lower()}-{version}/selected-llvm.txt"
+                self.assertEqual(selected.read_text().strip(), str(alternate.resolve()))
+            # Bare supported names are normalized before entering SDK wrappers.
+            result = fixture.run("llvm-config-18")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            selected = fixture.work / f"gnutls-{fixture.versions['GNUTLS']}/selected-llvm.txt"
+            self.assertEqual(selected.read_text().strip(), str(fixture.llvm_config.resolve()))
+
+    def test_invalid_or_unsupported_explicit_selection_never_falls_back(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-llvm-refuse-") as directory:
+            fixture = Fixture(Path(directory))
+            result = fixture.run(str(fixture.root / "missing-config"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("LLVM 18", result.stderr)
+            self.assertFalse((fixture.work / "root/lib/libgnutls.a").exists())
+            fixture.llvm_config.write_text(fixture.llvm_config.read_text().replace("18.1.8", "21.0.0"))
+            result = fixture.run()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("got 21.0.0", result.stderr)
+            self.assertFalse((fixture.work / "root/lib/libgnutls.a").exists())
+
+    def test_changed_clang_resource_headers_rebuild(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-llvm-headers-") as directory:
+            fixture = Fixture(Path(directory))
+            first = fixture.run()
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            header = fixture.root / "host-llvm/lib/clang/18/include/stddef.h"
+            header.write_text(header.read_text() + "changed resource header\n")
+            second = fixture.run()
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("built GnuTLS", second.stdout)
+
+    def test_mixed_linker_version_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-llvm-mixed-") as directory:
+            fixture = Fixture(Path(directory))
+            linker = fixture.llvm_config.parent / "ld.lld"
+            linker.write_text(linker.read_text().replace("18.1.8", "19.1.0"))
+            result = fixture.run()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("selected ld.lld does not match LLVM 18", result.stderr)
+            self.assertFalse((fixture.work / "root/lib/libgnutls.a").exists())
+
+    def test_changed_host_llvm_cannot_reuse_wrapper_only_identity(self):
+        with tempfile.TemporaryDirectory(prefix="pw-tls-host-llvm-") as directory:
+            fixture = Fixture(Path(directory))
+            first = fixture.run()
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            compiler = fixture.llvm_config.parent / "clang"
+            compiler.write_text(compiler.read_text() + "# changed actual host backend\n")
+            second = fixture.run()
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("built GnuTLS", second.stdout,
+                          "unchanged SDK wrappers must not hide a changed host compiler")
+
     def test_sdk_and_installed_file_changes_rebuild(self):
         with tempfile.TemporaryDirectory(prefix="pw-tls-identity-") as directory:
             fixture = Fixture(Path(directory))

@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 
 MANIFEST = "tls-build-manifest.json"
@@ -22,6 +24,7 @@ NOTICES = tuple("licenses/gnutls/" + name for name in
                     "licenses/nettle/" + name for name in
                     ("COPYING.LESSERv3", "COPYINGv2", "COPYINGv3", "AUTHORS"))
 MODULES = ("sce_module/libgnutls.prx", "sce_module/secur32.prx")
+LLVM_TOOLS = ("clang", "clang++", "ld.lld", "llvm-ar", "llvm-nm", "llvm-ranlib")
 
 
 def digest(path: Path) -> str:
@@ -53,6 +56,48 @@ def tree_files(root: Path) -> dict[str, str]:
                 raise ValueError(f"not a regular input: {path}")
             files[str(path.relative_to(root))] = digest(path)
     return files
+
+
+def llvm_identity(sdk: Path) -> dict:
+    """Freeze the supported LLVM 18 backend, not just the SDK's wrappers."""
+    requested = os.environ.get("LLVM_CONFIG") or "llvm-config-18"
+    found = shutil.which(requested)
+    if not found:
+        raise ValueError(f"LLVM 18 requires an executable LLVM_CONFIG: {requested}")
+    config = Path(found).resolve(strict=True)
+
+    def query(command, *arguments, env=None):
+        result = subprocess.run([str(command), *arguments], check=True,
+                                capture_output=True, text=True, env=env, timeout=30)
+        return result.stdout.strip()
+
+    version = query(config, "--version")
+    if not re.match(r"^18(?:\.|$)", version):
+        raise ValueError(f"supported TLS toolchain is LLVM 18, got {version}")
+    bindir = Path(query(config, "--bindir")).resolve(strict=True)
+    if (bindir / "llvm-config").resolve(strict=True) != config:
+        raise ValueError("LLVM_CONFIG does not identify the llvm-config in its bindir")
+    env = dict(os.environ, LLVM_CONFIG=str(config))
+    dispatcher = sdk / "bin/prospero-llvm-config"
+    if (Path(query(dispatcher, "--bindir", env=env)).resolve(strict=True) != bindir or
+            query(dispatcher, "--version", env=env) != version):
+        raise ValueError("SDK dispatcher did not select the requested LLVM 18 backend")
+    tools = {}
+    for name in ("llvm-config", *LLVM_TOOLS):
+        path = bindir / name
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise ValueError(f"incomplete LLVM 18 toolchain: {path}")
+        tool_version = version if name == "llvm-config" else query(path, "--version")
+        if name != "llvm-config" and not re.search(r"\b(?:clang|LLVM|LLD) (?:version )?18(?:\.|\b)", tool_version):
+            raise ValueError(f"selected {name} does not match LLVM 18")
+        tools[name] = {"path": str(path), "real_path": str(path.resolve()),
+                       "sha256": digest(path), "version": tool_version}
+    resource = Path(query(bindir / "clang", "-print-resource-dir")).resolve(strict=True)
+    headers = tree_files(resource / "include")
+    if not headers:
+        raise ValueError("selected clang has no resource headers")
+    return {"version": version, "config": str(config), "bindir": str(bindir), "tools": tools,
+            "resource_dir": str(resource), "resource_headers": headers}
 
 
 def inputs(script: Path, sdk: Path) -> dict:
@@ -87,7 +132,7 @@ def inputs(script: Path, sdk: Path) -> dict:
                 script.parent / "patches/nettle-3.10.1-ed448-canonical.patch")},
             "recipe_sha256": digest(script), "helper_sha256": digest(Path(__file__)),
             "sdk_path": str(sdk.resolve()), "sdk_files": sdk_files,
-            "host_path": os.environ.get("PATH", "")}
+            "host_path": os.environ.get("PATH", ""), "host_llvm": llvm_identity(sdk)}
 
 
 def artifacts(root: Path) -> dict[str, str]:
@@ -155,13 +200,18 @@ def verify_runtime(wine: Path, report: dict | None = None) -> dict | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("inputs", "verify", "record", "verify-runtime"))
+    parser.add_argument("action", choices=("inputs", "verify", "record", "verify-runtime", "select-llvm"))
     parser.add_argument("--root", type=Path)
     parser.add_argument("--script", type=Path)
     parser.add_argument("--sdk", type=Path)
     parser.add_argument("--inputs", type=Path)
     args = parser.parse_args()
     try:
+        if args.action == "select-llvm":
+            if args.sdk is None:
+                raise ValueError("--sdk is required")
+            print(llvm_identity(args.sdk)["config"])
+            return 0
         expected = json.loads(args.inputs.read_text()) if args.inputs else None
         if args.script and args.sdk:
             current = inputs(args.script, args.sdk)
@@ -182,7 +232,7 @@ def main() -> int:
             verify(args.root, expected)
         else:
             verify_runtime(args.root)
-    except (OSError, ValueError, TypeError, KeyError) as error:
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         print(f"tls_manifest: {error}", file=sys.stderr)
         return 1
     return 0
