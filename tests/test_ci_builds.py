@@ -215,4 +215,30 @@ assert not any(arg in prx_runs for arg in ("--radv ", "--ps5vk-sdk ", "--ps5-ope
 assert "always()" in next(step["if"] for step in prxs["steps"] if step.get("name", "").startswith("Collect raw"))
 assert "if" not in prxs["steps"][-1] and prxs["steps"][-1]["with"]["if-no-files-found"] == "error"
 assert "tests/test_check_wine_prx_build.py" in (ROOT / "Makefile").read_text()
+metadata = next(step for step in prxs["steps"] if step.get("name") ==
+                "Retain actual module metadata even after acceptance failure")
+assert "always()" in metadata["if"]
+metadata_code = metadata["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
+    root = Path(directory)
+    artifacts, tools, evidence = root / "prx", root / "tools", root / "evidence"
+    artifacts.mkdir(); tools.mkdir()
+    for name in ("broken.shared.elf", "later.shared.elf", "later.elf"):
+        (artifacts / name).write_text("synthetic artifact")
+    config = tools / "llvm-config"
+    config.write_text(f"#!/bin/sh\nprintf '%s\\n' '{tools}'\n")
+    config.chmod(0o755)
+    for name in ("llvm-readelf", "llvm-objdump"):
+        tool = tools / name
+        tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n"
+                        "case \"$*\" in *broken.shared.elf*) exit 9 ;; esac\n")
+        tool.chmod(0o755)
+    result = subprocess.run([sys.executable, "-c", metadata_code, str(artifacts), str(config),
+                             str(tools / "unused-converter"), str(evidence)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert 'EXIT=9' in (evidence / 'broken.shared.elf.log').read_text()
+    assert 'EXIT=0' in (evidence / 'later.shared.elf.log').read_text()
+    assert '--dyn-syms -r -W' in (evidence / 'later.shared.elf.log').read_text()
+    assert (evidence / 'later.shared.elf-disassembly.log').is_file()
+    assert (evidence / 'later.elf.log').is_file()
 print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX build artifacts")

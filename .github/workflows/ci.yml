@@ -523,6 +523,47 @@ jobs:
           } > "$stage/BUILD-INFO.txt"
           (cd "$stage" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
           tar -czf "$RUNNER_TEMP/wine-prx-conversion.tar.gz" -C "$stage" .
+      - name: Retain actual module metadata even after acceptance failure
+        if: ${{ always() }}
+        run: |
+          python3 - "$WINE_WORK/prx" "$LLVM_CONFIG" "$FOUNDATION/build/host/ps5-native-tool" "$RUNNER_TEMP/prx-evidence/module-metadata" <<'PY'
+          from pathlib import Path
+          import json, subprocess, sys
+          root, config, converter, out = map(Path, sys.argv[1:])
+          out.mkdir(parents=True, exist_ok=True)
+          statuses = []
+          def record(label, args):
+              try:
+                  result = subprocess.run([str(arg) for arg in args], capture_output=True,
+                                          text=True, errors='replace', timeout=120)
+                  code, stdout, stderr = result.returncode, result.stdout, result.stderr
+              except (OSError, subprocess.SubprocessError) as error:
+                  code, stdout, stderr = -1, '', str(error)
+              (out / (label + '.log')).write_text(json.dumps([str(arg) for arg in args]) + '\n' +
+                                                 stdout + '\nSTDERR:\n' + stderr + f'\nEXIT={code}\n')
+              statuses.append({'inspection': label, 'exit': code})
+              return code, stdout
+          elfs = sorted(root.glob('*.elf'))
+          if elfs:
+              code, directory = record('llvm-bindir', [config, '--bindir'])
+              if code == 0 and directory.strip():
+                  bindir = Path(directory.strip())
+                  for path in elfs:
+                      options = ['-h', '-l', '-d']
+                      if path.name.endswith('.shared.elf'):
+                          options += ['--dyn-syms', '-r', '-W']
+                      record(path.name, [bindir / 'llvm-readelf', *options, path])
+                      if path.name.endswith('.shared.elf'):
+                          record(path.name + '-disassembly', [bindir / 'llvm-objdump', '-d', '--no-show-raw-insn', path])
+              elif code == 0:
+                  statuses.append({'inspection': 'empty-llvm-bindir', 'exit': -1})
+          for path in sorted((root / 'sce_module').glob('*.prx')):
+              record(path.name, [converter, 'self', '--inspect', '--file', path])
+          (out / 'statuses.json').write_text(json.dumps(statuses, indent=2) + '\n')
+          # Capture every artifact even after one tool fails; never convert a
+          # failed analysis into a successful final job or binary upload.
+          raise SystemExit(1 if any(item['exit'] != 0 for item in statuses) else 0)
+          PY
       - name: Collect raw PRX and dependency failure evidence
         if: ${{ always() }}
         run: |

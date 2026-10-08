@@ -19,13 +19,14 @@ spec.loader.exec_module(check)
 
 
 def binary(kind=3):
-    value = bytearray(144)
+    value = bytearray(224)
     value[:7] = b"\x7fELF\x02\x01\x01"
     struct.pack_into("<HHI", value, 16, kind, 62, 1)
     struct.pack_into("<Q", value, 32, 64)
-    struct.pack_into("<HHH", value, 52, 64, 56, 1)
-    struct.pack_into("<IIQQQQQQ", value, 64, 1, 5, 128, 0, 0, 16, 16, 16)
-    value[128] = 0xc3
+    struct.pack_into("<HHH", value, 52, 64, 56, 2)
+    struct.pack_into("<IIQQQQQQ", value, 64, 1, 5, 192, 0, 0, 16, 16, 16)
+    struct.pack_into("<IIQQQQQQ", value, 120, 1, 6, 208, 0x1000, 0, 16, 32, 16)
+    value[192] = 0xc3
     return bytes(value)
 
 
@@ -57,7 +58,7 @@ class Fixture:
             container = struct.pack("<I", 0x1d3d154f) + b"synthetic container" + bytes(64)
             path = self.write(f"prx/sce_module/{name}.prx", container)
             entry = {"built": True, "bytes": len(container), "sha256": check.sha(path), "needed": self.needed(name)}
-            entry.update({field: [] for field in check.DIAGNOSTICS})
+            entry.update({field: [] for field in (*check.DIAGNOSTICS, "data_imports")})
             self.report["prx"]["modules"][name] = entry
         self.write("source/dlls/secur32/schannel_gnutls.c", b"LOAD_FUNCPTR(gnutls_handshake)\n")
         self.write("source/dlls/crypt32/unixlib.c", b"LOAD_FUNCPTR(gnutls_global_init)\n")
@@ -131,7 +132,91 @@ class Fixture:
                                   self.wine, self.pin, self.patches)
 
 
+class DataFixture(Fixture):
+    """Only four documented system globals, with real ELF-style symbol indices."""
+    SYMBOLS = ("__isthreaded", "__stderrp", "__stdoutp", "environ")
+
+    def __init__(self, root, defect=""):
+        self.consumer = "wowprospero" if defect.startswith("app-shadow") else "ntdll"
+        self.defect = defect
+        super().__init__(root)
+        (self.sdk / "target/lib/libSceLibcInternal.so").write_bytes(binary() + b"libc")
+        kind = "OBJECT" if defect not in {"consumer-func", "consumer-notype"} else "FUNC"
+        self.report["prx"]["modules"][self.consumer]["data_imports"] = sorted(self.SYMBOLS) if kind == "OBJECT" else []
+        if defect == "unknown-data":
+            self.report["prx"]["modules"][self.consumer]["data_imports"].append("unknown_data")
+
+    def needed(self, name):
+        return (["ntdll.prx"] if name in {"secur32", "wowprospero"} else []) + ["libSceLibcInternal.sprx", "libkernel.sprx"]
+
+    def run(self, argv, **kwargs):
+        result = super().run(argv, **kwargs)
+        path, command = Path(argv[-1]), Path(argv[0]).name
+        name = path.name.split(".")[0]
+        output = result.stdout
+        if command == "llvm-readelf":
+            if "-d" in argv and path.parent == self.sdk / "target/lib":
+                output = f"Library soname: [{name}.sprx]\n"
+            if "--dyn-syms" in argv:
+                if path.parent == self.sdk / "target/lib":
+                    symbols = self.SYMBOLS[:-1] if name == "libSceLibcInternal" else self.SYMBOLS[-1:]
+                    if self.defect == "wrong-provider":
+                        symbols = () if name == "libSceLibcInternal" else self.SYMBOLS
+                    kind = "FUNC" if self.defect == "provider-func" else "NOTYPE" if self.defect == "provider-notype" else "OBJECT"
+                    output = "1: 00000128 1 FUNC GLOBAL DEFAULT 1 malloc\n" + "\n".join(
+                        f"{i}: 00000128 0 {kind} GLOBAL DEFAULT 1 {symbol}" for i, symbol in enumerate(symbols, 2))
+                elif name == self.consumer:
+                    kind = "FUNC" if self.defect == "consumer-func" else "NOTYPE" if self.defect == "consumer-notype" else "OBJECT"
+                    output += "\n" + "\n".join(f"{i}: 00000000 0 {kind} GLOBAL DEFAULT UND {symbol}"
+                                               for i, symbol in enumerate(self.SYMBOLS, 12))
+                    if self.defect == "unknown-data": output += "\n30: 0 0 OBJECT GLOBAL DEFAULT UND unknown_data\n"
+                elif name == "ntdll" and self.defect.startswith("app-shadow"):
+                    kind = "FUNC" if self.defect == "app-shadow-func" else "OBJECT"
+                    output += f"\n30: 00000128 0 {kind} GLOBAL DEFAULT 1 __stderrp\n"
+            if "-r" in argv:
+                if self.defect == "reloc-tool-failure":
+                    return subprocess.CompletedProcess(argv, 31, "", "synthetic relocation analyzer failure")
+                output = "Relocation section '.rela.dyn':\n"
+                for i, symbol in enumerate(self.SYMBOLS, 12):
+                    reloc = "R_X86_64_64" if symbol == "environ" else "R_X86_64_GLOB_DAT"
+                    if self.defect.startswith("reloc-type:"): reloc = self.defect.split(":", 1)[1]
+                    target = 0x1000 + (i - 12) * 8
+                    if self.defect == "readonly-write": target = 0
+                    if self.defect == "outside-write": target = 0x9000
+                    if self.defect == "straddling-write": target = 0x101c
+                    index = 99 if self.defect == "wrong-index" else i
+                    addend = "8" if self.defect == "nonzero-addend" else "0"
+                    code = 1 if reloc == "R_X86_64_64" else 6
+                    if self.defect == "wrong-reloc-info": code = 99
+                    output += f"{target:016x} {((index << 32) | code):016x} {reloc} 0000000000000000 {symbol} + {addend}\n"
+                if self.defect == "missing-relocs": output = "No relocations\n"
+                if self.defect == "malformed-extra": output += "unparsed __stderrp relocation\n"
+                if self.defect == "malformed-info": output += "00001000 garbage R_X86_64_GLOB_DAT 0 __stderrp + 0\n"
+        return subprocess.CompletedProcess(argv, result.returncode, output, result.stderr)
+
+
 class PrxBuildContracts(unittest.TestCase):
+    def test_documented_system_data_has_exact_provider_type_and_relocations(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = DataFixture(Path(d))
+            result = f.validate()["modules"]["ntdll"]["system_data_imports"]
+            self.assertEqual(set(result), set(DataFixture.SYMBOLS))
+            for symbol, entry in result.items():
+                self.assertEqual(entry["provider"], check.SYSTEM_DATA[symbol])
+                self.assertTrue(entry["relocations"])
+
+    def test_system_data_exceptions_do_not_waive_hostile_imports(self):
+        defects = ("app-shadow-object", "app-shadow-func", "wrong-provider", "provider-func", "provider-notype",
+                   "consumer-func", "consumer-notype", "unknown-data", "missing-relocs", "malformed-extra",
+                   "malformed-info", "wrong-index", "wrong-reloc-info", "nonzero-addend", "readonly-write", "outside-write",
+                   "straddling-write", "reloc-tool-failure", "reloc-type:R_X86_64_COPY", "reloc-type:R_X86_64_JUMP_SLOT",
+                   "reloc-type:R_X86_64_DTPMOD64", "reloc-type:R_X86_64_TPOFF64", "reloc-type:R_X86_64_32")
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
+                f = DataFixture(Path(d), defect)
+                with self.assertRaises(ValueError):
+                    f.validate()
+
     def test_complete_build_is_checked(self):
         with tempfile.TemporaryDirectory() as d:
             f = Fixture(Path(d))

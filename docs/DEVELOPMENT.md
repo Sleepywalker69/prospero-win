@@ -169,13 +169,22 @@ opting in; an isolated CI-only branch fails explicitly if they are absent.
 The [PRX acceptance checker](../tools/check_wine_prx_build.py) rejects skipped
 conversion, missing or changed artifacts, nonempty diagnostics, and failed
 LLVM inspections. It independently checks shared-ELF dynamic imports and
-exports, provider visibility, data imports and raw syscalls. It also checks
-SELF-format inspection and digest results, extraction, module headers,
+exports, provider visibility, data imports and raw syscalls. Application-PRX
+and unknown data imports fail. The four public SDK globals `__isthreaded`,
+`__stderrp`, `__stdoutp` and `environ` require their exact libc/kernel first
+provider, matching OBJECT types and checked zero-addend R64/GLOB_DAT
+relocations writing eight bytes inside a writable LOAD segment. This follows
+the existing [system-data distinction](WINE_PS5_BUILD.md#measured-result);
+it does not establish fresh console resolution of these artifacts.
+The checker also checks SELF-format inspection and digest results, extraction, module headers,
 program metadata and loaded bytes. Container hash integrity is not official
 platform signature authentication. Converted export NID correctness and
 actual native module loading remain unverified.
 
-Raw configure, build, link and inspection logs survive failure. A successful
+Raw configure, build, link and inspection logs survive failure. The workflow
+also captures actual shared-ELF symbols, relocations and disassembly for every
+built module even if an earlier acceptance check fails; analyzer errors stay
+failures while the remaining metadata is collected. A successful
 `wine-prx-conversion` artifact includes outputs, hashes, exact project/Wine/
 foundation source, dependency archives/patches and notices. It is validation
 material, not a complete installed runtime or installer kit. It has no

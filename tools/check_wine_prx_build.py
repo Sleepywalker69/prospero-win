@@ -21,7 +21,13 @@ MODULES = ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfreety
 UNIX = ("ntdll", "win32u", "winevulkan", "opengl32", "ws2_32", "crypt32", "dwrite", "secur32")
 PE = ("ntdll", "win32u", "xinput1_1", "xinput1_2", "xinput1_3", "xinput1_4", "xinputuap",
       "quartz", "opengl32", "winevulkan")
-DIAGNOSTICS = ("unresolved", "errors", "data_imports", "title_unbound", "webkit_unbound", "raw_syscalls")
+DIAGNOSTICS = ("unresolved", "errors", "title_unbound", "webkit_unbound", "raw_syscalls")
+# Public SDK v0.42 GLOBAL OBJECT ABI, not application-PRX data imports.
+# See sce_stubs/libSceLibcInternal.c, sce_stubs/libkernel.c and the system
+# data-import distinction in docs/WINE_PS5_BUILD.md. This is build evidence;
+# the new artifacts and __isthreaded have not been validated on a console.
+SYSTEM_DATA = {"__isthreaded": "libSceLibcInternal.sprx", "__stderrp": "libSceLibcInternal.sprx",
+               "__stdoutp": "libSceLibcInternal.sprx", "environ": "libkernel.sprx"}
 FORBIDDEN = {"libkernel_sys", "libkernel_web", "libScePosixForWebKit"}
 MAX_FILE = 128 * 1024 * 1024
 
@@ -150,20 +156,29 @@ def validate(work: Path, sdk: Path, foundation: Path, bindir: Path, output: Path
         shared = prx / f"{name}.shared.elf"
         require(providers.get(name + ".prx") == shared.resolve(strict=True),
                 f"{name}: own SONAME does not identify the checked shared module")
-        elf(shared, 3)
+        shared_bytes, _ = elf(shared, 3)
         commands.run(bindir / "llvm-readelf", "-h", "-l", "-d", shared)
         symbols = commands.run(bindir / "llvm-readelf", "--dyn-syms", "-W", shared)
-        imports, definitions = set(), set()
+        imports, definitions, import_types, import_indices = set(), set(), {}, {}
         for line in symbols.splitlines():
             fields = line.split()
             if len(fields) >= 8 and re.fullmatch(r"\d+:", fields[0]):
                 symbol = fields[7].split("@")[0]
                 if fields[6] == "UND":
-                    require(fields[3] != "OBJECT", f"{name}: imported data {symbol}")
+                    require(fields[3] != "TLS", f"{name}: unsupported TLS data import {symbol}")
+                    require(symbol not in import_types or import_types[symbol] == fields[3],
+                            f"{name}: conflicting import types for {symbol}")
                     imports.add(symbol)
+                    import_types[symbol] = fields[3]
+                    import_indices[int(fields[0][:-1])] = symbol
                 elif fields[4] in {"GLOBAL", "WEAK"} and fields[5] in {"DEFAULT", "PROTECTED"}:
                     definitions.add(symbol)
         require(definitions and "module_start" in definitions, f"{name}: no inspected module exports")
+        data_imports = {symbol for symbol, kind in import_types.items() if kind == "OBJECT"}
+        require(entry["data_imports"] == sorted(data_imports), f"{name}: reported data imports differ from actual ELF")
+        require(data_imports <= SYSTEM_DATA.keys(), f"{name}: unsupported data imports {sorted(data_imports - SYSTEM_DATA.keys())}")
+        require(all(import_types[symbol] == "OBJECT" for symbol in imports & SYSTEM_DATA.keys()),
+                f"{name}: system data import has the wrong consumer symbol type")
         needed_text = commands.run(bindir / "llvm-readelf", "-d", shared)
         needed = re.findall(r"Shared library: \[([^\]]+)\]", needed_text)
         require(needed and set(needed) == set(entry["needed"]), f"{name}: missing/mismatched import graph")
@@ -176,14 +191,60 @@ def validate(work: Path, sdk: Path, foundation: Path, bindir: Path, output: Path
             provider = providers[library]
             if provider not in provider_exports:
                 listing = commands.run(bindir / "llvm-readelf", "--dyn-syms", "-W", provider)
-                names = {fields[7].split("@")[0] for line in listing.splitlines() if
+                names = {fields[7].split("@")[0]: fields[3] for line in listing.splitlines() if
                          len(fields := line.split()) >= 8 and re.fullmatch(r"\d+:", fields[0]) and
                          fields[6] != "UND" and fields[4] in {"GLOBAL", "WEAK"} and
                          fields[5] in {"DEFAULT", "PROTECTED"}}
                 require(names, f"empty dynamic export provider: {library}")
                 provider_exports[provider] = names
-            provided |= provider_exports[provider]
+            provided |= provider_exports[provider].keys()
         require(not imports - provided, f"{name}: unresolved actual imports {sorted(imports - provided)}")
+        system_data = {}
+        for symbol in sorted(data_imports):
+            # The pinned converter selects the first matching DT_NEEDED
+            # provider. A later system export cannot excuse an earlier app
+            # provider or wrong symbol type.
+            selected = next(library for library in needed if symbol in provider_exports[providers[library]])
+            require(selected == SYSTEM_DATA[symbol] and
+                    provider_exports[providers[selected]][symbol] == "OBJECT",
+                    f"{name}: wrong first provider/type for system data {symbol}")
+            system_data[symbol] = {"provider": selected, "relocations": []}
+        if system_data:
+            # Imported pointers are written into the module's writable LOAD
+            # storage (including zero-filled tails); stub object sizes are 0
+            # and do not describe the firmware object's real storage size.
+            offset = struct.unpack_from("<Q", shared_bytes, 32)[0]
+            size, count = struct.unpack_from("<HH", shared_bytes, 54)
+            writable = []
+            for index in range(count):
+                ptype, flags, _, address, _, _, memory, _ = struct.unpack_from("<IIQQQQQQ", shared_bytes, offset + size * index)
+                if ptype == 1 and flags & 2 and address + memory <= 1 << 64:
+                    writable.append((address, address + memory))
+            relocations = commands.run(bindir / "llvm-readelf", "-r", "-W", shared)
+            for line in relocations.splitlines():
+                fields = line.split()
+                mentioned = any(field.split("@")[0] in system_data for field in fields)
+                if not fields or not re.fullmatch(r"[0-9a-fA-F]{1,16}", fields[0]):
+                    require(not mentioned, f"{name}: malformed relevant data relocation")
+                    continue
+                require(len(fields) >= 3 and re.fullmatch(r"[0-9a-fA-F]{1,16}", fields[1]),
+                        f"{name}: malformed relocation record")
+                index = int(fields[1], 16) >> 32
+                symbol = import_indices.get(index)
+                if symbol not in system_data and not mentioned:
+                    continue
+                require(symbol in system_data and len(fields) == 7 and fields[4].split("@")[0] == symbol and
+                        fields[2] in {"R_X86_64_64", "R_X86_64_GLOB_DAT"} and
+                        (int(fields[1], 16) & 0xffffffff) == {"R_X86_64_64": 1, "R_X86_64_GLOB_DAT": 6}[fields[2]] and
+                        fields[5] == "+" and
+                        re.fullmatch(r"(?:0[xX])?0+", fields[6]),
+                        f"{name}: unsupported/mismatched data relocation for {symbol}")
+                target = int(fields[0], 16)
+                require(any(start <= target and target + 8 <= end for start, end in writable),
+                        f"{name}: data relocation write is outside a writable LOAD")
+                system_data[symbol]["relocations"].append({"offset": fields[0], "type": fields[2], "addend": 0})
+            require(all(item["relocations"] for item in system_data.values()),
+                    f"{name}: system data import has no checked relocation")
         listing = commands.run(bindir / "llvm-objdump", "-d", "--no-show-raw-insn", shared)
         instructions, function = 0, None
         for line in listing.splitlines():
@@ -228,7 +289,8 @@ def validate(work: Path, sdk: Path, foundation: Path, bindir: Path, output: Path
                                                 for start, size, _ in loads), f"{name}: extracted LOAD bytes differ")
         commands.run(bindir / "llvm-readelf", "-h", "-l", extracted)
         measured[name] = {"sha256": sha(module), "shared_sha256": sha(shared), "converted_sha256": sha(prx / f"{name}.elf"),
-                          "extracted_sha256": sha(extracted), "needed": needed, "defined_symbols": len(definitions)}
+                          "extracted_sha256": sha(extracted), "needed": needed, "defined_symbols": len(definitions),
+                          "system_data_imports": system_data}
     return {"schema": "pw-prx-ci-check/1", "scope": "compile/link/conversion only; no platform signature authentication; converted export NIDs and native loading unverified",
             "modules": measured}
 
