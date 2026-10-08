@@ -515,3 +515,6 @@ wine/ps5/pw_gnutls_libc.c
 
 LICENSES/MPL-2.0.txt
 wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
+
+tools/check_wine_prx_build.py
+tests/test_check_wine_prx_build.py

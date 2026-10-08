@@ -209,6 +209,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	CC="$(CC)" python3 tests/test_native_system_service_profile.py
 	python3 tests/test_test_reachability.py
 	python3 tests/test_ci_builds.py
+	python3 tests/test_check_wine_prx_build.py
 	python3 tests/test_status_vocabulary.py
 	python3 tests/test_classify_x86.py
 	python3 tests/test_box86_opcode_catalog.py
