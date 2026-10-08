@@ -211,7 +211,8 @@ jobs:
           {
             sdk="$PS5_PAYLOAD_SDK"
             bindir=$("$LLVM_CONFIG" --bindir)
-            "$sdk/bin/prospero-clang" -dM -E -x c /dev/null > "$RUNNER_TEMP/tls-evidence/predefines.txt"
+            # The SDK wrapper needs -c even with -E to omit its startup object.
+            "$sdk/bin/prospero-clang" -c -dM -E -x c /dev/null > "$RUNNER_TEMP/tls-evidence/predefines.txt"
             grep -q '^#define __FreeBSD__ ' "$RUNNER_TEMP/tls-evidence/predefines.txt"
             grep -q '^#define __x86_64__ ' "$RUNNER_TEMP/tls-evidence/predefines.txt"
             grep -q '^#define __PROSPERO__ ' "$RUNNER_TEMP/tls-evidence/predefines.txt"
