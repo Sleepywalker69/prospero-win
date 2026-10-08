@@ -19,6 +19,11 @@ on:
         type: boolean
         required: false
         default: false
+      build_wine_prxs:
+        description: Compile and convert Wine PRXs with TLS, without external graphics or console execution
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -338,6 +343,258 @@ jobs:
         with:
           name: tls-dependencies-only-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/tls-dependencies-only.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  wine-prxs:
+    # Existing production build graph; compile/link/conversion only.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' && inputs.build_wine_prxs) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'build-wine-prxs')) }}
+    needs: [host-contracts, wine-source-contracts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BUILD_JOBS: "2"
+      LLVM_CONFIG: /usr/bin/llvm-config-18
+      FOUNDATION: ${{ github.workspace }}/.deps/prx-foundation
+      WINE_SOURCE: ${{ github.workspace }}/.deps/prx-wine-source
+      HOST_BUILD: ${{ github.workspace }}/.deps/prx-host-tools
+      WINE_WORK: ${{ github.workspace }}/.deps/wine-prx
+      TLS_WORK: ${{ github.workspace }}/.deps/prx-tls
+      XDG_CACHE_HOME: ${{ github.workspace }}/.cache/prx-codegen
+      LC_ALL: C
+      TZ: UTC
+      SOURCE_DATE_EPOCH: "1000000000"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Require real runtime and TLS prerequisites
+        run: |
+          for source in tools/build_tls_ps5.sh tools/tls_manifest.py wine/ps5/pw_gnutls_libc.c \
+            wine/ps5/pw_ws2_32_resolver.h tools/check_wine_prx_build.py \
+            tools/patches/gnutls-3.8.13-kern-arnd-headers.patch; do
+            test -f "$source" || { echo "Required PRX source is missing: $source" >&2; exit 1; }
+          done
+      - name: PRX and Wine host-tool prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 llvm-18-dev \
+            bison flex gcc-mingw-w64 g++-mingw-w64 pkg-config m4 patch curl wget unzip
+      - name: Build the pinned public converter and SDK
+        run: |
+          mkdir -p "$RUNNER_TEMP/prx-evidence"
+          {
+            git rev-parse HEAD
+            uname -a
+            dpkg-query -W clang-18 lld-18 llvm-18 llvm-18-dev gcc-mingw-w64 g++-mingw-w64 bison flex
+            pin=$(sed -n 's/^MODULE_EXPORTS_COMMIT=//p' tools/build_wine_ps5.sh)
+            [[ $pin == 30597512539e7edfde079cbcaf4a626bc0a948c5 ]]
+            git init --quiet "$FOUNDATION"
+            git -C "$FOUNDATION" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+            git -C "$FOUNDATION" fetch --depth=1 origin "$pin"
+            git -C "$FOUNDATION" checkout --detach FETCH_HEAD
+            [[ $(git -C "$FOUNDATION" rev-parse HEAD) == "$pin" ]]
+            bash "$FOUNDATION/tools/setup-native-dependencies.sh"
+            sdk="$FOUNDATION/.deps/native/ps5-payload-sdk"
+            python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
+            printf 'PS5_PAYLOAD_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+            native="$FOUNDATION/tooling/native"
+            zroot="$FOUNDATION/.deps/native/zlib/root"
+            zarchive=$(find "$zroot" -type f -name libz.a -print -quit)
+            test -n "$zarchive"
+            mkdir -p "$FOUNDATION/build/host"
+            # The exact converter-only command in the pinned build-module.sh.
+            clang++-18 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zroot/usr/include" \
+              "$native/native_app_builder.cpp" "$native/self_container.cpp" \
+              "$native/elf_object.cpp" "$native/sce_module_writer.cpp" \
+              "$zarchive" -o "$FOUNDATION/build/host/ps5-native-tool"
+            sha256sum "$FOUNDATION/build/host/ps5-native-tool" "$zarchive"
+          } 2>&1 | tee "$RUNNER_TEMP/prx-evidence/bootstrap.log"
+      - name: Build genuine host Wine tools only
+        run: |
+          {
+            pin=$(sed -n 's/^WINE_COMMIT=//p' tools/build_wine_ps5.sh)
+            [[ $pin =~ ^[0-9a-f]{40}$ ]]
+            git init --quiet "$WINE_SOURCE"
+            git -C "$WINE_SOURCE" remote add origin https://github.com/wine-mirror/wine.git
+            git -C "$WINE_SOURCE" fetch --depth=1 origin "$pin"
+            git -C "$WINE_SOURCE" checkout --detach FETCH_HEAD
+            [[ $(git -C "$WINE_SOURCE" rev-parse HEAD) == "$pin" ]]
+            mkdir -p "$HOST_BUILD"
+            (cd "$HOST_BUILD" && CC=clang-18 CXX=clang++-18 "$WINE_SOURCE/configure" \
+              --enable-archs=i386,x86_64 --disable-tests --without-x --without-freetype --without-fontconfig)
+            make -C "$HOST_BUILD" -j"$BUILD_JOBS" tools/makedep tools/make_xftmpl \
+              tools/winebuild/winebuild tools/winegcc/winegcc tools/widl/widl tools/wrc/wrc tools/wmc/wmc
+            for tool in tools/makedep tools/make_xftmpl tools/winebuild/winebuild tools/winegcc/winegcc \
+              tools/widl/widl tools/wrc/wrc tools/wmc/wmc; do
+              test -x "$HOST_BUILD/$tool"
+              sha256sum "$HOST_BUILD/$tool"
+            done
+          } 2>&1 | tee "$RUNNER_TEMP/prx-evidence/host-tools.log"
+      - name: Build real TLS dependencies for this SDK path
+        run: |
+          tools/build_tls_ps5.sh --sdk "$PS5_PAYLOAD_SDK" --work "$TLS_WORK" --jobs "$BUILD_JOBS" \
+            2>&1 | tee "$RUNNER_TEMP/prx-evidence/tls-build.log"
+          python3 tools/tls_manifest.py verify --root "$TLS_WORK/root" \
+            --script tools/build_tls_ps5.sh --sdk "$PS5_PAYLOAD_SDK"
+      - name: Require the observed SDK target and compiled BSD entropy backend
+        run: |
+          "$PS5_PAYLOAD_SDK/bin/prospero-clang" -c -dM -E -x c /dev/null > "$RUNNER_TEMP/prx-evidence/predefines.txt"
+          for macro in __FreeBSD__ __x86_64__ __PROSPERO__; do
+            grep -q "^#define $macro " "$RUNNER_TEMP/prx-evidence/predefines.txt"
+          done
+          python3 - "$TLS_WORK" "$("$LLVM_CONFIG" --bindir)" <<'PY'
+          from pathlib import Path
+          import re, subprocess, sys
+          version = re.search(r'^GNUTLS_VERSION=(.+)$', Path('tools/build_tls_ps5.sh').read_text(), re.M).group(1)
+          source = Path(sys.argv[1]) / ('gnutls-' + version)
+          config = (source / 'config.h').read_text().splitlines()
+          if '#define HAVE_KERN_ARND 1' not in config or '#define HAVE_GETENTROPY 1' in config:
+              raise SystemExit('unexpected configured entropy backend')
+          objects = list((source / 'lib/nettle').rglob('*sysrng-netbsd*.o'))
+          if not objects:
+              raise SystemExit('BSD entropy object was not compiled')
+          for obj in objects:
+              result = subprocess.run([str(Path(sys.argv[2]) / 'llvm-nm'), '--undefined-only', str(obj)],
+                                      check=True, capture_output=True, text=True)
+              if not re.search(r'\bU\s+sysctl$', result.stdout, re.M):
+                  raise SystemExit('BSD entropy object has no sysctl import')
+              print(obj, result.stdout.strip())
+          PY
+      - name: Run the existing Wine PRX builder without external graphics
+        run: |
+          env -u PS5VK_SDK -u PROSPERO_RADV -u PS5_OPENGL_SDK -u PROSPERO_CA_BUNDLE \
+            PROSPERO_TLS_ROOT="$TLS_WORK/root" CFLAGS='-O2 -g' \
+            tools/build_wine_ps5.sh --source "$WINE_SOURCE" --host-tools "$HOST_BUILD" \
+            --foundation "$FOUNDATION" --prx-foundation "$FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" \
+            --work "$WINE_WORK" --jobs "$BUILD_JOBS" 2>&1 | tee "$RUNNER_TEMP/prx-evidence/wine-build.log"
+      - name: Reject skipped modules and independently inspect actual artifacts
+        run: |
+          python3 tools/check_wine_prx_build.py --work "$WINE_WORK" --sdk "$PS5_PAYLOAD_SDK" \
+            --foundation "$FOUNDATION" --llvm-bindir "$("$LLVM_CONFIG" --bindir)" \
+            --output "$RUNNER_TEMP/prx-evidence/inspection" 2>&1 | tee "$RUNNER_TEMP/prx-evidence/acceptance.log"
+      - name: Bundle conversion evidence with corresponding source and notices
+        run: |
+          stage="$RUNNER_TEMP/prx-artifact"
+          mkdir -p "$stage/sources" "$stage/provenance" "$stage/LICENSES/wine/libs" "$stage/LICENSES/freetype"
+          cp -a "$WINE_WORK/prx" "$WINE_WORK/pe" "$stage/"
+          cp "$WINE_WORK/report.json" "$TLS_WORK/root/tls-build-manifest.json" "$stage/provenance/"
+          cp -a "$RUNNER_TEMP/prx-evidence/inspection" "$stage/provenance/"
+          git archive HEAD | gzip -n > "$stage/sources/prospero-win.tar.gz"
+          git -C "$WINE_SOURCE" archive HEAD | gzip -n > "$stage/sources/wine.tar.gz"
+          git -C "$FOUNDATION" archive HEAD | gzip -n > "$stage/sources/prx-foundation.tar.gz"
+          cp "$TLS_WORK"/nettle-*.tar.gz "$TLS_WORK"/gnutls-*.tar.xz "$TLS_WORK"/cacert-*.pem "$stage/sources/"
+          cp "$WINE_WORK"/freetype/freetype-*.tar.xz "$FOUNDATION"/.deps/native/zlib/zlib-*.tar.gz "$stage/sources/"
+          cp tools/patches/nettle-3.10.1-ed448-canonical.patch \
+            tools/patches/gnutls-3.8.13-kern-arnd-headers.patch "$stage/sources/"
+          cp LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md "$stage/"
+          cp -a LICENSES/. "$stage/LICENSES/"
+          for file in LICENSE COPYING.LIB AUTHORS NOTICES.md; do cp "$WINE_SOURCE/$file" "$stage/LICENSES/wine/"; done
+          for file in "$WINE_SOURCE"/libs/*/LICENSE* "$WINE_SOURCE"/libs/*/COPYING* "$WINE_SOURCE"/libs/*/COPYRIGHT*; do
+            if [ -f "$file" ]; then
+              name=$(basename "$(dirname "$file")")
+              mkdir -p "$stage/LICENSES/wine/libs/$name"
+              cp "$file" "$stage/LICENSES/wine/libs/$name/"
+            fi
+          done
+          cp "$WINE_WORK/freetype/src/LICENSE.TXT" "$WINE_WORK/freetype/src/docs/FTL.TXT" "$stage/LICENSES/freetype/"
+          cp -a "$TLS_WORK/root/licenses/"* "$stage/LICENSES/"
+          {
+            printf 'Wine PRX compile/link/conversion evidence only; not a complete installed runtime or game package.\n'
+            printf 'No console execution, working entropy, TLS handshake, certificate validation or login claim.\n'
+            printf 'SELF checks verify container structure and recorded hashes, not official platform signature authenticity.\n'
+            printf 'Converted export NID correctness and native module loading remain unverified.\n'
+            printf 'No external graphics driver is included.\n'
+            printf 'Commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'Run: %s/actions/runs/%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Wine: https://github.com/wine-mirror/wine/tree/%s\n' "$(git -C "$WINE_SOURCE" rev-parse HEAD)"
+            printf 'Foundation: https://github.com/mpereiraesaa/ps5-native-app-boilerplate/tree/%s\n' "$(git -C "$FOUNDATION" rev-parse HEAD)"
+            printf 'SDK source: https://github.com/ps5-payload-dev/sdk/tree/v0.42\n'
+            printf 'SDK archive pin: sources/prx-foundation.tar.gz tools/setup-native-dependencies.sh\n'
+            printf 'TLS input/patch/compiler hashes: provenance/tls-build-manifest.json\n'
+            printf 'Project source includes all Wine patches, staged owned sources and exact build recipes.\n'
+          } > "$stage/BUILD-INFO.txt"
+          (cd "$stage" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          tar -czf "$RUNNER_TEMP/wine-prx-conversion.tar.gz" -C "$stage" .
+      - name: Retain actual module metadata even after acceptance failure
+        if: ${{ always() }}
+        run: |
+          python3 - "$WINE_WORK/prx" "$LLVM_CONFIG" "$FOUNDATION/build/host/ps5-native-tool" "$RUNNER_TEMP/prx-evidence/module-metadata" <<'PY'
+          from pathlib import Path
+          import json, subprocess, sys
+          root, config, converter, out = map(Path, sys.argv[1:])
+          out.mkdir(parents=True, exist_ok=True)
+          statuses = []
+          def record(label, args):
+              try:
+                  result = subprocess.run([str(arg) for arg in args], capture_output=True,
+                                          text=True, errors='replace', timeout=120)
+                  code, stdout, stderr = result.returncode, result.stdout, result.stderr
+              except (OSError, subprocess.SubprocessError) as error:
+                  code, stdout, stderr = -1, '', str(error)
+              (out / (label + '.log')).write_text(json.dumps([str(arg) for arg in args]) + '\n' +
+                                                 stdout + '\nSTDERR:\n' + stderr + f'\nEXIT={code}\n')
+              statuses.append({'inspection': label, 'exit': code})
+              return code, stdout
+          elfs = sorted(root.glob('*.elf'))
+          if elfs:
+              code, directory = record('llvm-bindir', [config, '--bindir'])
+              if code == 0 and directory.strip():
+                  bindir = Path(directory.strip())
+                  for path in elfs:
+                      options = ['-h', '-l', '-d']
+                      if path.name.endswith('.shared.elf'):
+                          options += ['--dyn-syms', '-r', '-W']
+                      record(path.name, [bindir / 'llvm-readelf', *options, path])
+                      if path.name.endswith('.shared.elf'):
+                          record(path.name + '-disassembly', [bindir / 'llvm-objdump', '-d', '--no-show-raw-insn', path])
+              elif code == 0:
+                  statuses.append({'inspection': 'empty-llvm-bindir', 'exit': -1})
+          for path in sorted((root / 'sce_module').glob('*.prx')):
+              record(path.name, [converter, 'self', '--inspect', '--file', path])
+          (out / 'statuses.json').write_text(json.dumps(statuses, indent=2) + '\n')
+          # Capture every artifact even after one tool fails; never convert a
+          # failed analysis into a successful final job or binary upload.
+          raise SystemExit(1 if any(item['exit'] != 0 for item in statuses) else 0)
+          PY
+      - name: Collect raw PRX and dependency failure evidence
+        if: ${{ always() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/prx-evidence/configuration"
+          python3 - "$RUNNER_TEMP/prx-evidence/configuration" "$WINE_WORK" "$TLS_WORK" "$HOST_BUILD" "$FOUNDATION/.deps/native/zlib" <<'PY'
+          from pathlib import Path
+          import shutil, sys
+          out = Path(sys.argv[1])
+          for index, value in enumerate(sys.argv[2:]):
+              root = Path(value)
+              if root.is_dir():
+                  for path in root.rglob('*'):
+                      if path.is_file() and (path.suffix == '.log' or path.name in
+                          {'config.h', 'report.json', 'tls-inputs.json', 'tls-build-manifest.json'}):
+                          target = out / str(index) / path.relative_to(root)
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          shutil.copy2(path, target)
+          PY
+      - name: Retain PRX build evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wine-prx-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prx-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload checked PRX conversion outputs with source and notices
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wine-prx-conversion-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wine-prx-conversion.tar.gz
           if-no-files-found: error
           retention-days: 7
 

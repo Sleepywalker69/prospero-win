@@ -124,7 +124,8 @@ this job is `build/native/eboot.elf`; `eboot.bin` is its converted SELF output.
 This optional artifact has no Wine/graphics runtime and is not a complete
 installer kit. It proves a hosted cross-build only: no console execution,
 installer, login, TLS, game compatibility, or performance claim is made.
-Full Wine/PRX/graphics builds remain the separate packaging workflow below.
+The opt-in PRX lane below checks a broader Wine build; complete graphics and
+installed runtime packaging remain separate workflows.
 The workflow uses read-only repository permissions, no repository secrets,
 no release publishing, and no console deployment. The optional job runs only
 for an explicit manual request or a labeled same-repository pull request.
@@ -154,6 +155,41 @@ runner, so this is validation material rather than a portable installed
 runtime. A successful job establishes cross-compilation and selected backend
 only. It does not establish working console entropy, a TLS handshake,
 certificate rejection, Battle.net login, or a Wine PRX/full-runtime build.
+
+The `build-wine-prxs` label on a same-repository pull request, or manual
+`build_wine_prxs` input, enables a separate 60-minute compile/link/conversion
+check. It uses public foundation `30597512539e7edfde079cbcaf4a626bc0a948c5`,
+the same v0.42 SDK and LLVM 18, genuine pinned Wine host tools, and newly
+built TLS dependencies. It invokes the existing production Wine builder
+without optional external graphics SDKs. This still builds its fixed Wine
+Unix/PE/PRX set, including real ntdll; it is not a fake TLS-only dependency
+graph. The runtime/TLS/DNS/LLVM prerequisite changes must be present before
+opting in; an isolated CI-only branch fails explicitly if they are absent.
+
+The [PRX acceptance checker](../tools/check_wine_prx_build.py) rejects skipped
+conversion, missing or changed artifacts, nonempty diagnostics, and failed
+LLVM inspections. It independently checks shared-ELF dynamic imports and
+exports, provider visibility, data imports and raw syscalls. Application-PRX
+and unknown data imports fail. The four public SDK globals `__isthreaded`,
+`__stderrp`, `__stdoutp` and `environ` require their exact libc/kernel first
+provider, matching OBJECT types and checked zero-addend R64/GLOB_DAT
+relocations writing eight bytes inside a writable LOAD segment. This follows
+the existing [system-data distinction](WINE_PS5_BUILD.md#measured-result);
+it does not establish fresh console resolution of these artifacts.
+The checker also checks SELF-format inspection and digest results, extraction, module headers,
+program metadata and loaded bytes. Container hash integrity is not official
+platform signature authentication. Converted export NID correctness and
+actual native module loading remain unverified.
+
+Raw configure, build, link and inspection logs survive failure. The workflow
+also captures actual shared-ELF symbols, relocations and disassembly for every
+built module even if an earlier acceptance check fails; analyzer errors stay
+failures while the remaining metadata is collected. A successful
+`wine-prx-conversion` artifact includes outputs, hashes, exact project/Wine/
+foundation source, dependency archives/patches and notices. It is validation
+material, not a complete installed runtime or installer kit. It has no
+external graphics driver and makes no console execution, working entropy,
+TLS handshake, certificate validation, login or game-compatibility claim.
 
 ## Building for the console
 

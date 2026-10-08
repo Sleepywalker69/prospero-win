@@ -19,11 +19,12 @@ assert workflow["on"]["push"]["branches"] == ["main"]
 assert set(workflow["on"]["pull_request"]["types"]) == {"opened", "synchronize", "reopened", "labeled", "unlabeled"}
 assert workflow["on"]["workflow_dispatch"]["inputs"]["build_native_title"]["default"] == "false"
 assert workflow["on"]["workflow_dispatch"]["inputs"]["build_tls_dependencies"]["default"] == "false"
+assert workflow["on"]["workflow_dispatch"]["inputs"]["build_wine_prxs"]["default"] == "false"
 assert workflow["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
 assert workflow["concurrency"]["cancel-in-progress"] == "true"
 
 jobs = workflow["jobs"]
-assert set(jobs) == {"host-contracts", "wine-source-contracts", "native-title", "tls-dependencies"}
+assert set(jobs) == {"host-contracts", "wine-source-contracts", "native-title", "tls-dependencies", "wine-prxs"}
 for name, job in jobs.items():
     assert job["runs-on"] == "ubuntu-24.04", name
     assert 0 < int(job["timeout-minutes"]) <= 60, name
@@ -191,4 +192,53 @@ with tempfile.TemporaryDirectory(prefix="pw-ci-rejection-") as directory:
     assert parse_headers().returncode == 0
     (objects / "pw_gnutls_libc.headers").unlink()
     assert parse_headers().returncode != 0, "a missing adapter object/header must fail"
-print("CI build contract passed: preserved gates, source checks, opt-in title and real TLS cross-build artifacts")
+prxs = jobs["wine-prxs"]
+for guard in ("github.event_name == 'workflow_dispatch'", "inputs.build_wine_prxs",
+              "github.event.pull_request.head.repo.full_name == github.repository",
+              "contains(github.event.pull_request.labels.*.name, 'build-wine-prxs')"):
+    assert guard in prxs["if"], guard
+assert prxs["needs"] == ["host-contracts", "wine-source-contracts"]
+assert prxs["env"]["LLVM_CONFIG"] == "/usr/bin/llvm-config-18"
+assert prxs["env"]["XDG_CACHE_HOME"].startswith("${{ github.workspace }}/")
+prx_runs = "\n".join(step.get("run", "") for step in prxs["steps"])
+for token in ("30597512539e7edfde079cbcaf4a626bc0a948c5", "tools/setup-native-dependencies.sh",
+              "native_app_builder.cpp", "sce_module_writer.cpp", "self_container.cpp", "elf_object.cpp",
+              "tools/makedep", "tools/winebuild/winebuild", "tools/winegcc/winegcc", "tools/widl/widl",
+              "tools/wrc/wrc", "tools/wmc/wmc", "--without-x", "--without-freetype",
+              "tools/build_tls_ps5.sh", "HAVE_KERN_ARND 1", "sysrng-netbsd", "-c -dM -E", "PROSPERO_TLS_ROOT=", "tools/build_wine_ps5.sh --source",
+              "--host-tools", "--prx-foundation", "tools/check_wine_prx_build.py", "--llvm-bindir",
+              "git archive HEAD", "freetype-*.tar.xz", "zlib-*.tar.gz", "THIRD_PARTY.md", "SHA256SUMS",
+              "No console execution", "Converted export NID correctness and native module loading remain unverified"):
+    assert token in prx_runs, token
+assert "|| true" not in prx_runs
+assert not any(arg in prx_runs for arg in ("--radv ", "--ps5vk-sdk ", "--ps5-opengl-sdk "))
+assert "always()" in next(step["if"] for step in prxs["steps"] if step.get("name", "").startswith("Collect raw"))
+assert "if" not in prxs["steps"][-1] and prxs["steps"][-1]["with"]["if-no-files-found"] == "error"
+assert "tests/test_check_wine_prx_build.py" in (ROOT / "Makefile").read_text()
+metadata = next(step for step in prxs["steps"] if step.get("name") ==
+                "Retain actual module metadata even after acceptance failure")
+assert "always()" in metadata["if"]
+metadata_code = metadata["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
+    root = Path(directory)
+    artifacts, tools, evidence = root / "prx", root / "tools", root / "evidence"
+    artifacts.mkdir(); tools.mkdir()
+    for name in ("broken.shared.elf", "later.shared.elf", "later.elf"):
+        (artifacts / name).write_text("synthetic artifact")
+    config = tools / "llvm-config"
+    config.write_text(f"#!/bin/sh\nprintf '%s\\n' '{tools}'\n")
+    config.chmod(0o755)
+    for name in ("llvm-readelf", "llvm-objdump"):
+        tool = tools / name
+        tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n"
+                        "case \"$*\" in *broken.shared.elf*) exit 9 ;; esac\n")
+        tool.chmod(0o755)
+    result = subprocess.run([sys.executable, "-c", metadata_code, str(artifacts), str(config),
+                             str(tools / "unused-converter"), str(evidence)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert 'EXIT=9' in (evidence / 'broken.shared.elf.log').read_text()
+    assert 'EXIT=0' in (evidence / 'later.shared.elf.log').read_text()
+    assert '--dyn-syms -r -W' in (evidence / 'later.shared.elf.log').read_text()
+    assert (evidence / 'later.shared.elf-disassembly.log').is_file()
+    assert (evidence / 'later.elf.log').is_file()
+print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX build artifacts")
