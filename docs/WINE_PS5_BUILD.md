@@ -116,6 +116,25 @@ before evaluating a candidate built from that cache.
 | 0897 | `ntdll`: a reservation at a fixed address outside the reserved areas is handed to the direct-memory allocator until it is unmapped, so committing it backs its pages; the console does not back a bare reservation when it is protected, and the first write to such a commit faulted (Steam's protection layer on 64-bit games) |
 | 0898 | `ntdll`: this process's memory counters (GetProcessMemoryInfo, ProcessVmCounters, SystemProcessInformation) come from its views, also for a handle opened on its own id; the console has no /proc or procstat, and every counter was zero |
 | 0899 | `include`: list the PS5 sync headers (0810, 0820, 0885, 0887) in `include/Makefile.in`, which makedep needs to resolve them; configure failed without it |
+| 0911 | `server`: allow watchdog guest-memory reads only when the registered thread/process native PIDs are positive, consistent and equal to the server host PID; keep server-owned wait/object diagnostics for other clients |
+
+The optional `WINE_PS5_WAIT_WATCHDOG` diagnostics directly inspect guest TEB,
+CPU and stack addresses only for that registered local address space. A foreign,
+unknown or inconsistent native identity skips the entire guest-memory block
+before its first pointer calculation. Existing local diagnostic statements,
+wait conditions and one-second threshold remain unchanged. PID registration
+is not authentication, and the guard supplies no remote memory access or
+new claim that every local pointer is safe.
+
+The existing enablement rule is preserved: any present
+`WINE_PS5_WAIT_WATCHDOG` value, including `0`, enables the callback. Patch 0550
+continues to refuse unsupported child creation. Pure integer-only controls
+cover the old predicate's foreign/unknown acceptance, all 125 native-ID
+combinations and local wait/TEB/time boundaries without dereferencing a TEB.
+The opt-in `build-wine-prxs` CI lane compiles the real `server/thread.c`, records
+the patched source and AMD64 object hashes, and requires the compiled watchdog
+function before the existing wineserver/14-module acceptance gate. This is
+compile/link evidence, not a server, pointer-read or child-process run.
 
 ## Allocator
 
