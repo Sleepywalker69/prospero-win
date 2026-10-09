@@ -215,6 +215,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_radv_archive_ci.py
 	python3 tests/test_radv_prx.py
 	python3 tests/test_graphics_overlay.py
+	python3 tests/test_d3d12_query.py
 	python3 tests/test_check_wine_prx_build.py
 	python3 tests/test_status_vocabulary.py
 	python3 tests/test_classify_x86.py
