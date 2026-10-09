@@ -10,6 +10,11 @@
 #include <string.h>
 #include <unistd.h>
 #include "native_peer_fixture/peer_abi.h"
+/* Target SDK 4eb7012 sys/fcntl.h. Host Linux O_NONBLOCK is different. */
+_Static_assert(F_GETFD==1 && F_SETFD==2 && F_GETFL==3 && F_SETFL==4, "target fcntl commands");
+_Static_assert(FD_CLOEXEC==1, "target descriptor close-on-exec flag");
+#undef O_NONBLOCK
+#define O_NONBLOCK 0x0004
 #include "../native/pw_native_peer_probe.h"
 static int mock_close(int),mock_socket(int,int,int),mock_fcntl(int,int,...);
 static int mock_setsockopt(int,int,int,const void *,socklen_t);
@@ -63,6 +68,8 @@ static struct {
  int eof_after,wire_bad,echo_bit,control_eof;int credential_pid_override,credential_pid_set;
  int socket_fail,accept_fail,connect_fail,bind_fail,listen_fail,prepare_fail,unlink_fail,queue_fail;
  int close_fail,close_effect,close_count[256],sockets,accepts,sends,receives,unlinks,queues;
+ int fcntl_calls,fcntl_fail_call,getfd_flags,getfl_flags,close_errno;
+ int setsockopt_calls,bind_calls,listen_calls;
  int poll_effect,control_poll,control_short; unsigned control_at,control_sent;
  int event_step,receipt_case,early_case,event_case,rng_return,rng_size,rng_calls,receipt_calls;
  int rng_effect,send_effect,recv_effect,event_effect; unsigned max_slice;
@@ -116,16 +123,26 @@ static void reset(void)
 static int mock_close(int fd)
 { assert(fd>=0&&fd<256);m.close_count[fd]++;assert(m.close_count[fd]==1);
  if(fd==40)effect(m.close_effect);
+ if(m.close_errno)errno=m.close_errno;
  if(fd==m.close_fail){errno=5;return -1;}return 0; }
 static int mock_socket(int family,int type,int protocol)
 { assert(family==AF_UNIX&&type==SOCK_STREAM&&!protocol);m.sockets++;return m.socket_fail?-1:20; }
 static int mock_fcntl(int fd,int cmd,...)
-{ assert(fd==20||fd==30);assert(cmd==F_GETFD||cmd==F_SETFD||cmd==F_GETFL||cmd==F_SETFL);return m.prepare_fail?-1:0; }
+{
+ static const int commands[]={F_GETFD,F_SETFD,F_GETFL,F_SETFL};
+ assert(fd==20||fd==30);assert(cmd==commands[m.fcntl_calls%4]);m.fcntl_calls++;
+ if(cmd==F_SETFD||cmd==F_SETFL){va_list args;va_start(args,cmd);int flags=va_arg(args,int);va_end(args);
+  assert(flags==(cmd==F_SETFD?(m.getfd_flags|FD_CLOEXEC):(m.getfl_flags|O_NONBLOCK)));}
+ if(m.prepare_fail||m.fcntl_fail_call==m.fcntl_calls){errno=EINVAL;return -1;}
+ if(cmd==F_GETFD)return m.getfd_flags;
+ if(cmd==F_GETFL)return m.getfl_flags;
+ return 0;
+}
 static int mock_setsockopt(int fd,int level,int name,const void *value,socklen_t n)
-{ assert(fd==20||fd==30);assert(level==SOL_SOCKET&&name==SO_NOSIGPIPE&&n==sizeof(int)&&*(const int *)value==1);return 0; }
+{ m.setsockopt_calls++;assert(fd==20||fd==30);assert(level==SOL_SOCKET&&name==SO_NOSIGPIPE&&n==sizeof(int)&&*(const int *)value==1);return 0; }
 static int mock_bind(int fd,const struct sockaddr *a,socklen_t n)
-{ assert(fd==20&&a&&n>2&&a->sa_len==n&&a->sa_family==AF_UNIX);return m.bind_fail?-1:0; }
-static int mock_listen(int fd,int backlog){assert(fd==20&&backlog==1);return m.listen_fail?-1:0;}
+{ m.bind_calls++;assert(fd==20&&a&&n>2&&a->sa_len==n&&a->sa_family==AF_UNIX);return m.bind_fail?-1:0; }
+static int mock_listen(int fd,int backlog){m.listen_calls++;assert(fd==20&&backlog==1);return m.listen_fail?-1:0;}
 static int mock_accept(int fd,struct sockaddr *a,socklen_t *n)
 { assert(fd==20&&!a&&!n);m.accepts++;return m.accept_fail?-1:30; }
 static int mock_connect(int fd,const struct sockaddr *a,socklen_t n)
@@ -295,9 +312,41 @@ static int test_worker_cleanup(void)
  reset();armed();m.close_fail=40;CHECK(pw_native_peer_observe(&m.probe,&m.io,1,&m.result)<0);CHECK(m.result.cleanup_failed&&m.close_count[40]==1);
  return 0;
 }
+static int test_fcntl_contract(void)
+{
+ unsigned failed_api[4]={0};
+ const unsigned expected_api[]={PW_NP_API_FCNTL_GETFD,PW_NP_API_FCNTL_SETFD,
+                                PW_NP_API_FCNTL_GETFL,PW_NP_API_FCNTL_SETFL};
+ /* Synthetic nonzero getter values detect lost pre-existing flag bits. */
+ const int descriptor_flags[]={0,FD_CLOEXEC,0x40,0x40|FD_CLOEXEC};
+ const int status_flags[]={0,2,2|8,2|8|O_NONBLOCK};
+ for(unsigned i=0;i<4;i++){
+  reset();m.getfd_flags=descriptor_flags[i];m.getfl_flags=status_flags[i];
+  CHECK(!open_parent());CHECK(m.fcntl_calls==4&&m.setsockopt_calls==1&&m.bind_calls==1&&m.listen_calls==1);
+  pw_native_peer_parent_cleanup(&m.probe,&m.result);CHECK(m.close_count[20]==1);
+ }
+ for(int close_error=0;close_error<2;close_error++)for(int call=1;call<=4;call++){
+  reset();m.getfd_flags=0x40;m.getfl_flags=2|8;m.fcntl_fail_call=call;
+  m.close_errno=EBADF;if(close_error)m.close_fail=20;
+  CHECK(open_parent()<0);CHECK(m.result.status==PW_NP_OS&&m.result.phase==PW_NP_SETUP);
+  CHECK(m.result.raw_result==-1&&m.result.native_error==EINVAL);
+  CHECK(m.fcntl_calls==call&&!m.setsockopt_calls&&!m.bind_calls&&!m.listen_calls);
+  CHECK(m.close_count[20]==1&&!m.unlinks&&!m.sends&&!m.receives&&!m.queues);
+  CHECK(m.probe.listener==-1&&m.probe.stream==-1&&m.probe.queue==-1&&!m.probe.bound);
+  CHECK(m.result.cleanup_failed==(unsigned)close_error);
+  unsigned failure_api=m.result.api;CHECK(failure_api==expected_api[call-1]);
+  if(!close_error)failed_api[call-1]=failure_api;else CHECK(failed_api[call-1]==failure_api);
+  pw_native_peer_parent_cleanup(&m.probe,&m.result);
+  CHECK(m.close_count[20]==1&&m.result.native_error==EINVAL&&m.result.raw_result==-1&&m.result.api==failure_api);
+ }
+ /* Baseline-compatible red: every command failure must remain distinguishable. */
+ for(unsigned i=0;i<4;i++)for(unsigned j=i+1;j<4;j++)CHECK(failed_api[i]!=failed_api[j]);
+ for(unsigned i=0;i<4;i++)CHECK(failed_api[i]==20+i);
+ return 0;
+}
 int main(int argc,char **argv)
 {
- if(argc>1){if(!strcmp(argv[1],"receipt"))return test_receipt();if(!strcmp(argv[1],"reserve"))return test_reserve();if(!strcmp(argv[1],"close-budget"))return test_close_budget();return 2;}
- if(test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
+ if(argc>1){if(!strcmp(argv[1],"fcntl"))return test_fcntl_contract();if(!strcmp(argv[1],"receipt"))return test_receipt();if(!strcmp(argv[1],"reserve"))return test_reserve();if(!strcmp(argv[1],"close-budget"))return test_close_budget();return 2;}
+ if(test_fcntl_contract()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
  printf("native peer target-ABI pure mocks: %u checks passed; no native capabilities verified\n",checks);return 0;
 }

@@ -230,6 +230,24 @@ An ESRCH/EPERM result, TCP EOF or an expired deadline does not establish death.
 Even a valid exit event does not establish native reaping or complete resource
 reclamation. The existing loader-owned temporary file remains outside cleanup.
 
+Socket preparation failures use distinct `PW_NATIVE_PEER api` codes: 20 for
+`F_GETFD`, 21 for `F_SETFD` adding `FD_CLOEXEC`, 22 for `F_GETFL`, and 23 for
+`F_SETFL` adding `O_NONBLOCK`. These codes are diagnostic identifiers, not the
+native command values. Older builds grouped all four under code 3, so their
+logs cannot identify a failed sub-operation. The parent preserves the first
+call's return value and immediate errno even if cleanup also fails. Every
+call remains required, existing flags are preserved, and the first failure
+stops preparation. No command substitution or fallback is attempted.
+
+A parent setup failure before the loader's `stage=connect` record prevents
+SELF upload and worker launch. Retain the exact build and all matching records
+when reporting it; `PW_NATIVE_CHILD error=5` can be the controller's generic
+failure while `PW_NATIVE_PEER native_error` retains the specific native errno.
+The command definitions in the
+[pinned SDK header](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/include/freebsd/sys/fcntl.h)
+establish their declared ABI, not their console support. A failing setup call
+does not establish whether later credential or process-event operations work.
+
 The reviewed public source establishes the interface and ordering, not the
 PS5 title's permission to observe a loader-owned worker. Pure mocked SDK-ABI
 controls and cross-compilation are distinct from a later operator run. This
