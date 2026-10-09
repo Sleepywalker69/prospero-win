@@ -523,3 +523,6 @@ tests/test_check_wine_prx_build.py
 tools/package_diagnostic_kit.py
 tests/test_diagnostic_kit.py
 docs/DIAGNOSTIC_KIT.md
+
+wine/patches/0911-server-watchdog-local-address-space.patch
+tests/test_wine_watchdog_process_guard.py

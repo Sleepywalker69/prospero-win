@@ -1,0 +1,38 @@
+From: prospero-win contributors
+Subject: [PATCH] server: keep wait watchdog memory reads in the owning native process
+
+The wait watchdog can see every Wine process attached to the server. Its
+TEB/CPU/stack pointers are only directly readable when both registered
+native PID fields identify the server's own process. Require a positive,
+consistent local identity before entering that entire diagnostic block.
+Keep server-owned wait/object diagnostics available for all clients.
+
+This does not enable child creation or provide remote memory reads.
+
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1141,18 +1141,22 @@
+     fprintf( stderr, "wine-ps5: wait snapshot\n" );
+     LIST_FOR_EACH_ENTRY( thread, &thread_list, struct thread, entry )
+     {
+         fprintf( stderr, "wine-ps5: thread tid=%04x suspend=%d/%d state=%d waiting=%d last_req=%d age_ms=%lld\n",
+                  thread->id, thread->suspend, thread->process->suspend, thread->state, thread->wait != NULL,
+                  thread->ps5_last_req, (long long)((monotonic_time - thread->ps5_last_req_time) / 10000) );
+         /* Silent outside any wait for over a second: where its i386 code is,
+          * from the WoW64 CPU area (TEB64 TlsSlots[WOW64_TLS_CPURESERVED]).
+-         * The server runs in the game's process, so it can read it. */
+-        if (!thread->wait && thread->teb && monotonic_time - thread->ps5_last_req_time > TICKS_PER_SEC)
++         * These addresses belong to the client's native process. Read them
++         * only for a known local thread; foreign/unknown clients still get
++         * the server-owned wait and object diagnostics below. */
++        if (thread->unix_pid > 0 && thread->process->unix_pid == thread->unix_pid &&
++            thread->unix_pid == getpid() && !thread->wait && thread->teb &&
++            monotonic_time - thread->ps5_last_req_time > TICKS_PER_SEC)
+         {
+             const unsigned char *cpu = *(unsigned char * const *)(ULONG_PTR)(thread->teb + 0x1480 + 8);
+             if (cpu && *(const unsigned short *)(cpu + 2) == 0x14c /* IMAGE_FILE_MACHINE_I386 */)
+             {
+                 const unsigned char *context = cpu + 4;
+                 unsigned int eip = *(const unsigned int *)(context + 0xb8), esp = *(const unsigned int *)(context + 0xc4);
+                 fprintf( stderr, "wine-ps5: guest tid=%04x eip=%08x esp=%08x:", thread->id, eip, esp );
+                 if (esp) for (i = 0; i < 32; i++) fprintf( stderr, " %08x", ((const unsigned int *)(ULONG_PTR)esp)[i] );
