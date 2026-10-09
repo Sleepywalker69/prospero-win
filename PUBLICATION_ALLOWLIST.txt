@@ -894,3 +894,12 @@ docs/private-dispatch-wow64.md
 wine/ps5/pw_wine_fixture_socket.c
 wine/ps5/pw_wine_fixture_socket.h
 tests/test_pw_wine_fixture_socket.c
+docs/wine-service-consumers.md
+tests/fixtures/wine_fixture_consumers.c
+tests/test_pw_wine_fixture_provider.c
+tests/test_wine_fixture_build.py
+tools/check_wine_fixture_consumers.py
+wine/patches/0912-wine-fixture-service-consumers.patch
+wine/patches/0913-wine-owned-stream-setup.patch
+wine/ps5/pw_wine_fixture_provider.c
+wine/ps5/pw_wine_fixture_provider.h
