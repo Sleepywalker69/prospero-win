@@ -133,6 +133,15 @@ $(eval $(call test_rule,test_pw_native_peer_probe,native/pw_native_peer_protocol
 PW_NATIVE_SOCKET_TEST_FLAGS := -Itests/native_peer_fixture -MMD -MP -MF $(BUILD)/native-socket-diagnostic-test.d
 -include $(BUILD)/native-socket-diagnostic-test.d
 $(eval $(call test_rule,test_pw_native_socket_diagnostic,tests/test_pw_native_socket_diagnostic.c,$(PW_NATIVE_SOCKET_TEST_FLAGS)))
+PW_NATIVE_SERVICE_PACKET_FLAGS := -Itests/native_service_fixture -MMD -MP -MF $(BUILD)/native-service-packet-test.d
+PW_NATIVE_SERVICE_PACKET_WORKER_FLAGS := -Itests/native_service_fixture -MMD -MP -DPW_NATIVE_CHILD_FREESTANDING -MF $(BUILD)/native-service-packet-worker-test.d
+PW_NATIVE_SERVICE_WORKER_FLAGS := -Itests/native_service_fixture -MMD -MP -DPW_NATIVE_CHILD_FREESTANDING -fno-builtin -MF $(BUILD)/native-service-worker-test.d
+-include $(BUILD)/native-service-packet-test.d $(BUILD)/native-service-packet-worker-test.d $(BUILD)/native-service-worker-test.d
+$(eval $(call test_rule,test_pw_native_service_packet,tests/test_pw_native_service_packet.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_FLAGS)))
+$(eval $(call test_rule,test_pw_native_service_packet_worker,tests/test_pw_native_service_packet.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_WORKER_FLAGS)))
+$(eval $(call test_rule,test_pw_native_service_worker,tests/test_pw_native_service_worker.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_WORKER_FLAGS)))
+$(BUILD)/test_pw_native_service_packet $(BUILD)/test_pw_native_service_packet_worker: native/pw_native_service_packet.c native/pw_native_service_packet.h tests/native_service_fixture/sys/socket.h
+$(BUILD)/test_pw_native_service_worker: native/pw_native_service_worker.c native/pw_native_service_packet.c native/pw_native_service_packet.h tests/native_service_fixture/sys/socket.h
 $(eval $(call test_rule,test_native_fd_mock,tests/test_native_fd_mock.c,))
 $(eval $(call test_rule,test_pw_native_fd_report,tests/test_pw_native_fd_report.c native/pw_native_fd_report.c,))
 $(eval $(call test_rule,test_pw_native_child_capabilities,tests/test_pw_native_child_capabilities.c native/pw_native_child_protocol.c native/pw_native_fd_report.c,))
@@ -178,7 +187,7 @@ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_ho
 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle \
 	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount \
-	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe test_native_fd_mock test_pw_native_fd_report test_pw_native_child_capabilities test_pw_native_fd_worker test_pw_native_fd_controller test_pw_native_peer_protocol test_pw_native_peer_controller test_pw_native_peer_worker test_pw_native_peer_probe test_pw_native_socket_diagnostic
+	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe test_native_fd_mock test_pw_native_fd_report test_pw_native_child_capabilities test_pw_native_fd_worker test_pw_native_fd_controller test_pw_native_peer_protocol test_pw_native_peer_controller test_pw_native_peer_worker test_pw_native_peer_probe test_pw_native_socket_diagnostic test_pw_native_service_packet test_pw_native_service_packet_worker test_pw_native_service_worker
 
 # The Python suites drive the built DBT tools and check the contracts the
 # host compiler cannot.
