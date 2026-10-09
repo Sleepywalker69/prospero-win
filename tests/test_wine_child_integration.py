@@ -10,6 +10,9 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
+import contextlib
+import io
 
 import yaml
 
@@ -34,6 +37,53 @@ def preprocess(mode, include):
 
 
 class WineChildIntegration(unittest.TestCase):
+    def test_resource_probe_caps_jobs_and_preserves_environment(self):
+        workflow = yaml.load((ROOT/'.github/workflows/windows-child-fixture.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = workflow['jobs']['matched-runtime']['steps']
+        step = next(x for x in steps if x.get('id') == 'build-resources')
+        code = step['run'].split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
+        gib = 1024**3
+        cases = [(1,20,{},1),(2,20,{},2),(4,12,{},4),(8,11,{},2),
+                 (4,20,{'memory.max':str(16*gib),'memory.current':str(5*gib)},2),
+                 (4,20,{'memory.max':str(16*gib),'memory.current':str(3*gib)},4),
+                 (4,20,{'memory.max':'max'},4),(4,20,{'memory.max':str(16*gib)},2),
+                 (4,20,{'memory.max':'invalid','memory.current':'0'},2)]
+        original = Path.read_text
+        for cpus, memory, group, expected in cases:
+            with self.subTest(cpus=cpus, memory=memory, group=group), tempfile.TemporaryDirectory() as temporary:
+                temp = Path(temporary); env = temp/'github-env'; env.write_text('EXISTING=kept\n')
+                def read(path, *args, **kwargs):
+                    if str(path) == '/proc/meminfo': return 'MemAvailable: %d kB\n' % (memory*gib//1024)
+                    if str(path).startswith('/sys/fs/cgroup/'):
+                        if str(path).startswith('/sys/fs/cgroup/memory/'): raise FileNotFoundError(path)
+                        if path.name not in group: raise FileNotFoundError(path)
+                        return group[path.name]
+                    return original(path, *args, **kwargs)
+                with mock.patch.object(Path,'read_text',read), mock.patch.object(subprocess,'check_output',return_value=str(cpus)), \
+                     mock.patch.dict(os.environ, RUNNER_TEMP=str(temp), GITHUB_ENV=str(env)), contextlib.redirect_stdout(io.StringIO()):
+                    exec(compile(code, '<actual workflow resource probe>', 'exec'), {})
+                self.assertEqual(env.read_text(), 'EXISTING=kept\nBUILD_JOBS=%d\n' % expected)
+                self.assertEqual(json.loads((temp/'fixture-evidence/build-resources.json').read_text())['build_jobs'], expected)
+
+    def test_actual_target_compile_gate_precedes_full_host(self):
+        workflow = yaml.load((ROOT/'.github/workflows/windows-child-fixture.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = workflow['jobs']['matched-runtime']['steps']
+        named = {step.get('name'): (index, step) for index, step in enumerate(steps)}
+        tools, dependencies, gate, host, target = [named[name] for name in (
+            'Build only matching host tools for early target checks',
+            'Build public SDK converter and real TLS prerequisites',
+            'Compile complete experimental target units before the host runtime',
+            'Build complete matching host Wine',
+            'Build and check the complete private-dispatch Wine cohort')]
+        self.assertLess(tools[0], dependencies[0]); self.assertLess(dependencies[0], gate[0])
+        self.assertLess(gate[0], host[0]); self.assertLess(host[0], target[0])
+        self.assertIn('--tools-only', tools[1]['run']); self.assertNotIn('--tools-only', host[1]['run'])
+        self.assertIn('--compile-check', gate[1]['run']); self.assertNotIn('--compile-check', target[1]['run'])
+        self.assertIn('PW_WINE_PRIVATE_DISPATCH=1 PW_WINE_SERVICE_FIXTURE=1', gate[1]['run'])
+        for _, step in (tools, dependencies, gate, host, target):
+            self.assertNotIn('continue-on-error', step)
+            self.assertNotIn('|| true', step['run'])
+
     def test_fixture_provenance_preflight_runs_before_expensive_builds(self):
         workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
                              Loader=yaml.BaseLoader)

@@ -41,7 +41,11 @@ This guarantee covers the ordinary serialized root exit path. Fatal exits,
 direct `_exit`, process crashes and simultaneous uncontrolled teardown remain
 unverified. A native owner must distinguish safe host release after a settled
 failed run from a successful Windows compatibility result. It must never use
-elapsed time to clear uncertain ownership.
+elapsed time to clear uncertain ownership. If restoring the process-creation signal
+mask fails, the consumer records the actual pthread error and calls Wine's
+`abort_thread(1)`. It does not return success with the wrong mask. A last-thread
+abort still reaches direct `_exit`, so this fatal branch is outside the ordinary
+root-settlement guarantee.
 
 Patch 0913 prepares only newly owned ordinary stream endpoints used by Wine
 IPC. It checks exact `SO_TYPE`, successful `FIOCLEX` when requested, and
@@ -57,7 +61,11 @@ branches, the actual pipe wrapper with mocked boundaries, and executable
 controls extracted from the fully composed pinned Wine source. Source CI and
 the native Wine builder require `tools/check_wine_fixture_consumers.py` to
 succeed before compilation. Missing source or extraction failures cannot skip
-that gate. These checks establish source contracts, not console execution.
+that gate. An additional experimental build gate compiles eleven complete Wine
+translation units through the generated target Makefile, plus the three service
+adapters with the real SDK headers. The matched workflow runs this before the
+full host runtime build. These checks establish source/build contracts, not
+console execution.
 
 The source reference is the pinned
 [Wine process implementation](https://github.com/wine-mirror/wine/blob/490f6d5dcbb2a5047345b8af88d114bbcaad69a8/dlls/ntdll/unix/process.c)

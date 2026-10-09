@@ -31,11 +31,13 @@ selected ref. No release publishing or console deployment occurs.
    source-backed controls. Record every skip; source checks alone are not a
    compiled PRX result.
 3. Apply the exact final patch series to a private reference checkout and run
-   the existing owned-source staging commands. Build full host Wine and retain
-   an early checkpoint with its corresponding source and notices.
-4. Build the pinned public SDK/converters, TLS prerequisites and the complete
-   private-ON Wine PE/PRX cohort with `PW_WINE_SERVICE_FIXTURE=1`. The existing 14-module checker remains required;
-   its exact PE set contains 22 patched DLLs, including x64 wow64 and wow64win.
+   the existing owned-source staging commands. Build host tools and the pinned
+   public SDK/converters/TLS prerequisites, then compile the complete
+   experimental target units before starting the full host runtime.
+4. Build full host Wine and retain its source checkpoint. Build and check the
+   complete private-ON Wine PE/PRX cohort with `PW_WINE_SERVICE_FIXTURE=1`.
+   The existing 14-module checker remains required; its exact PE set contains
+   22 patched DLLs, including x64 wow64 and wow64win.
 5. Build the distinct full-CRT service child, using unchanged app_crt and the
    high-address native layout. Its service-only converter copy adds a relocated
    pointer to the preload mask. The ordinary worker modes keep their original
@@ -54,6 +56,15 @@ The source cohort comparison includes actual staged source bytes. Equal Git
 index trees alone are insufficient because the normal staging script modifies
 tracked Wine files after patch application. The fresh reference contains the
 same expected edits and the explicitly staged PS5-only bridge files.
+
+The workflow first builds Wine's existing host-tool target and compiles the
+complete experimental target translation units before the full host runtime.
+`build_host_wine.sh --tools-only` and `build_wine_ps5.sh --compile-check` emit
+explicit partial-stage records; neither produces or validates a complete
+runtime. The later full build, prefix and artifact checks remain mandatory.
+Build concurrency is capped at four only when at least four CPUs and 12 GiB of
+available memory remain after finite cgroup limits; smaller runners use at most
+two jobs. The measured resources and chosen limit are retained in the evidence.
 
 ## Full-CRT child and title records
 

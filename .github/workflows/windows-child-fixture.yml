@@ -123,6 +123,48 @@ jobs:
           (evidence / 'fixture-preflight.json').write_text(json.dumps(pair, indent=2) + '\n')
           print('Original Windows fixture bytes and producer inputs verified before compilation')
           PY
+      - name: Select bounded build concurrency from available resources
+        id: build-resources
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          def choose_jobs(cpus, available, limits):
+              headroom = available
+              for limit, current in limits:
+                  if limit is not None:
+                      headroom = min(headroom, max(0, limit - current) if limit >= 0 and current >= 0 else 0)
+              return min(cpus, 4 if cpus >= 4 and headroom >= 12 * 1024**3 else 2)
+          cpus = max(1, int(subprocess.check_output(['nproc'], text=True)))
+          available = 0
+          for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+              if line.startswith('MemAvailable:'):
+                  available = int(line.split()[1]) * 1024
+          limits = []
+          for maximum, current in [('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+                                   ('/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes')]:
+              try:
+                  raw = pathlib.Path(maximum).read_text().strip()
+              except FileNotFoundError:
+                  continue
+              except OSError:
+                  limits.append((0, 0))
+                  continue
+              if raw == 'max':
+                  continue
+              try:
+                  limits.append((int(raw), int(pathlib.Path(current).read_text())))
+              except (OSError, ValueError):
+                  limits.append((0, 0))
+          jobs = choose_jobs(cpus, available, limits)
+          record = {'cpus': cpus, 'memory_available_bytes': available,
+                    'cgroup_limits_and_usage': limits, 'build_jobs': jobs}
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-evidence'
+          evidence.mkdir(exist_ok=True)
+          (evidence / 'build-resources.json').write_text(json.dumps(record, indent=2) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('BUILD_JOBS=' + str(jobs) + '\n')
+          print(json.dumps(record))
+          PY
       - name: Prepare ordinary hosted prerequisites
         run: |
           sudo apt-get update
@@ -187,6 +229,37 @@ jobs:
           python3 tools/prepare_windows_child_prefix.py stage-reference --repo "$GITHUB_WORKSPACE" \
             --wine-source "$WINE_SOURCE" --out "$RUNNER_TEMP/cohort-reference" --report "$COHORT" \
             2>&1 | tee "$RUNNER_TEMP/fixture-evidence/cohort-source.log"
+      - name: Build only matching host tools for early target checks
+        run: |
+          timeout 20m env CC=clang-18 CXX=clang++-18 sh tools/build_host_wine.sh \
+            --source "$WINE_SOURCE" --work "$HOST_WORK" --jobs "$BUILD_JOBS" --tools-only \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-tools.log"
+      - name: Build public SDK converter and real TLS prerequisites
+        run: |
+          {
+            make -C "$TITLE_FOUNDATION" deps libc
+            bash "$FOUNDATION/tools/setup-native-dependencies.sh"
+            sdk="$TITLE_FOUNDATION/.deps/native/ps5-payload-sdk"
+            python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
+            printf 'PS5_PAYLOAD_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+            native="$FOUNDATION/tooling/native"
+            zroot="$FOUNDATION/.deps/native/zlib/root"
+            zarchive=$(find "$zroot" -type f -name libz.a -print -quit)
+            test -n "$zarchive"
+            mkdir -p "$FOUNDATION/build/host"
+            clang++-18 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zroot/usr/include" \
+              "$native/native_app_builder.cpp" "$native/self_container.cpp" "$native/elf_object.cpp" \
+              "$native/sce_module_writer.cpp" "$zarchive" -o "$FOUNDATION/build/host/ps5-native-tool"
+            sh tools/build_tls_ps5.sh --sdk "$sdk" --work "$TLS_WORK" --jobs "$BUILD_JOBS"
+          } 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/dependencies.log"
+      - name: Compile complete experimental target units before the host runtime
+        run: |
+          env -u PS5VK_SDK -u PROSPERO_RADV -u PS5_OPENGL_SDK -u PROSPERO_CA_BUNDLE \
+            PW_WINE_PRIVATE_DISPATCH=1 PW_WINE_SERVICE_FIXTURE=1 PROSPERO_TLS_ROOT="$TLS_WORK/root" CFLAGS='-O2 -g' \
+            timeout 30m sh tools/build_wine_ps5.sh --source "$WINE_SOURCE" --host-tools "$HOST_WORK/build" \
+            --foundation "$TITLE_FOUNDATION" --prx-foundation "$FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" \
+            --work "$WINE_WORK" --jobs "$BUILD_JOBS" --compile-check \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/early-target-compile.log"
       - name: Build complete matching host Wine
         run: |
           timeout 180m env CC=clang-18 CXX=clang++-18 sh tools/build_host_wine.sh \
@@ -210,24 +283,6 @@ jobs:
           path: ${{ runner.temp }}/windows-child-host-checkpoint.tar.gz
           retention-days: 7
           if-no-files-found: error
-      - name: Build public SDK converter and real TLS prerequisites
-        run: |
-          {
-            make -C "$TITLE_FOUNDATION" deps libc
-            bash "$FOUNDATION/tools/setup-native-dependencies.sh"
-            sdk="$TITLE_FOUNDATION/.deps/native/ps5-payload-sdk"
-            python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
-            printf 'PS5_PAYLOAD_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
-            native="$FOUNDATION/tooling/native"
-            zroot="$FOUNDATION/.deps/native/zlib/root"
-            zarchive=$(find "$zroot" -type f -name libz.a -print -quit)
-            test -n "$zarchive"
-            mkdir -p "$FOUNDATION/build/host"
-            clang++-18 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zroot/usr/include" \
-              "$native/native_app_builder.cpp" "$native/self_container.cpp" "$native/elf_object.cpp" \
-              "$native/sce_module_writer.cpp" "$zarchive" -o "$FOUNDATION/build/host/ps5-native-tool"
-            sh tools/build_tls_ps5.sh --sdk "$sdk" --work "$TLS_WORK" --jobs "$BUILD_JOBS"
-          } 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/dependencies.log"
       - name: Build and check the complete private-dispatch Wine cohort
         run: |
           env -u PS5VK_SDK -u PROSPERO_RADV -u PS5_OPENGL_SDK -u PROSPERO_CA_BUNDLE \

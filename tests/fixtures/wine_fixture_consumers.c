@@ -296,8 +296,124 @@ static void root_exit_tests(void)
     CHECK(run_root_exit()==1&&x.calls==4&&x.sleeps==2&&x.exits==1);
     reset();CHECK(run_root_exit()==2&&x.closes==6&&!x.exits&&x.detached_success);
 }
+/* The entire real done/cleanup/mask-restoration/return tail. These boundary
+ * mocks test ordering and branch behavior; the actual SDK TU gate separately
+ * establishes production declarations and compilation. */
+static struct {
+    unsigned events, terminals, handles, descriptors, frees, restores, errors, aborts, returns;
+    unsigned expected_terminal, expected_handles, expected_descriptors;
+    unsigned expected_success, expected_status, recorded_success, recorded_status;
+    int masked, mask_error, reported_error, old_mask;
+    char order[32];
+} tail;
+static jmp_buf tail_jump;
+static unsigned char tail_storage[4];
+static void tail_event(char event)
+{ CHECK(tail.events<sizeof(tail.order)-1);tail.order[tail.events++]=event;tail.order[tail.events]=0; }
+static void tail_terminal(void *context,uint64_t generation,uint32_t success,uint32_t status)
+{
+    CHECK(context==&tail&&generation==UINT64_C(0x123456789abcdef0));
+    CHECK(!tail.events&&!tail.terminals&&!tail.handles&&!tail.descriptors&&!tail.frees&&!tail.restores);
+    ++tail.terminals;tail.recorded_success=success;tail.recorded_status=status;tail_event('T');
+    errno=ENOSPC;
+}
+static unsigned tail_handle(void *handle)
+{
+    CHECK(handle&&tail.terminals==tail.expected_terminal&&!tail.descriptors&&!tail.frees&&!tail.restores);
+    ++tail.handles;tail_event('H');errno=EBADF;return STATUS_INTERNAL_ERROR;
+}
+static int tail_close(int fd)
+{
+    CHECK(fd>=0&&fd<=1&&tail.terminals==tail.expected_terminal&&tail.handles==tail.expected_handles&&!tail.frees&&!tail.restores);
+    ++tail.descriptors;tail_event('D');errno=EINTR;return -1;
+}
+static void tail_free(void *p)
+{
+    CHECK(tail.terminals==tail.expected_terminal&&tail.handles==tail.expected_handles&&tail.descriptors==tail.expected_descriptors&&!tail.restores);
+    CHECK(tail.frees<4&&p==&tail_storage[tail.frees]);++tail.frees;tail_event('F');errno=EBUSY;
+}
+static int tail_sigmask(int how,const int *set,void *old)
+{
+    CHECK(how==2&&set==&tail.old_mask&&!old&&tail.masked&&tail.frees==4&&!tail.restores);
+    ++tail.restores;tail_event('M');errno=EAGAIN;return tail.mask_error;
+}
+static void tail_err(const char *format,int error)
+{
+    CHECK(strstr(format,"%d")&&tail.restores==1&&!tail.errors&&error==tail.mask_error);
+    ++tail.errors;tail.reported_error=error;tail_event('E');errno=EDOM;
+}
+static void tail_abort(int status) __attribute__((noreturn));
+static void tail_abort(int status)
+{
+    CHECK(status==1&&tail.errors==1&&tail.frees==4&&!tail.aborts&&!tail.returns);
+    ++tail.aborts;tail_event('A');longjmp(tail_jump,1);
+}
+#undef ERR
+#define ERR tail_err
+#define NtClose tail_handle
+#define close tail_close
+#define free tail_free
+#define pthread_sigmask tail_sigmask
+#define SIG_SETMASK 2
+#define abort_thread tail_abort
+static unsigned actual_startup_tail(unsigned generation_present,unsigned resources)
+{
+    PwWineFixtureProvider f={.context=&tail,.startup_result=tail_terminal};
+    const PwWineFixtureProvider *fixture=&f;
+    uint64_t fixture_generation=generation_present?UINT64_C(0x123456789abcdef0):0;
+    unsigned success=tail.expected_success,status=tail.expected_status;
+    int fixture_masked=tail.masked;
+    /* The production variable is a sigset_t; the boundary mock only checks its
+     * address. No claim about the host or target signal-set representation. */
+#define fixture_old_mask tail.old_mask
+    void *file_handle=resources?&tail_storage[0]:NULL,*process_info=resources?&tail_storage[1]:NULL;
+    void *process_handle=resources?&tail_storage[2]:NULL,*thread_handle=resources?&tail_storage[3]:NULL;
+    int socketfd[2]={resources?0:-1,-1},unixdir=resources?1:-1;
+    void *startup_info=&tail_storage[0],*winedebug=&tail_storage[1],*unix_name=&tail_storage[2];
+    struct {void *Buffer;} nt_name={&tail_storage[3]};
+    goto done;
+#include "startup-tail.inc"
+#undef fixture_old_mask
+}
+#undef abort_thread
+#undef SIG_SETMASK
+#undef pthread_sigmask
+#undef free
+#undef close
+#undef NtClose
+#undef ERR
+#define ERR(...) ((void)0)
+static void mask_tail_tests(void)
+{
+    const int errors[]={0,EINVAL,EACCES,-7};
+    const unsigned statuses[]={0,0xc0000008u,UINT32_MAX};
+    for(unsigned status=0;status<3;status++)for(unsigned success=0;success<2;success++)
+    for(unsigned generation=0;generation<2;generation++)for(unsigned masked=0;masked<2;masked++)
+    for(unsigned resources=0;resources<2;resources++)for(unsigned error=0;error<4;error++) {
+        memset(&tail,0,sizeof(tail));tail.expected_success=success;tail.expected_status=statuses[status];
+        tail.expected_terminal=generation;tail.expected_handles=resources?4:0;tail.expected_descriptors=resources?2:0;
+        tail.masked=(int)masked;tail.mask_error=errors[error];errno=ERANGE;
+        int escaped=setjmp(tail_jump);
+        if(!escaped) { unsigned result=actual_startup_tail(generation,resources);++tail.returns;CHECK(result==statuses[status]); }
+        CHECK(tail.terminals==generation&&tail.handles==tail.expected_handles&&tail.descriptors==tail.expected_descriptors&&tail.frees==4);
+        if(generation)CHECK(tail.recorded_success==success&&tail.recorded_status==statuses[status]);
+        CHECK(tail.restores==masked);
+        if(masked&&errors[error]) {
+            CHECK(escaped==1&&tail.aborts==1&&tail.errors==1&&!tail.returns);
+            CHECK(tail.reported_error==errors[error]&&errno==EDOM);
+        } else CHECK(!escaped&&!tail.aborts&&!tail.errors&&tail.returns==1);
+        char expected[32]="";
+        if(generation)strcat(expected,"T");
+        if(resources)strcat(expected,"HHHHDD");
+        strcat(expected,"FFFF");
+        if(masked)strcat(expected,"M");
+        if(masked&&errors[error])strcat(expected,"EA");
+        CHECK(!strcmp(tail.order,expected));
+    }
+}
+
 int main(void)
 {
-    startup_tests();signal_tests();timer_tests();local_tests();root_exit_tests();
+    startup_tests();signal_tests();timer_tests();local_tests();root_exit_tests();mask_tail_tests();
     printf("composed Wine fixture consumer bodies: %u checks passed; no native operations\n",checks);return 0;
 }

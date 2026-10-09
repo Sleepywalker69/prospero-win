@@ -58,6 +58,7 @@
 # Usage:
 #   tools/build_wine_ps5.sh [--check-patches] [--patches DIR] [--work DIR]
 #       [--source DIR] [--host-tools DIR] [--foundation DIR] [--sdk DIR]
+#       [--compile-check] (experimental target units only; no runtime artifact)
 #       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR]
 #       [--ps5-opengl-sdk DIR] [--jobs N]
 # LLVM_CONFIG selects LLVM 18 (default llvm-config-18); the same canonical
@@ -127,11 +128,13 @@ ps5opengl_lib=
 radv=${PROSPERO_RADV:-}
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 check_only=0
+compile_check_only=0
 
 fail() { echo "build_wine_ps5: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case $1 in
     --check-patches) check_only=1 ;;
+    --compile-check) compile_check_only=1 ;;
     --patches) patches=$2; shift ;;
     --work) work=$2; shift ;;
     --source) source_dir=$2; shift ;;
@@ -147,6 +150,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+[ "$compile_check_only" = 0 ] || [ "${PW_WINE_SERVICE_FIXTURE:-0}" = 1 ] ||
+    fail "--compile-check requires PW_WINE_SERVICE_FIXTURE=1"
 
 [ -z "$ps5vk_sdk" ] || [ -z "$radv" ] || fail "--ps5vk-sdk and --radv both name libvulkan.prx; give one"
 [ -z "$ps5opengl_sdk" ] || [ -f "$ps5opengl_sdk/lib/libPS5OpenGL.a" ] ||
@@ -359,6 +365,40 @@ fi
 if [ "$tls_stamp" != disabled ]; then
     grep -q '^#define SONAME_LIBGNUTLS "libgnutls.so"' "$build/include/config.h" ||
         fail "TLS was requested but Wine did not configure its GnuTLS backend"
+fi
+
+# Compile complete experimental units with the actual generated target rules.
+if [ "$service_fixture" = 1 ]; then
+    set -- -C "$build" -k -j"$jobs"
+    for source in dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c server/process.c server/ptrace.c server/request.c server/thread.c; do
+        set -- "$@" -W "$tree/$source"
+    done
+    make "$@" \
+        dlls/ntdll/unix/loader.o \
+        dlls/ntdll/unix/process.o \
+        dlls/ntdll/unix/server.o \
+        dlls/ntdll/unix/signal_x86_64.o \
+        dlls/ntdll/unix/thread.o \
+        dlls/ntdll/unix/virtual.o \
+        dlls/wow64/x86_64-windows/syscall.o \
+        server/process.o \
+        server/ptrace.o \
+        server/request.o \
+        server/thread.o > "$work/service-translation-units.log" 2>&1 ||
+        fail "real experimental Wine translation-unit gate failed; see service-translation-units.log"
+    # These three production units are not Makefile-owned. Preserve the actual
+    # later adapter compiler recipe and its real target headers; syntax-only
+    # has no output object or link side effects.
+    for unit in pw_wine_fixture_provider pw_wine_fixture_socket pw_wine_compat; do
+        "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC $service_cflags \
+            -fsyntax-only "$root/wine/ps5/$unit.c" >> "$work/service-translation-units.log" 2>&1 ||
+            fail "real experimental adapter translation-unit gate failed: $unit"
+    done
+fi
+if [ "$compile_check_only" = 1 ]; then
+    printf '%s\n' '{"schema":"pw-wine-build-stage/1","stage":"target-translation-units","complete_runtime":false}' > "$work/compile-check-only.json"
+    echo "experimental target units compiled; full modules and PRX validation pending"
+    exit 0
 fi
 
 # The SDK's libc carries the math functions, but win32u links -lm by name;

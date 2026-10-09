@@ -12,10 +12,90 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WineFixtureBuild(unittest.TestCase):
+    def test_real_translation_unit_gate_routing_and_failure(self):
+        for selector in ('0', 'invalid'):
+            refused = subprocess.run(['sh', str(ROOT/'tools/build_wine_ps5.sh'), '--compile-check'],
+                env=dict(os.environ, PW_WINE_SERVICE_FIXTURE=selector), capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn('--compile-check requires PW_WINE_SERVICE_FIXTURE=1', refused.stderr)
+        source = (ROOT / 'tools/build_wine_ps5.sh').read_text()
+        block = source.split('# Compile complete experimental units', 1)[1].split("# The SDK's libc", 1)[0]
+        block = block.split("\n", 1)[1]
+        objects = ['dlls/ntdll/unix/' + n + '.o' for n in ('loader','process','server','signal_x86_64','thread','virtual')]
+        objects += ['dlls/wow64/x86_64-windows/syscall.o']
+        objects += ['server/' + n + '.o' for n in ('process','ptrace','request','thread')]
+        with tempfile.TemporaryDirectory(prefix='real gate routing ') as temporary:
+            root = Path(temporary); sdk = root / 'sdk'; (sdk / 'bin').mkdir(parents=True)
+            compiler = sdk / 'bin/prospero-clang'
+            compiler.write_text('#!/usr/bin/env python3\nimport os,sys,json\n'
+                'with open(os.environ["CALLS"],"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                'raise SystemExit(9 if os.environ.get("FAIL_ADAPTER","") in sys.argv[-1] and os.environ.get("FAIL_ADAPTER") else 0)\n')
+            compiler.chmod(0o755)
+            for name, service, partial, fail_make, fail_adapter in [
+                ('off',0,0,0,''), ('partial',1,1,0,''), ('full',1,0,0,''),
+                ('make-error',1,1,1,''), ('adapter-error',1,1,0,'pw_wine_fixture_socket')]:
+                work = root / name; work.mkdir(); calls = work / 'calls'
+                env = dict(os.environ, SDK=str(sdk), WORK=str(work), CALLS=str(calls),
+                           SERVICE=str(service), PARTIAL=str(partial), FAIL_MAKE=str(fail_make), FAIL_ADAPTER=fail_adapter)
+                setup = ('set -eu\nsdk=$SDK\nwork=$WORK\nbuild=$work/build\ntree=$work/source\nroot=$work/repo\n'
+                         'jobs=2\nservice_cflags=-DPW_WINE_SERVICE_FIXTURE=1\nservice_fixture=$SERVICE\n'
+                         'compile_check_only=$PARTIAL\nfail() { exit 73; }\n'
+                         'make() { printf "%s\\n" "$@" > "$work/make-args"; [ "$FAIL_MAKE" = 0 ]; }\n')
+                result = subprocess.run(['sh'], input=setup+block+'\necho FULL_CONTINUATION\n', env=env,
+                                        text=True, capture_output=True)
+                failed = bool(fail_make or fail_adapter)
+                self.assertEqual(result.returncode, 73 if failed else 0, result.stderr)
+                if not service:
+                    self.assertFalse((work/'make-args').exists()); self.assertFalse(calls.exists())
+                    self.assertIn('FULL_CONTINUATION', result.stdout); continue
+                args = (work/'make-args').read_text().splitlines()
+                self.assertEqual(args[-11:], objects)
+                self.assertEqual(args.count('-W'), 11)
+                expected_sources = [str(work/'source'/name.replace('x86_64-windows/', '')).removesuffix('.o') + '.c' for name in objects]
+                self.assertEqual([args[i+1] for i, arg in enumerate(args) if arg == '-W'], expected_sources)
+                self.assertIn('-k', args)
+                compiled = [json.loads(row) for row in calls.read_text().splitlines()] if calls.exists() else []
+                self.assertEqual(len(compiled), 0 if fail_make else 2 if fail_adapter else 3)
+                adapter_names = ['pw_wine_fixture_provider.c', 'pw_wine_fixture_socket.c', 'pw_wine_compat.c']
+                self.assertEqual([Path(argv[-1]).name for argv in compiled], adapter_names[:len(compiled)])
+                for argv in compiled:
+                    self.assertIn('-fsyntax-only', argv)
+                    self.assertIn('-DPW_WINE_SERVICE_FIXTURE=1', argv)
+                    self.assertNotIn('-c', argv)
+                self.assertFalse((work/'report.json').exists())
+                self.assertFalse((work/'prx').exists())
+                if partial and not failed:
+                    self.assertFalse(json.loads((work/'compile-check-only.json').read_text())['complete_runtime'])
+                    self.assertNotIn('FULL_CONTINUATION', result.stdout)
+                else:
+                    self.assertFalse((work/'compile-check-only.json').exists())
+                    self.assertEqual('FULL_CONTINUATION' in result.stdout, not failed)
+
+    def test_host_tools_only_stops_before_full_build_and_install(self):
+        source = (ROOT / 'tools/build_host_wine.sh').read_text()
+        block = source.split('# Configure once,', 1)[1].split('make -C "$build" -j"$jobs" > "$work/make.log"', 1)[0]
+        block = block.split("\n", 1)[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            for mode, failure in [(0,0),(1,0),(1,1)]:
+                work = Path(temporary)/('%d-%d' % (mode,failure)); work.mkdir()
+                setup = ('set -eu\nwork=$WORK\nbuild=$work/build\njobs=2\ntools_only=$MODE\n'
+                         'fail() { exit 73; }\nmake() { printf "%s\\n" "$@" > "$work/args"; [ "$FAIL" = 0 ]; }\n')
+                result = subprocess.run(['sh'], input=setup+block+'\necho FULL_CONTINUATION\n',
+                    env=dict(os.environ, WORK=str(work), MODE=str(mode), FAIL=str(failure)), text=True, capture_output=True)
+                self.assertEqual(result.returncode, 73 if failure else 0)
+                self.assertEqual('FULL_CONTINUATION' in result.stdout, mode == 0)
+                self.assertFalse((work/'install').exists())
+                if mode:
+                    self.assertEqual((work/'args').read_text().splitlines()[-1], '__tooldeps__')
+                if mode and not failure:
+                    self.assertFalse(json.loads((work/'tools-only.json').read_text())['complete_runtime'])
+                else:
+                    self.assertFalse((work/'tools-only.json').exists())
+
     def test_selector_preserves_both_architectures_and_refuses_manual_flags(self):
         source = (ROOT / 'tools/build_wine_ps5.sh').read_text()
         block = source[source.index('case " ${CFLAGS:-}'):source.index('# Reconfigure whenever')]
-        program = 'set -eu\nfail() { exit 73; }\nps5opengl_sdk=\n' + block + \
+        program = 'set -eu\nfail() { exit 73; }\nps5opengl_sdk=\ncompile_check_only=0\n' + block + \
             '\nexport opengl_cflags service_fixture\npython3 -c \'import os,json; print(json.dumps(dict(os.environ)))\'\n'
         clean = {k: v for k, v in os.environ.items() if k not in (
             'CFLAGS', 'CPPFLAGS', 'CROSSCFLAGS', 'x86_64_CFLAGS', 'i386_CFLAGS',

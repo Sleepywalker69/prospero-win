@@ -101,6 +101,8 @@ def main():
     done = proc.index("done:\n", end)
     footer_end = proc.index("    if (file_handle)", done)
     (out/"startup-result.inc").write_text(proc[done:footer_end])
+    tail_end = proc.index("    return status;\n}", footer_end) + len("    return status;\n")
+    (out/"startup-tail.inc").write_text(proc[done:tail_end])
     server = source[paths[1]]
     local = function(server, "int pw_wine_fixture_local_threads( int (*add)(long,pthread_t), void (*remove)(long) )")
     local += function(server, "static void register_inprocess_thread( int tid )")
