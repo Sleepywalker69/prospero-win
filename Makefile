@@ -21,7 +21,7 @@ comma := ,
 define test_rule
 $(if $(strip $(3)),\
 $(BUILD)/$(1): $(2) $(HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) $$(filter %.c %.S,$$^) $(3) -o $$@,\
+	$(CC) $(CFLAGS) $(filter %.c %.S,$(2)) $(3) -o $$@,\
 $(BUILD)/$(1): $$(addprefix $(BUILD)/obj/shared/,$$(addsuffix .o,$$(basename $(2)))) | $(BUILD)
 	$$(CC) $$(CFLAGS) $$^ -o $$@)
 endef
@@ -121,6 +121,11 @@ PW_DATA_MOUNT_TEST_FLAGS := -DPW_DATA_MOUNT_HOST_TEST -DPW_DATA_MOUNT_PATH='"/tm
 $(eval $(call test_rule,test_pw_data_mount_native,tests/test_pw_data_mount_native.c native/pw_data_mount.c,$(PW_DATA_MOUNT_TEST_FLAGS)))
 PW_LAPY_ELEVATION_TEST_FLAGS := -DPW_LAPY_HELPER_PATH='"/tmp/pw_lapy_test_helper"'
 $(eval $(call test_rule,test_pw_native_child_protocol,tests/test_pw_native_child_protocol.c native/pw_native_child_protocol.c,))
+# The final translation unit includes the real controller; retain its emitted
+# dependency list so editing that included .c rebuilds this mocked boundary test.
+PW_NATIVE_CHILD_CONTROLLER_TEST_FLAGS := -Itests/native_child_probe_fixture -MMD -MP -MF $(BUILD)/native-child-controller-test.d
+-include $(BUILD)/native-child-controller-test.d
+$(eval $(call test_rule,test_pw_native_child_probe,native/pw_native_child_protocol.c tests/test_pw_native_child_probe.c tests/native_child_probe_fixture/native-child-build.h,$(PW_NATIVE_CHILD_CONTROLLER_TEST_FLAGS)))
 $(eval $(call test_rule,test_pw_lapy_elevation,tests/test_pw_lapy_elevation.c native/pw_lapy_elevation.c,$(PW_LAPY_ELEVATION_TEST_FLAGS)))
 $(eval $(call test_rule,classify_x86,tools/classify_x86.c src/pw_x86_block.c src/pw_x87.c src/pw_guest_fp.c,))
 $(eval $(call test_rule,dbt_differential,tools/dbt_differential.c src/pw_x86_hostexec.c src/pw_x86_engine.c src/pw_x86_cache.c src/pw_x86_block.c src/pw_x86_reencode.c src/pw_x87.c src/pw_guest_fp.c src/pw_vm.c src/pw_vm_posix.c,))
@@ -149,7 +154,7 @@ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_ho
 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle \
 	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount \
-	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc test_pw_native_child_protocol
+	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe
 
 # The Python suites drive the built DBT tools and check the contracts the
 # host compiler cannot.

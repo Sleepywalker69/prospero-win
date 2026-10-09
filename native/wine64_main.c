@@ -42,6 +42,12 @@
 #include "../src/pw_spinner.h"
 #include "../src/pw_tsc_calibrate.h"
 #include "pw_wine_display.h"
+#ifndef PW_NATIVE_CHILD_PROBE
+#define PW_NATIVE_CHILD_PROBE 0
+#endif
+#if PW_NATIVE_CHILD_PROBE
+#include "pw_native_child_probe.h"
+#endif
 #include "../include/prospero_win.h"
 
 #include <pthread.h>
@@ -712,12 +718,14 @@ static void run_launcher(void)
     const size_t frame_bytes = (size_t)PW_LAUNCHER_RENDER_WIDTH * PW_LAUNCHER_RENDER_HEIGHT * 4u;
     uint8_t *frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     PwLauncherScene scene = { items, 0, PW_LAUNCHER_RENDER_NONE,
+        PW_NATIVE_CHILD_PROBE ? "ORIGINAL NATIVE CHILD PROBE" :
         launch.refused ? "THAT GAME IS NOT IN THE LIBRARY" :
         !catalog_count ? "ADD PROFILES TO /DATA/PROSPERO-WIN/PROFILES" :
         launch.cycle ? "WELCOME BACK" : "CHOOSE A GAME" };
     static PwHidPs5 hid;
     int video_status = pw_videoout_ps5_open(&video), pad_status = pw_pad_ps5_platform_ops(&pad_ops);
     int hid_status, dirty = 1, chosen = -1;
+    uint32_t selectable = (uint32_t)catalog_count;
 
     if (pad_status == PW_OK)
         pad_status = pw_pad_ps5_open(&pad, &pad_ops, pad_open_map,
@@ -733,11 +741,16 @@ static void run_launcher(void)
         hid_status = pw_hid_ps5_open(&hid, pw_hid_ps5_system_ops(hid_log), user);
     }
     /* The games, then the refused profiles, listed by file as not available. */
+#if PW_NATIVE_CHILD_PROBE
+    items[scene.count++] = (PwLauncherItem){ "NATIVE TWO-PROCESS PROBE", "ONE ATTEMPT. WINDOWS CHILDREN REMAIN UNSUPPORTED.", 1 };
+    selectable = 1;
+#else
     for (size_t i = 0; i < catalog_count; i++)
         items[scene.count++] = (PwLauncherItem){ catalog[i].name, catalog[i].detail, 1 };
     for (uint32_t i = 0; i < library.count; i++)
         if (library.entries[i].status != PW_OK)
             items[scene.count++] = (PwLauncherItem){ library.entries[i].file, "profile refused", 0 };
+#endif
     if (scene.count) scene.selected = 0;
     PS5LOG_LOG("PW_WINE64 launcher video=%s pad=%s hid=%s frame=%d apps=%u cycle=%u refused=%u script=%d",
                pw_result_name(video_status), pw_result_name(pad_status), pw_result_name(hid_status),
@@ -753,8 +766,17 @@ static void run_launcher(void)
         if (tick % PW_WINE64_TICKS_PER_S == 0 && !report_help) {
             pw_diagnostics_status(log_status, sizeof(log_status)); dirty = 1;
         }
+#if PW_NATIVE_CHILD_PROBE
+        if (!report_help) {
+            pw_native_child_probe_status(log_status, sizeof(log_status));
+            dirty = 1;
+        }
+#endif
         uint32_t before = scene.selected;
         if (pad_status == PW_OK && pw_pad_ps5_read(&pad) == PW_OK) {
+#if PW_NATIVE_CHILD_PROBE
+            if (pad.core.pressed_edges & PAD_SQUARE) pw_native_child_probe_cancel();
+#endif
             static const struct { uint32_t button; PwLauncherAction action; } pad_actions[] = {
                 { PAD_RIGHT, PW_LAUNCHER_ACTION_RIGHT }, { PAD_LEFT, PW_LAUNCHER_ACTION_LEFT },
                 { PAD_DOWN, PW_LAUNCHER_ACTION_DOWN }, { PAD_UP, PW_LAUNCHER_ACTION_UP },
@@ -767,7 +789,7 @@ static void run_launcher(void)
             }
             for (size_t i = 0; i < sizeof(pad_actions) / sizeof(pad_actions[0]); i++)
                 if ((pad.core.pressed_edges & pad_actions[i].button) &&
-                    pw_launcher_navigate(&scene, pad_actions[i].action, (uint32_t)catalog_count))
+                    pw_launcher_navigate(&scene, pad_actions[i].action, selectable))
                     chosen = (int)scene.selected;
         }
         /* Key presses; a keyboard plugged in later is found every few seconds. */
@@ -777,12 +799,26 @@ static void run_launcher(void)
             if (hid_status != PW_OK && tick % (5 * PW_WINE64_TICKS_PER_S) == 0)
                 hid_status = pw_hid_ps5_retry(&hid);
             pw_hid_ps5_poll(&hid, &poll);
-            for (size_t i = 0; i < poll.count && chosen < 0; i++)
-                if (poll.events[i].kind == PW_HID_EVENT_KEY && poll.events[i].down &&
-                    pw_launcher_navigate(&scene, pw_launcher_key_action(poll.events[i].code),
-                                         (uint32_t)catalog_count))
+            for (size_t i = 0; i < poll.count && chosen < 0; i++) {
+                if (poll.events[i].kind != PW_HID_EVENT_KEY || !poll.events[i].down) continue;
+#if PW_NATIVE_CHILD_PROBE
+                /* pw_hid.c maps the keyboard Escape key to Win32 VK_ESCAPE. */
+                if (poll.events[i].code == 0x1b) { pw_native_child_probe_cancel(); continue; }
+#endif
+                if (pw_launcher_navigate(&scene, pw_launcher_key_action(poll.events[i].code), selectable))
                     chosen = (int)scene.selected;
+            }
         }
+#if PW_NATIVE_CHILD_PROBE
+        if (chosen >= 0) {
+            if (video_status == PW_OK && frame != MAP_FAILED)
+                (void)pw_native_child_probe_start();
+            else
+                PS5LOG_LOG("PW_NATIVE_CHILD stage=refused reason=launcher-video-unavailable");
+            items[0].available = 0;
+            chosen = -1;
+        }
+#endif
         dirty |= scene.selected != before;
         if (PW_WINE64_SCRIPT && tick == 3 * PW_WINE64_TICKS_PER_S) {
             if (launch.cycle >= PW_WINE64_SCRIPT_CYCLES) {
@@ -801,6 +837,10 @@ static void run_launcher(void)
             int status = pw_launcher_render(&scene, &target);
             if (status == PW_OK) status = pw_videoout_ps5_present(&video, &view);
             if (status != PW_OK) PS5LOG_LOG("PW_WINE64 launcher present=%s", pw_result_name(status));
+#if PW_NATIVE_CHILD_PROBE
+            /* Input was polled and an actual frame was successfully presented. */
+            else pw_native_child_probe_tick();
+#endif
             dirty = 0;
         } else {
             usleep(PW_WINE64_TICK_US);
@@ -964,7 +1004,7 @@ int main(int argc, char **argv)
     PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
                launch.mode == PW_WINE_LAUNCH_GAME ? "game" : "launcher",
                launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused);
-    if (launch.mode != PW_WINE_LAUNCH_GAME) run_launcher();
+    if (PW_NATIVE_CHILD_PROBE || launch.mode != PW_WINE_LAUNCH_GAME) run_launcher();
     wine_argv[1] = launch.executable;
     /* The game's profile: its prefix, desktop, scaling and input. A bare
      * path= runs in the default prefix with nothing bound. */
