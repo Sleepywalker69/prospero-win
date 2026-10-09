@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import struct
 import sys
 import tarfile
 import zipfile
@@ -345,11 +346,165 @@ def resource_hashes(host, host_files):
     return allowed
 
 
-def audit_source(converter, prefix, host, host_files, resources=None):
+def embedded_ne_image(path):
+    """Reproduce pinned setupapi extract_16bit_image on a bound PE container.
+
+    Its exported DOS header stores the image extent in e_res2[0..1]. The
+    initializer clears that DWORD before writing the extracted NE image.
+    """
+    data = path.read_bytes()
+    def integer(at, size):
+        require(0 <= at <= len(data) - size, 'truncated 16-bit container')
+        return int.from_bytes(data[at:at + size], 'little')
+    require(len(data) >= 96 and data[:2] == b'MZ' and
+            (data[64:81] == b'Wine builtin DLL\0' or data[64:85] == b'Wine placeholder DLL\0'),
+            'not a bound Wine 16-bit container')
+    pe = integer(60, 4)
+    require(pe >= 96 and pe <= len(data) - 24 and data[pe:pe + 4] == b'PE\0\0', 'invalid 16-bit container PE')
+    require(integer(pe + 4, 2) == 0x14c and integer(pe + 24, 2) == 0x10b,
+            '16-bit container must be the pinned i386 PE format')
+    sections, optional_size = integer(pe + 6, 2), integer(pe + 20, 2)
+    require(0 < sections <= 96 and optional_size >= 104, 'invalid 16-bit container sections')
+    ranges = []
+    for index in range(sections):
+        at = pe + 24 + optional_size + 40 * index
+        ranges.append((integer(at + 12, 4), integer(at + 20, 4), integer(at + 16, 4)))
+    def rva(value, size):
+        matches = [raw + value - va for va, raw, length in ranges if
+                   va <= value and size <= length - (value - va)]
+        require(len(matches) == 1 and matches[0] <= len(data) - size, 'invalid 16-bit container RVA')
+        return matches[0]
+    export_rva, export_size = integer(pe + 24 + 96, 4), integer(pe + 24 + 100, 4)
+    require(export_size >= 40, 'missing 16-bit image exports')
+    exports = rva(export_rva, export_size)
+    functions, names = integer(exports + 20, 4), integer(exports + 24, 4)
+    require(0 < names <= functions <= 65536, 'invalid 16-bit image export counts')
+    function_table = rva(integer(exports + 28, 4), functions * 4)
+    name_table = rva(integer(exports + 32, 4), names * 4)
+    ordinal_table = rva(integer(exports + 36, 4), names * 2)
+    found = []
+    for index in range(names):
+        name_at = rva(integer(name_table + 4 * index, 4), 1)
+        name_end = data.find(b'\0', name_at, min(len(data), name_at + 129))
+        require(name_end >= 0, 'unterminated 16-bit image export name')
+        if data[name_at:name_end] != b'__wine_spec_dos_header':
+            continue
+        ordinal = integer(ordinal_table + 2 * index, 2)
+        require(ordinal < functions, 'invalid 16-bit image ordinal')
+        start = rva(integer(function_table + 4 * ordinal, 4), 64)
+        require(data[start:start + 2] == b'MZ', 'missing embedded DOS header')
+        declared = integer(start + 40, 4)  # IMAGE_DOS_HEADER.e_res2, per pinned winnt.h
+        # Wine clips with min(); this audit accepts only intact bound images.
+        require(64 <= declared <= min(4 << 20, len(data) - start), 'invalid embedded 16-bit extent')
+        size = declared
+        ne = integer(start + 60, 4)
+        require(64 <= ne <= size - 64 and data[start + ne:start + ne + 2] == b'NE', 'invalid embedded NE header')
+        image = bytearray(data[start:start + size])
+        image[40:44] = b'\0' * 4
+        found.append(bytes(image))
+    require(len(found) == 1, 'missing/duplicate embedded 16-bit image')
+    return found[0]
+
+
+def placeholder_i386(is_dll):
+    """Exact deterministic build_fake_dll bytes, not a signature exemption.
+
+    The pinned Wine INF requests these only from FakeDllsWin32. Layout and
+    constants are IMAGE_DOS_HEADER/NT_HEADERS32/SECTION_HEADER in winnt.h;
+    xwrite leaves zero-filled gaps and ends after the 8-byte relocation block.
+    """
+    output = bytearray(1032)
+    def word(at, value): struct.pack_into('<H', output, at, value)
+    def dword(at, value): struct.pack_into('<I', output, at, value)
+    for at, value in ((0, 0x5a4d), (2, 64), (4, 1), (8, 6), (12, 0xffff), (16, 0xb8), (24, 96)):
+        word(at, value)
+    dword(60, 96)
+    output[64:85] = b'Wine placeholder DLL\0'
+    output[96:100] = b'PE\0\0'
+    word(100, 0x14c); word(102, 2); word(116, 224); word(118, 0x2000 if is_dll else 0)
+    opt = 120
+    code = b'\x31\xc0\xc2\x0c\x00' if is_dll else b'\xb8\x01\x00\x00\x00\xc2\x04\x00'
+    word(opt, 0x10b); output[opt + 2] = 1
+    for at, value in ((4, len(code)), (16, 4096), (20, 4096), (28, 0x10000000),
+                      (32, 4096), (36, 512), (56, 12288), (60, 512), (92, 16), (136, 8192), (140, 8)):
+        dword(opt + at, value)
+    for at, value in ((40, 1), (44, 1), (48, 4), (68, 2)):
+        word(opt + at, value)
+    for at, name, va, size, raw, flags in ((344, b'.text', 4096, len(code), 512, 0x60000020),
+                                          (384, b'.reloc', 8192, 8, 1024, 0x42000040)):
+        output[at:at + len(name)] = name
+        for offset, value in ((8, 4096), (12, va), (16, size), (20, raw), (36, flags)):
+            dword(at + offset, value)
+    output[512:512 + len(code)] = code
+    return bytes(output)
+
+
+def generated_module_hashes(host, host_files, source_archive):
+    require(sha(source_archive) == BOUND_FILES['sources/wine.tar.gz'], 'generated-module source archive changed')
+    source_hashes = {'dlls/setupapi/fakedll.c': '1df365043c2a84dc2b44129641178fd325eb809126a1c44639cf1b77055c7b4c',
+                     'include/winnt.h': '030dfb2b3fbdebad4c386d96cb31d081ac635914ab2ff674cbf12b5cecbf8834',
+                     'dlls/setupapi/dirid.c': '7409a51e12814df2e35b08fce392b4319e4464d26512c599cce68dd4f2966fb2',
+                     'dlls/ntdll/unix/file.c': 'bc6c1d35deaa2ee7396ff940aac75ba379a976a72e9b3d5ee6d3619c36db8af4'}
+    with tarfile.open(source_archive, 'r:gz') as archive:
+        for name, digest in source_hashes.items():
+            member = archive.getmember(name)
+            require(member.isfile() and member.size <= 2 << 20, 'invalid generated-module source member')
+            require(hashlib.sha256(archive.extractfile(member).read()).hexdigest() == digest,
+                    'generated-module algorithm/layout source changed')
+    inf_path = host / 'share/wine/wine.inf'
+    require(sha(inf_path) == host_files.get('pc/host-wine/usr/share/wine/wine.inf', {}).get('sha256'),
+            'generated-module INF bytes changed')
+    inf = inf_path.read_text()
+    section = re.search(r'(?ms)^\[FakeDllsWin32\]\r?\n(.*?)(?=^\[)', inf)
+    require(section is not None, 'missing pinned placeholder INF section')
+    direct_paths = {}
+    for line in section[1].splitlines():
+        fields = line.strip().split(',')
+        if len(fields) != 4 or not fields[3].endswith('16'):
+            continue
+        require(fields[0] in ('10', '52') and fields[2] == fields[3][:-2], 'unexpected 16-bit INF alias')
+        # DIRID_WINDOWS=10. DIRID_SPOOLDRIVERS=52 is system32/spool/drivers;
+        # ntdll's no_redirect list explicitly exempts system32/spool in WoW64.
+        base = 'drive_c/windows' if fields[0] == '10' else 'drive_c/windows/system32/spool/drivers'
+        relative = '/'.join(part for part in (base, fields[1].replace('\\', '/'), fields[2]) if part)
+        safe_relative(relative)
+        direct_paths.setdefault(fields[3], []).append(relative.casefold())
+    require(len(direct_paths) == 6, 'pinned 16-bit INF alias set changed')
+    allowed = {}
+    for name in sorted(host_files):
+        if not name.startswith('pc/host-wine/usr/lib/wine/i386-windows/') or not name.endswith('16'):
+            continue
+        relative = name.removeprefix('pc/host-wine/usr/')
+        path = host / relative
+        require(sha(path) == host_files[name]['sha256'], '16-bit parent bytes changed')
+        image = embedded_ne_image(path)
+        digest = hashlib.sha256(image).hexdigest()
+        allowed[digest] = {'method': 'setupapi-extract-16bit-image', 'module': relative,
+                           'parent_sha256': host_files[name]['sha256'], 'bytes': len(image),
+                           'names': [path.name[:-2].casefold()],
+                           # Explicit INF entries mark the basename handled,
+                           # so the later wildcard does not create a second copy.
+                           'paths': direct_paths.get(path.name) or
+                                    ['drive_c/windows/syswow64/' + path.name[:-2].casefold()]}
+    # Only the source=* rows request synthesis; the wildcard-copy row has
+    # three columns and is deliberately not included here.
+    names = set(re.findall(r'(?m)^11,,([a-z0-9.]+),\*\r?$', section[1]))
+    require(names == {'ddhelp.exe', 'dosx.exe', 'dsound.vxd'}, 'pinned placeholder INF rows changed')
+    for is_dll, selected in ((False, ['ddhelp.exe', 'dosx.exe']), (True, ['dsound.vxd'])):
+        image = placeholder_i386(is_dll)
+        allowed[hashlib.sha256(image).hexdigest()] = {
+            'method': 'setupapi-build-fake-dll-i386', 'source_member': 'dlls/setupapi/fakedll.c',
+            'source_sha256': source_hashes['dlls/setupapi/fakedll.c'], 'bytes': len(image),
+            'names': selected, 'paths': ['drive_c/windows/syswow64/' + name for name in selected]}
+    return allowed
+
+
+def audit_source(converter, prefix, host, host_files, resources=None, generated=None):
     files, directories, links = converter.local_tree(prefix)
     require(len(files) <= MAX_FILES and len(directories) <= MAX_FILES, 'prefix too large')
     approved = {record['sha256'] for name, record in host_files.items() if name.startswith('pc/host-wine/usr/')}
     resources = resources or {}
+    generated = generated or {}
     audit, total, folded_paths = {}, 0, set()
     for path in prefix.rglob('*'):
         if '.wineserver' in path.relative_to(prefix).parts:
@@ -390,11 +545,17 @@ def audit_source(converter, prefix, host, host_files, resources=None):
             source = 'generated-ini'
         else:
             # Every copied PE/font/data file must match the hash-bound runtime.
-            require(digest in approved or digest in resources, 'unapproved generated/copied file: ' + name)
-            source = 'bound-host-runtime' if digest in approved else 'bound-runtime-resource'
+            record = generated.get(digest)
+            derived = record and Path(name).name.casefold() in record['names'] and (
+                'paths' not in record or name.casefold() in record['paths'])
+            require(digest in approved or digest in resources or derived, 'unapproved generated/copied file: ' + name)
+            source = ('bound-host-runtime' if digest in approved else
+                      'bound-runtime-resource' if digest in resources else 'bound-runtime-generated-module')
         audit[name] = {'sha256': digest, 'bytes': resolved.stat().st_size, 'source': source}
         if source == 'bound-runtime-resource':
             audit[name]['origin'] = resources[digest]
+        elif source == 'bound-runtime-generated-module':
+            audit[name]['origin'] = generated[digest]
     require(REGISTRIES <= set(files), 'missing initialized registry')
     core = {'drive_c/windows/system32/notepad.exe': 'x86_64-windows/notepad.exe',
             'drive_c/windows/system32/kernel32.dll': 'x86_64-windows/kernel32.dll',
@@ -443,7 +604,8 @@ def export(args):
     audit_text(profile.read_bytes(), 'diagnostic profile')
     converter = load_converter(checkpoint)
     host = checkpoint / 'pc/host-wine/usr'
-    audit = audit_source(converter, prefix, host, host_files, resource_hashes(host, host_files))
+    audit = audit_source(converter, prefix, host, host_files, resource_hashes(host, host_files),
+                         generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz'))
     # Ensure conversion actually changes the expected existing backend section.
     system = (prefix / 'system.reg').read_bytes()
     require(converter.CPU_KEY in system and converter.to_console('system.reg', system) != system,

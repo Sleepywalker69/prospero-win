@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import sys
 import tarfile
 import tempfile
@@ -190,6 +191,75 @@ class SeedTests(unittest.TestCase):
                 (prefix / '.update-timestamp').write_bytes(data)
                 with self.assertRaisesRegex(ValueError, 'invalid initialization timestamp'):
                     seed.audit_source(converter, prefix, host, records)
+
+    def ne_container(self, duplicate=False):
+        """Original inert PE/NE data fixture; never executed."""
+        data = bytearray(1536)
+        def word(at, n): struct.pack_into('<H', data, at, n)
+        def dword(at, n): struct.pack_into('<I', data, at, n)
+        data[:2] = b'MZ'; data[64:81] = b'Wine builtin DLL\0'; dword(60, 128)
+        data[128:132] = b'PE\0\0'; word(132, 0x14c); word(134, 1); word(148, 224)
+        word(152, 0x10b); dword(152 + 92, 16); dword(152 + 96, 4096); dword(152 + 100, 128)
+        section = 152 + 224
+        dword(section + 8, 1024); dword(section + 12, 4096)
+        dword(section + 16, 1024); dword(section + 20, 512)
+        count = 2 if duplicate else 1
+        dword(532, count); dword(536, count)
+        dword(540, 0x1040); dword(544, 0x1050); dword(548, 0x1058)
+        for index in range(count):
+            dword(576 + 4 * index, 0x1200); dword(592 + 4 * index, 0x1060); word(600 + 2 * index, index)
+        name = b'__wine_spec_dos_header\0'
+        data[608:608 + len(name)] = name
+        data[1024:1026] = b'MZ'; dword(1024 + 40, 160); dword(1024 + 60, 96)
+        data[1120:1122] = b'NE'
+        return data
+
+    def test_embedded_ne_exact_slice_and_source_unchanged(self):
+        data = self.ne_container()
+        path = self.root / 'original.exe16'; path.write_bytes(data)
+        expected = bytearray(data[1024:1184]); expected[40:44] = b'\0' * 4
+        self.assertEqual(seed.embedded_ne_image(path), bytes(expected))
+        self.assertEqual(path.read_bytes(), bytes(data))
+
+    def test_embedded_ne_malformed_sources_refused(self):
+        cases = [self.ne_container(duplicate=True)]
+        for at, form, value in ((1024 + 40, '<I', 4096), (1024 + 60, '<I', 159),
+                                 (132, '<H', 0x8664), (600, '<H', 9), (152 + 96, '<I', 0xffffffff)):
+            data = self.ne_container(); struct.pack_into(form, data, at, value); cases.append(data)
+        data = self.ne_container(); data[1120:1122] = b'PE'; cases.append(data)
+        for index, data in enumerate(cases):
+            with self.subTest(index=index):
+                path = self.root / ('bad-' + str(index) + '.exe16'); path.write_bytes(data)
+                with self.assertRaises(ValueError): seed.embedded_ne_image(path)
+
+    def test_generated_hash_and_destination_both_required(self):
+        converter, _, prefix, host, records = self.fixture()
+        container = self.root / 'original.exe16'; container.write_bytes(self.ne_container())
+        image = seed.embedded_ne_image(container)
+        name = 'drive_c/windows/rundll.exe'
+        generated = {hashlib.sha256(image).hexdigest(): {'method': 'original-fixture-derivation',
+                     'names': ['rundll.exe'], 'paths': [name], 'bytes': len(image)}}
+        target = prefix / name; target.write_bytes(image)
+        audit = seed.audit_source(converter, prefix, host, records, generated=generated)
+        self.assertEqual(audit[name]['source'], 'bound-runtime-generated-module')
+        target.write_bytes(image[:-1] + b'X')
+        with self.assertRaisesRegex(ValueError, 'unapproved generated/copied'):
+            seed.audit_source(converter, prefix, host, records, generated=generated)
+        target.unlink()
+        (prefix / 'drive_c/windows/system32/rundll.exe').write_bytes(image)
+        with self.assertRaisesRegex(ValueError, 'unapproved generated/copied'):
+            seed.audit_source(converter, prefix, host, records, generated=generated)
+
+    def test_placeholder_exact_byte_identities(self):
+        expected = {False: 'cbae5b921774d73c6fbcb5a9fcc54156783f360a69db802382ee8cc1585b9fe4',
+                    True: 'db51e6e7b76795c95f8fe77732b1367e22a33c6b499305af135a568823a4c607'}
+        for is_dll, digest in expected.items():
+            image = seed.placeholder_i386(is_dll)
+            self.assertEqual(len(image), 1032)
+            self.assertEqual(hashlib.sha256(image).hexdigest(), digest)
+            self.assertEqual(struct.unpack_from('<H', image, 100)[0], 0x14c)
+            self.assertEqual(struct.unpack_from('<H', image, 118)[0], 0x2000 if is_dll else 0)
+            self.assertEqual(image[1024:], b'\0' * 8)
 
     def test_archive_hash_and_traversal_rejected(self):
         raw = io.BytesIO()
