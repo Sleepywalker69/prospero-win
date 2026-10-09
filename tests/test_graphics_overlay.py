@@ -319,6 +319,21 @@ int main(void) {
                 self.assertEqual((root/'library/prefixes/diagnostic-d3d11/drive_c/graphics-smoke'/name).read_bytes(),(app/name).read_bytes())
             with self.assertRaises(pw_install.InstallError):installer.install()
 
+    def test_read_only_bounded_source_producer_and_unchanged_release_pin(self):
+        w=yaml.load((ROOT/'.github/workflows/graphics-overlay.yml').read_text(),Loader=yaml.BaseLoader)
+        self.assertEqual(w['permissions'],{'contents':'read','actions':'read'});self.assertNotIn('pull_request_target',w['on'])
+        job=w['jobs']['graphics-overlay'];self.assertEqual(job['runs-on'],'ubuntu-24.04');self.assertEqual(job['timeout-minutes'],'60')
+        self.assertIn('head.repo.full_name == github.repository',job['if'])
+        runs='\n'.join(s.get('run','') for s in job['steps'])
+        for needed in ('--wrap-mode=nodownload','-j2 install','tools/d3d11_clear_smoke.c','11588549010','11592264803'):
+            self.assertIn(needed,runs)
+        for forbidden in ('wineboot','wineexec','build_wine_ps5.sh','--force','continue-on-error'):
+            self.assertNotIn(forbidden,runs)
+        for step in job['steps']:
+            self.assertNotIn('continue-on-error',step)
+            if 'uses' in step:self.assertRegex(step['uses'],r'^actions/[a-z-]+@[0-9a-f]{40}$')
+        sys.path.insert(0,str(ROOT/'tools'));import pw_install
+        self.assertEqual(pw_install.DXVK_RELEASES['2.6.2'][1],'17761876556afd55736cb895d184f5a1c55d43350f1b1e3b129f8d28706d7992')
 
 
 if __name__ == '__main__':

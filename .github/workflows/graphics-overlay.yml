@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Source DXVK and graphics diagnostic overlay
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: graphics-overlay-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  LC_ALL: C
+  TZ: UTC
+  SOURCE_DATE_EPOCH: '1000000000'
+jobs:
+  graphics-overlay:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'build-graphics-overlay')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install official build and analyzer prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential git meson ninja-build \
+            glslang-tools gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
+            binutils-mingw-w64-x86-64 llvm-18
+          python3 -m pip install pyyaml==6.0.1
+          mkdir -p "$RUNNER_TEMP/graphics-inputs" "$RUNNER_TEMP/graphics-logs" "$RUNNER_TEMP/graphics-tools"
+          ln -s /usr/bin/x86_64-w64-mingw32-gcc-posix "$RUNNER_TEMP/graphics-tools/x86_64-w64-mingw32-gcc"
+          ln -s /usr/bin/x86_64-w64-mingw32-g++-posix "$RUNNER_TEMP/graphics-tools/x86_64-w64-mingw32-g++"
+          echo "$RUNNER_TEMP/graphics-tools" >> "$GITHUB_PATH"
+          {
+            dpkg-query -W
+            x86_64-w64-mingw32-g++-posix --version
+            meson --version
+            ninja --version
+            glslangValidator --version
+            /usr/lib/llvm-18/bin/llvm-readelf --version
+          } > "$RUNNER_TEMP/graphics-inputs/TOOLCHAIN.txt"
+          printf '#include <_mingw.h>\n#if __MINGW64_VERSION_MAJOR < 10\n#error MinGW headers are too old\n#endif\n' \
+            | x86_64-w64-mingw32-gcc-posix -x c -E - > /dev/null
+          python3 tests/test_graphics_overlay.py
+          make audit check-whitespace
+      - name: Bind and verify the exact kit and successful driver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/Sleepywalker69/prospero-win/actions/runs/37861508535 > "$RUNNER_TEMP/graphics-inputs/kit-run.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11588549010 > "$RUNNER_TEMP/graphics-inputs/kit-artifact.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11588549010/zip > "$RUNNER_TEMP/graphics-inputs/kit.zip"
+          gh api repos/Sleepywalker69/prospero-win/actions/runs/37877727299 > "$RUNNER_TEMP/graphics-inputs/driver-run.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11592264803 > "$RUNNER_TEMP/graphics-inputs/driver-artifact.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11592264803/zip > "$RUNNER_TEMP/graphics-inputs/driver.zip"
+          python3 tools/package_graphics_overlay.py prepare --work "$RUNNER_TEMP/graphics" \
+            --inputs "$RUNNER_TEMP/graphics-inputs" --llvm-bindir /usr/lib/llvm-18/bin \
+            2>&1 | tee "$RUNNER_TEMP/graphics-logs/prepare.log"
+          cp "$RUNNER_TEMP/graphics-inputs/TOOLCHAIN.txt" "$RUNNER_TEMP/graphics/TOOLCHAIN.txt"
+      - name: Fetch exact public source and retain corresponding licences early
+        run: |
+          python3 tools/package_graphics_overlay.py sources --work "$RUNNER_TEMP/graphics" \
+            --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            2>&1 | tee "$RUNNER_TEMP/graphics-logs/sources.log"
+          tar -czf "$RUNNER_TEMP/graphics-source-checkpoint.tar.gz" -C "$RUNNER_TEMP/graphics" sources INPUTS-VERIFIED.json TOOLCHAIN.txt
+      - name: Retain source checkpoint before compilation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: graphics-source-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/graphics-source-checkpoint.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Compile upstream Win32-WSI DXVK and the original x64 smoke fixture
+        timeout-minutes: 35
+        run: |
+          work="$RUNNER_TEMP/graphics"
+          {
+            meson setup --cross-file "$work/dxvk/build-win64.txt" --buildtype release \
+              --wrap-mode=nodownload --prefix "$work/dxvk-install" --bindir x64 --libdir x64 \
+              -Db_ndebug=if-release -Dbuild_id=true -Denable_d3d8=false -Denable_d3d9=false \
+              -Denable_d3d10=false "$work/dxvk-build" "$work/dxvk"
+            ninja -C "$work/dxvk-build" -j2 install
+            mkdir "$work/app"
+            cp "$work/dxvk-install/x64/d3d11.dll" "$work/dxvk-install/x64/dxgi.dll" "$work/app/"
+            x86_64-w64-mingw32-gcc-posix -std=c11 -O2 -Wall -Wextra -Werror \
+              tools/d3d11_clear_smoke.c -ld3d11 -ldxgi -ldxguid -luser32 -o "$work/app/d3d11-clear.exe"
+          } 2>&1 | tee "$RUNNER_TEMP/graphics-logs/build.log"
+      - name: Verify actual PE graph and package the additive diagnostic overlay
+        run: |
+          python3 tools/package_graphics_overlay.py package --work "$RUNNER_TEMP/graphics" \
+            --out "$RUNNER_TEMP/graphics-overlay" 2>&1 | tee "$RUNNER_TEMP/graphics-logs/package.log"
+          (cd "$RUNNER_TEMP/graphics-overlay" && sha256sum --check GRAPHICS-SHA256SUMS)
+          tar -czf "$RUNNER_TEMP/graphics-overlay.tar.gz" -C "$RUNNER_TEMP/graphics-overlay" .
+      - name: Upload accepted build metadata and diagnostic files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: graphics-overlay-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/graphics-overlay.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain partial original binaries, source and logs on every outcome
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: graphics-overlay-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/graphics-logs/
+            ${{ runner.temp }}/graphics-inputs/TOOLCHAIN.txt
+            ${{ runner.temp }}/graphics-inputs/*-run.json
+            ${{ runner.temp }}/graphics-inputs/*-artifact.json
+            ${{ runner.temp }}/graphics/INPUTS-VERIFIED.json
+            ${{ runner.temp }}/graphics/driver-inspection/
+            ${{ runner.temp }}/graphics/sources/
+            ${{ runner.temp }}/graphics/app/
+            ${{ runner.temp }}/graphics/dxvk-install/x64/*.dll
+            ${{ runner.temp }}/graphics/dxvk-build/meson-logs/
+            ${{ runner.temp }}/graphics/dxvk-build/meson-info/
+          if-no-files-found: warn
+          retention-days: 7
