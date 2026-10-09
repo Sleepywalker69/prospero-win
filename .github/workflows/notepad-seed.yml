@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Clean Notepad seed
+on:
+  workflow_dispatch: {}
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: notepad-seed-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  seed:
+    if: >-
+      github.repository == 'Sleepywalker69/prospero-win' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'build-notepad-seed')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: 'false'
+      - name: Test only original filesystem conversion and rejection controls
+        run: python3 tests/test_notepad_seed.py
+      - name: Install ordinary runtime prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth python3-yaml \
+            libx11-6 libxext6 libfreetype6 libfontconfig1 libvulkan1 libgnutls28-dev \
+            libasound2-dev libpulse0
+      - name: Download only the exact successful checkpoint and matching kit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/seed-inputs"
+          gh api repos/Sleepywalker69/prospero-win/actions/runs/37861508535 \
+            > "$RUNNER_TEMP/seed-inputs/run.json"
+          gh api 'repos/Sleepywalker69/prospero-win/actions/runs/37861508535/artifacts?per_page=100' \
+            > "$RUNNER_TEMP/seed-inputs/artifacts.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11587963904/zip \
+            > "$RUNNER_TEMP/seed-inputs/checkpoint.zip"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11588549010/zip \
+            > "$RUNNER_TEMP/seed-inputs/kit.zip"
+          python3 tools/export_notepad_seed.py prepare --work "$RUNNER_TEMP/seed-work" \
+            --checkpoint-zip "$RUNNER_TEMP/seed-inputs/checkpoint.zip" \
+            --kit-zip "$RUNNER_TEMP/seed-inputs/kit.zip" \
+            --run-json "$RUNNER_TEMP/seed-inputs/run.json" \
+            --artifacts-json "$RUNNER_TEMP/seed-inputs/artifacts.json"
+      - name: Initialize only a fresh original Notepad prefix in a sterile environment
+        timeout-minutes: 10
+        run: |
+          seed_work="$RUNNER_TEMP/seed-work"
+          seed_host="$seed_work/checkpoint/pc/host-wine/usr"
+          seed_env=(env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            HOME="$seed_work/sterile/home" USER=prospero LOGNAME=prospero \
+            XDG_CACHE_HOME="$seed_work/sterile/cache" XDG_CONFIG_HOME="$seed_work/sterile/config" \
+            XDG_DATA_HOME="$seed_work/sterile/data" TMPDIR="$seed_work/sterile/tmp" \
+            FONTCONFIG_FILE="$seed_work/sterile/fonts.conf" WINEDEBUG=-all PYTHONDONTWRITEBYTECODE=1)
+          "${seed_env[@]}" xvfb-run -a python3 "$seed_work/checkpoint/pc/tools/pw_install.py" \
+            "$seed_work/checkpoint/pc/recipes/diagnostic-notepad.yml" \
+            --library "$seed_work/library" --wine "$seed_host/bin/wine" --resolution 800x600 \
+            > "$seed_work/initialization.log" 2>&1
+          "${seed_env[@]}" WINEPREFIX="$seed_work/library/prefixes/diagnostic-notepad" \
+            timeout 60s "$seed_host/bin/wineserver" -w
+          for registry in system.reg user.reg userdef.reg; do
+            test -s "$seed_work/library/prefixes/diagnostic-notepad/$registry"
+          done
+      - name: Audit resolved sources and export through original pw_prefix conversion
+        run: |
+          python3 tools/export_notepad_seed.py export --work "$RUNNER_TEMP/seed-work" \
+            --library "$RUNNER_TEMP/seed-work/library" --out "$RUNNER_TEMP/clean-notepad-seed" \
+            --instructions docs/NOTEPAD_SEED.md
+          test -f "$RUNNER_TEMP/clean-notepad-seed/EXPORT-COMPLETE"
+          (cd "$RUNNER_TEMP/clean-notepad-seed" && sha256sum --check SHA256SUMS)
+          tar -czf "$RUNNER_TEMP/clean-notepad-seed.tar.gz" -C "$RUNNER_TEMP/clean-notepad-seed" .
+          sha256sum "$RUNNER_TEMP/clean-notepad-seed.tar.gz" > "$RUNNER_TEMP/clean-notepad-seed.tar.gz.sha256"
+      - name: Retain only the successfully audited converted seed
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: clean-notepad-seed-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/clean-notepad-seed.tar.gz
+            ${{ runner.temp }}/clean-notepad-seed.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain bounded sanitized diagnostics, never the raw prefix
+        if: always()
+        run: |
+          python3 tools/export_notepad_seed.py diagnostics --work "$RUNNER_TEMP/seed-work" \
+            --out "$RUNNER_TEMP/seed-diagnostics"
+      - name: Upload only filtered initialization diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: clean-notepad-seed-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/seed-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
