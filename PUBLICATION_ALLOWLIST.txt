@@ -598,3 +598,7 @@ tests/test_native_service_converter.py
 native/pw_native_suite.c
 native/pw_native_suite.h
 tests/test_pw_native_suite.c
+docs/NATIVE_DIAGNOSTIC_SUITE.md
+tools/check_native_suite.py
+tools/native_probe_elf.py
+tests/test_native_suite.py

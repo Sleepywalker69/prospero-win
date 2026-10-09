@@ -19,9 +19,9 @@
 #   PW_WINE64_WAIT_WATCHDOG 1 turns on Wine's wait watchdog (patch 0680) in
 #                          every game: a snapshot of the server's waits every
 #                          two seconds, for diagnosing stalls (default 0)
-#   PW_NATIVE_CHILD_PROBE  1 builds a manual, one-attempt native SELF probe
+#   PW_NATIVE_CHILD_PROBE  1 builds manual original native diagnostics
 #                          instead of a game-launching UI (default 0)
-#   PW_NATIVE_CHILD_MODE hello (default) or synthetic fd capability mode
+#   PW_NATIVE_CHILD_MODE hello (default), fd, peer-exit, or multi-test suite
 #   PW_NATIVE_CHILD_FOUNDATION prepared pinned PRX foundation for that worker
 #   Lapy helper             fetched from the GitHub release pinned below
 #                          (lapy_release, lapy_elf_sha256)
@@ -53,8 +53,8 @@ title_id=PPSA99995
     echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2; }
 [[ $native_child_probe == 0 || $native_child_probe == 1 ]] || {
     echo "PW_NATIVE_CHILD_PROBE must be 0 or 1" >&2; exit 2; }
-[[ $native_child_mode == hello || ( ( $native_child_mode == fd || $native_child_mode == peer-exit ) && $native_child_probe == 1 ) ]] || {
-    echo "PW_NATIVE_CHILD_MODE must be hello, or fd/peer-exit with PW_NATIVE_CHILD_PROBE=1" >&2; exit 2; }
+[[ $native_child_mode == hello || ( ( $native_child_mode == fd || $native_child_mode == peer-exit || $native_child_mode == suite ) && $native_child_probe == 1 ) ]] || {
+    echo "PW_NATIVE_CHILD_MODE must be hello, or fd/peer-exit/suite with PW_NATIVE_CHILD_PROBE=1" >&2; exit 2; }
 [[ $native_child_probe == 0 || ( $wine64_script == 0 && -n $output_suffix ) ]] || {
     echo "the native child probe requires an isolated PW_OUTPUT_SUFFIX and manual scripting-off mode" >&2; exit 2; }
 [[ $wine64_script == 0 || $wine64_script == 1 ]] && [[ $wine64_seconds =~ ^[0-9]+$ ]] &&
@@ -165,9 +165,32 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-secti
         -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog")
 if [[ $native_child_probe == 1 ]]; then
     probe_foundation=${PW_NATIVE_CHILD_FOUNDATION:-$root/.deps/ps5-native-app-boilerplate-prx}
+    child_mode=$native_child_mode
+    [[ $child_mode != suite ]] || child_mode=peer-exit
     python3 "$root/tools/build_native_child_probe.py" --sdk "$sdk" \
-        --foundation "$probe_foundation" --out "$build/child" --mode "$native_child_mode"
+        --foundation "$probe_foundation" --out "$build/child" --mode "$child_mode"
     common+=(-DPW_NATIVE_CHILD_PROBE=1 -I"$build/child")
+    if [[ $native_child_mode == suite ]]; then
+        python3 "$root/tools/build_native_child_probe.py" --sdk "$sdk" \
+            --foundation "$probe_foundation" --out "$build/service" --mode service
+        # A second independent converter build consumes the same default-mode
+        # inputs. Builder-source changes legitimately change the worker ID, so
+        # compare this build's fixed inputs rather than an earlier release.
+        python3 "$root/tools/build_native_child_probe.py" --sdk "$sdk" \
+            --foundation "$probe_foundation" --out "$build/default-control" --mode peer-exit
+        python3 - "$build" <<'PYCOMPARE'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); result = {}
+for name in ('worker.linked.elf', 'worker.elf', 'native-child.self'):
+    before = (root / 'child' / name).read_bytes()
+    after = (root / 'default-control' / name).read_bytes()
+    if before != after:
+        raise SystemExit('default worker comparison differs: ' + name)
+    result[name] = {'bytes': len(before), 'sha256': hashlib.sha256(before).hexdigest()}
+(root / 'default-mode-comparison.json').write_text(json.dumps(result, indent=2) + '\n')
+PYCOMPARE
+        common+=(-DPW_NATIVE_MULTI_PROBE=1 -I"$build/service")
+    fi
 fi
 
 sources=(
@@ -184,8 +207,12 @@ if [[ $native_child_probe == 1 ]]; then
     sources+=(native/pw_native_child_probe.c native/pw_native_child_protocol.c)
     if [[ $native_child_mode == fd ]]; then
         sources+=(native/pw_native_fd_probe.c native/pw_native_fd_report.c)
-    elif [[ $native_child_mode == peer-exit ]]; then
+    elif [[ $native_child_mode == peer-exit || $native_child_mode == suite ]]; then
         sources+=(native/pw_native_peer_probe.c native/pw_native_peer_protocol.c)
+    fi
+    if [[ $native_child_mode == suite ]]; then
+        sources+=(native/pw_native_suite.c native/pw_native_socket_diagnostic.c
+                  native/pw_native_service_child.c native/pw_native_service_packet.c)
     fi
 fi
 objects=()
@@ -197,6 +224,10 @@ done
 if [[ $native_child_probe == 1 ]]; then
     "${cc[@]}" -std=c11 "${common[@]}" -c "$build/child/native-child-image.c" -o "$build/obj/native-child-image.o"
     objects+=("$build/obj/native-child-image.o")
+    if [[ $native_child_mode == suite ]]; then
+        "${cc[@]}" -std=c11 "${common[@]}" -c "$build/service/native-service-image.c" -o "$build/obj/native-service-image.o"
+        objects+=("$build/obj/native-service-image.o")
+    fi
 fi
 "${cc[@]}" -std=c11 "${common[@]}" \
     -include "$root/native/ps5log/ps5log_ps5_net.h" \
@@ -238,6 +269,9 @@ cp "$foundation/runtime/libc.prx" "$dist/sce_module/libc.prx"
 cp "$lapy_helper_elf" "$dist/lapy.elf"
 if [[ $native_child_probe == 1 ]]; then
     cp "$build/child/native-child.self" "$build/child/native-child-build.json" "$dist/"
+    if [[ $native_child_mode == suite ]]; then
+        cp "$build/service/native-service.self" "$build/service/native-service-build.json" "$dist/"
+    fi
 fi
 # The console refuses to start a title whose eboot lacks execute permission
 # (exec fails with EACCES) and its loader refuses a PRX without it ("mount
@@ -262,6 +296,14 @@ if [[ -n $readelf && -x $readelf ]]; then
     echo "dynamic imports recorded in $build/PW_DYNAMIC_IMPORTS.txt"
 else
     echo "llvm-readelf unavailable: dynamic-import review skipped" >&2
+fi
+
+if [[ $native_child_mode == suite ]]; then
+    llvm_config=${LLVM_CONFIG:-llvm-config-18}
+    llvm_bindir=$("$llvm_config" --bindir)
+    python3 "$root/tools/check_native_suite.py" --build "$build" --app "$dist" \
+        --sdk "$sdk" --llvm-bindir "$llvm_bindir" --out "$build/suite-inspection" \
+        --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?suite needs the pinned SDK source archive}"
 fi
 
 sha256sum "$build/eboot.elf" "$dist/eboot.bin"
