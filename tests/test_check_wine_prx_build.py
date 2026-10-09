@@ -49,7 +49,7 @@ class Fixture:
             path = self.write("build/" + target, binary())
             self.report["targets"][target] = {"built": True, "bytes": path.stat().st_size, "sha256": check.sha(path)}
         for arch in ("i386", "x86_64"):
-            for name in check.PE + (("wow64",) if arch == "x86_64" else ()):
+            for name in check.PE + (("wow64", "wow64win") if arch == "x86_64" else ()):
                 target = f"{arch}-windows/{name}.dll"
                 self.report["pe"][target] = check.sha(self.write("pe/" + target, b"synthetic PE fixture"))
         for name in check.MODULES:
@@ -216,6 +216,18 @@ class PrxBuildContracts(unittest.TestCase):
                 f = DataFixture(Path(d), defect)
                 with self.assertRaises(ValueError):
                     f.validate()
+
+    def test_matched_wow64_pair_is_required_and_rehashed(self):
+        for defect in ("missing-report", "missing-file", "changed-file", "extra-pe"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d))
+                target = "x86_64-windows/wow64win.dll"
+                self.assertEqual(len(f.report["pe"]), 22)
+                if defect == "missing-report": del f.report["pe"][target]
+                elif defect == "missing-file": (f.work / "pe" / target).unlink()
+                elif defect == "changed-file": f.write("pe/" + target, b"changed after build report")
+                else: f.report["pe"]["x86_64-windows/unexpected.dll"] = "0" * 64
+                with self.assertRaises(ValueError): f.validate()
 
     def test_complete_build_is_checked(self):
         with tempfile.TemporaryDirectory() as d:

@@ -130,7 +130,7 @@ def validate(work: Path, sdk: Path, foundation: Path, bindir: Path, output: Path
         require(entry["built"] is True and entry["bytes"] == len(data(work / "build" / target)) and
                 entry["sha256"] == sha(work / "build" / target), f"missing/changed Unix target: {target}")
     expected_pe = {f"{arch}-windows/{name}.dll" for arch in ("i386", "x86_64") for name in PE}
-    expected_pe.add("x86_64-windows/wow64.dll")
+    expected_pe.update({"x86_64-windows/wow64.dll", "x86_64-windows/wow64win.dll"})
     require(set(report["pe"]) == expected_pe, "unexpected patched PE module set")
     for name in expected_pe:
         require(report["pe"][name] == sha(work / "pe" / name), f"missing/changed PE module: {name}")
