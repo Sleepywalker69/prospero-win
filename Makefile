@@ -171,6 +171,10 @@ PW_LAPY_ELEVATION_TEST_FLAGS := -DPW_LAPY_HELPER_PATH='"/tmp/pw_lapy_test_helper
 $(eval $(call test_rule,test_pw_native_child_protocol,tests/test_pw_native_child_protocol.c native/pw_native_child_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_protocol,tests/test_pw_native_peer_protocol.c native/pw_native_peer_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_worker,tests/test_pw_native_peer_worker.c,))
+PW_WINE_FIXTURE_SOCKET_FLAGS := -Itests/native_peer_fixture
+$(BUILD)/test_pw_wine_fixture_socket: wine/ps5/pw_wine_fixture_socket.c wine/ps5/pw_wine_fixture_socket.h tests/native_peer_fixture/sys/socket.h tests/native_peer_fixture/sys/ioctl.h
+$(eval $(call test_rule,test_pw_wine_fixture_socket,tests/test_pw_wine_fixture_socket.c,$(PW_WINE_FIXTURE_SOCKET_FLAGS)))
+
 PW_NATIVE_PEER_TEST_FLAGS := -Itests/native_peer_fixture -MMD -MP -MF $(BUILD)/native-peer-probe-test.d
 -include $(BUILD)/native-peer-probe-test.d
 $(eval $(call test_rule,test_pw_native_peer_probe,native/pw_native_peer_protocol.c tests/test_pw_native_peer_probe.c,$(PW_NATIVE_PEER_TEST_FLAGS)))
@@ -228,7 +232,7 @@ $(eval $(call test_rule,test_pw_diagnostics,tests/test_pw_diagnostics.c native/p
 $(eval $(call test_rule,test_pw_qpc_clock,tests/test_pw_qpc_clock.c,))
 $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
 
-TESTS := test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
+TESTS := test_pw_wine_fixture_socket test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
 	test_pw_present test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch \
 	test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
 	test_d3d9_bridge_wire test_vk_replay test_d3d9_objects test_d3d9_program_query test_d3d9_program_wire test_d3d9_factory_wire test_d3d9_resource_wire \
