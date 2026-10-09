@@ -639,9 +639,16 @@ jobs:
               size = path.stat().st_size; total += size
               if size > 128 * 1024 * 1024 or total > 512 * 1024 * 1024:
                   raise SystemExit('runtime diagnostic exceeds the artifact bound')
-              relative = path.relative_to(root); target = stage/'outputs'/relative
+              relative = path.relative_to(root)
+              # upload-artifact omits hidden files. Preserve this one known
+              # configure stamp under a visible alias, with its source binding.
+              retained = Path('build/prospero-configure-stamp.txt') if str(relative) == 'build/.prospero-stamp' else relative
+              if any(part.startswith('.') for part in retained.parts) or str(retained) in files:
+                  raise SystemExit('unexpected hidden or duplicate runtime diagnostic path')
+              target = stage/'outputs'/retained
               target.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(path, target)
-              files[str(relative)] = {'bytes': size, 'sha256': hashlib.sha256(target.read_bytes()).hexdigest()}
+              files[str(retained)] = {'source_path': str(relative), 'bytes': size,
+                                      'sha256': hashlib.sha256(target.read_bytes()).hexdigest()}
           (stage/'FILES.json').write_text(json.dumps({'mode': sys.argv[3], 'executed': False, 'files': files}, indent=2)+'\n')
           PYCODE
       - name: Retain PRX build evidence even on failure

@@ -261,6 +261,7 @@ with tempfile.TemporaryDirectory() as directory:
     root = Path(directory); work = root/'work'; stage = root/'stage'
     original = work/'build/dlls/ntdll/unix/loader.o'; original.parent.mkdir(parents=True)
     original.write_bytes(b'original compiler-output fixture')
+    stamp = work/'build/.prospero-stamp'; stamp.write_bytes(b'1'*64+b'\n')
     stage.mkdir(); (stage/'sources').mkdir()
     for name in ('wine.tar.gz', 'foundation.tar.gz'):
         (stage/'sources'/name).write_bytes(b'original source-archive fixture')
@@ -271,6 +272,20 @@ with tempfile.TemporaryDirectory() as directory:
         record = json.loads((stage/'FILES.json').read_text())
         assert record['mode'] == mode and record['executed'] is False
         assert record['files']['build/dlls/ntdll/unix/loader.o']['sha256'] == hashlib.sha256(original.read_bytes()).hexdigest()
+        alias = 'build/prospero-configure-stamp.txt'
+        assert 'build/.prospero-stamp' not in record['files']
+        assert record['files'][alias] == {'source_path': 'build/.prospero-stamp', 'bytes': 65,
+                                           'sha256': hashlib.sha256(stamp.read_bytes()).hexdigest()}
+        # Model upload-artifact's ordinary exclusion of hidden path components.
+        visible = {str(path.relative_to(stage/'outputs')): path for path in (stage/'outputs').rglob('*')
+                   if path.is_file() and not any(part.startswith('.') for part in path.relative_to(stage/'outputs').parts)}
+        assert set(visible) == set(record['files'])
+        for name, value in record['files'].items():
+            assert visible[name].read_bytes() == (work/value['source_path']).read_bytes()
+            assert hashlib.sha256(visible[name].read_bytes()).hexdigest() == value['sha256']
+    hidden = work/'build/dlls/ntdll/.unexpected/loader.o'; hidden.parent.mkdir(parents=True)
+    hidden.write_bytes(b'unexpected hidden output'); assert retain().returncode != 0
+    hidden.unlink(); hidden.parent.rmdir()
     assert retain('unknown').returncode != 0
     (stage/'sources/wine.tar.gz').unlink(); assert retain().returncode != 0
     (stage/'sources/wine.tar.gz').write_bytes(b'original source-archive fixture')
