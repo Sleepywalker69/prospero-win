@@ -133,11 +133,13 @@ $(eval $(call test_rule,test_pw_native_peer_probe,native/pw_native_peer_protocol
 PW_NATIVE_SOCKET_TEST_FLAGS := -Itests/native_peer_fixture -MMD -MP -MF $(BUILD)/native-socket-diagnostic-test.d
 -include $(BUILD)/native-socket-diagnostic-test.d
 $(eval $(call test_rule,test_pw_native_socket_diagnostic,tests/test_pw_native_socket_diagnostic.c,$(PW_NATIVE_SOCKET_TEST_FLAGS)))
-PW_NATIVE_SERVICE_PACKET_FLAGS := -Itests/native_service_fixture -MMD -MP
+PW_NATIVE_SERVICE_PACKET_FLAGS := -Itests/native_service_fixture -MMD -MP -MF $(BUILD)/native-service-packet-test.d
+PW_NATIVE_SERVICE_PACKET_WORKER_FLAGS := -Itests/native_service_fixture -MMD -MP -DPW_NATIVE_CHILD_FREESTANDING -MF $(BUILD)/native-service-packet-worker-test.d
+PW_NATIVE_SERVICE_WORKER_FLAGS := -Itests/native_service_fixture -MMD -MP -DPW_NATIVE_CHILD_FREESTANDING -fno-builtin -MF $(BUILD)/native-service-worker-test.d
 -include $(BUILD)/native-service-packet-test.d $(BUILD)/native-service-packet-worker-test.d $(BUILD)/native-service-worker-test.d
-$(eval $(call test_rule,test_pw_native_service_packet,tests/test_pw_native_service_packet.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_FLAGS) -MF $(BUILD)/native-service-packet-test.d))
-$(eval $(call test_rule,test_pw_native_service_packet_worker,tests/test_pw_native_service_packet.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_FLAGS) -DPW_NATIVE_CHILD_FREESTANDING -MF $(BUILD)/native-service-packet-worker-test.d))
-$(eval $(call test_rule,test_pw_native_service_worker,tests/test_pw_native_service_worker.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_FLAGS) -DPW_NATIVE_CHILD_FREESTANDING -fno-builtin -MF $(BUILD)/native-service-worker-test.d))
+$(eval $(call test_rule,test_pw_native_service_packet,tests/test_pw_native_service_packet.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_FLAGS)))
+$(eval $(call test_rule,test_pw_native_service_packet_worker,tests/test_pw_native_service_packet.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_PACKET_WORKER_FLAGS)))
+$(eval $(call test_rule,test_pw_native_service_worker,tests/test_pw_native_service_worker.c native/pw_native_child_protocol.c,$(PW_NATIVE_SERVICE_WORKER_FLAGS)))
 $(BUILD)/test_pw_native_service_packet $(BUILD)/test_pw_native_service_packet_worker: native/pw_native_service_packet.c native/pw_native_service_packet.h tests/native_service_fixture/sys/socket.h
 $(BUILD)/test_pw_native_service_worker: native/pw_native_service_worker.c native/pw_native_service_packet.c native/pw_native_service_packet.h tests/native_service_fixture/sys/socket.h
 $(eval $(call test_rule,test_native_fd_mock,tests/test_native_fd_mock.c,))
