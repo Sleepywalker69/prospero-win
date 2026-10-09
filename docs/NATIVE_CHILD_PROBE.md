@@ -230,14 +230,33 @@ An ESRCH/EPERM result, TCP EOF or an expired deadline does not establish death.
 Even a valid exit event does not establish native reaping or complete resource
 reclamation. The existing loader-owned temporary file remains outside cleanup.
 
-Socket preparation failures use distinct `PW_NATIVE_PEER api` codes: 20 for
-`F_GETFD`, 21 for `F_SETFD` adding `FD_CLOEXEC`, 22 for `F_GETFL`, and 23 for
-`F_SETFL` adding `O_NONBLOCK`. These codes are diagnostic identifiers, not the
-native command values. Older builds grouped all four under code 3, so their
-logs cannot identify a failed sub-operation. The parent preserves the first
-call's return value and immediate errno even if cleanup also fails. Every
-call remains required, existing flags are preserved, and the first failure
-stops preparation. No command substitution or fallback is attempted.
+Peer AF_UNIX socket preparation uses the ordinary BSD `ioctl` interface:
+`FIOCLEX` with a null argument, then `FIONBIO` with a pointer to an integer 1,
+followed by the required `SO_NOSIGPIPE` option. `PW_NATIVE_PEER api` code 24
+identifies `FIOCLEX` and code 25 identifies `FIONBIO`. Both ioctls must return
+zero; the first failure stops preparation. The parent preserves the first
+return value and immediate errno even if cleanup also fails. No fallback is
+attempted. This shared preparation applies to the parent listener, its accepted
+stream and the worker's AF_UNIX stream.
+
+The [pinned SDK declarations](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/include/freebsd/sys/filio.h)
+and [FreeBSD descriptor implementation](https://github.com/freebsd/freebsd-src/blob/d106002967eff712894ab8b5337bbbff106ce5e0/sys/kern/sys_generic.c#L818)
+define setters that preserve unrelated descriptor/open-file flags. The
+[socket implementation](https://github.com/freebsd/freebsd-src/blob/d106002967eff712894ab8b5337bbbff106ce5e0/sys/kern/sys_socket.c#L163)
+sets the socket's nonblocking bit. These source contracts justify an experimental
+candidate; they do not establish that the PS5 title accepts either request.
+
+This candidate follows an observed `F_GETFD` rejection with EINVAL on the
+listener. It does not establish that all fcntl commands are unsupported. Saved
+codes 20 (`F_GETFD`), 21 (`F_SETFD`), 22 (`F_GETFL`) and 23 (`F_SETFL`) retain their
+historical meanings; still older builds grouped all four under code 3. These
+are diagnostic identifiers, not native command values.
+
+The worker's separate inherited fd0 startup still uses `F_GETFL`/`F_SETFL`
+before HELLO. A failure there returns exit 3 without a peer capability report;
+listener failure prevented that path from being tested on the console. The
+exact peer worker import set therefore includes both `ioctl` and `fcntl`.
+HELLO-only and FD diagnostic mode behavior is unchanged.
 
 A parent setup failure before the loader's `stage=connect` record prevents
 SELF upload and worker launch. Retain the exact build and all matching records
