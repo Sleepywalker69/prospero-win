@@ -523,3 +523,7 @@ tests/test_check_wine_prx_build.py
 tools/package_diagnostic_kit.py
 tests/test_diagnostic_kit.py
 docs/DIAGNOSTIC_KIT.md
+tools/export_notepad_seed.py
+tests/test_notepad_seed.py
+.github/workflows/notepad-seed.yml
+docs/NOTEPAD_SEED.md
