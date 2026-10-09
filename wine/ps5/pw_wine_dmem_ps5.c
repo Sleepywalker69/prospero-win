@@ -12,6 +12,9 @@
  * regions stay ordinary reservations and every call passes through. */
 #include "pw_wine_dmem.h"
 #include "pw_wine_heap.h"
+#if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
+#include "wine/pw_private_dispatch.h"
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -218,6 +221,51 @@ void *__wine_ps5_mmap(void *address, size_t bytes, int protection, int flags, in
     errno = ENOMEM;
     return MAP_FAILED;
 }
+
+#if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
+/* Called exactly once during Wine bootstrap, with its virtual_mutex held.
+ * The early USD page stays committed for timestamp/error paths. The second
+ * page stays private. Never use this as a general file-map fallback. */
+void *__wine_ps5_map_usd_checked(int fd)
+{
+    void *const address = (void *)(uintptr_t)PW_PRIVATE_DISPATCH_USD;
+    PwWineDmemStats before, after;
+    void *mapped;
+    int adopted;
+
+    if (fd < 0 || state != 1 || PAGE != PW_PRIVATE_DISPATCH_PAGE ||
+        !pw_wine_dmem_owns(&dmem, PW_PRIVATE_DISPATCH_USD, PW_PRIVATE_DISPATCH_SPAN) ||
+        pw_wine_dmem_backed(&dmem, PW_PRIVATE_DISPATCH_USD, PAGE) != PAGE ||
+        pw_wine_dmem_backed(&dmem, PW_PRIVATE_DISPATCH_SLOT, PAGE) != PAGE)
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    pw_wine_dmem_stats(&dmem, &before);
+    mapped = mmap(address, PAGE, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 0);
+    if (mapped == MAP_FAILED) return MAP_FAILED;
+    if (mapped != address)
+    {
+        /* Even cleanup failure is fatal to the caller; no successful map. */
+        (void)munmap(mapped, PAGE);
+        errno = EIO;
+        return MAP_FAILED;
+    }
+    adopted = pw_wine_dmem_adopt(&dmem, PW_PRIVATE_DISPATCH_USD, PAGE);
+    pw_wine_dmem_stats(&dmem, &after);
+    if (!pw_private_dispatch_adoption_valid(adopted, before.failures, after.failures,
+            (unsigned long)pw_wine_dmem_backed(&dmem, PW_PRIVATE_DISPATCH_USD, PAGE),
+            (unsigned long)pw_wine_dmem_backed(&dmem, PW_PRIVATE_DISPATCH_SLOT, PAGE)))
+    {
+        /* The old adopter may have changed bookkeeping after a release
+         * failed. Do not retry, continue, or claim rollback: virtual.c exits
+         * before guest entry. Native cleanup remains separately unproven. */
+        errno = EIO;
+        return MAP_FAILED;
+    }
+    return address;
+}
+#endif
 
 /* Owned pages give their direct memory back, then their address space. */
 int __wine_ps5_munmap(void *address, size_t bytes)
