@@ -53,8 +53,8 @@ title_id=PPSA99995
     echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2; }
 [[ $native_child_probe == 0 || $native_child_probe == 1 ]] || {
     echo "PW_NATIVE_CHILD_PROBE must be 0 or 1" >&2; exit 2; }
-[[ $native_child_mode == hello || ( $native_child_mode == fd && $native_child_probe == 1 ) ]] || {
-    echo "PW_NATIVE_CHILD_MODE must be hello, or fd with PW_NATIVE_CHILD_PROBE=1" >&2; exit 2; }
+[[ $native_child_mode == hello || ( ( $native_child_mode == fd || $native_child_mode == peer-exit ) && $native_child_probe == 1 ) ]] || {
+    echo "PW_NATIVE_CHILD_MODE must be hello, or fd/peer-exit with PW_NATIVE_CHILD_PROBE=1" >&2; exit 2; }
 [[ $native_child_probe == 0 || ( $wine64_script == 0 && -n $output_suffix ) ]] || {
     echo "the native child probe requires an isolated PW_OUTPUT_SUFFIX and manual scripting-off mode" >&2; exit 2; }
 [[ $wine64_script == 0 || $wine64_script == 1 ]] && [[ $wine64_seconds =~ ^[0-9]+$ ]] &&
@@ -184,6 +184,8 @@ if [[ $native_child_probe == 1 ]]; then
     sources+=(native/pw_native_child_probe.c native/pw_native_child_protocol.c)
     if [[ $native_child_mode == fd ]]; then
         sources+=(native/pw_native_fd_probe.c native/pw_native_fd_report.c)
+    elif [[ $native_child_mode == peer-exit ]]; then
+        sources+=(native/pw_native_peer_probe.c native/pw_native_peer_protocol.c)
     fi
 fi
 objects=()

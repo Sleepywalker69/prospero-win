@@ -13,8 +13,16 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "native_child_probe_fixture/native-child-build.h"
+#ifndef PW_NATIVE_CHILD_PEER_MODE
+#define PW_NATIVE_CHILD_PEER_MODE 0
+#endif
 #if PW_NATIVE_CHILD_FD_MODE
 #include "../native/pw_native_fd_report.h"
+#endif
+#if PW_NATIVE_CHILD_PEER_MODE
+#include "../native/pw_native_peer_probe.h"
+#endif
+#if PW_NATIVE_CHILD_FD_MODE || PW_NATIVE_CHILD_PEER_MODE
 static int test_mkdir(const char *, mode_t);
 static int test_rmdir(const char *);
 #define mkdir test_mkdir
@@ -44,7 +52,7 @@ static int test_pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(vo
 #undef pthread_attr_setdetachstate
 #undef pthread_attr_destroy
 #undef pthread_create
-#if PW_NATIVE_CHILD_FD_MODE
+#if PW_NATIVE_CHILD_FD_MODE || PW_NATIVE_CHILD_PEER_MODE
 #undef mkdir
 #undef rmdir
 #endif
@@ -69,6 +77,12 @@ static struct Mock {
     int directory, mkdir_calls, rmdir_calls, mkdir_error, rmdir_error;
     int fd_open_calls, fd_run_calls, fd_dispose_calls, fd_open_error, fd_failure, fd_clock_boundary;
     int fd_open_cancel, fd_open_expiry;
+#endif
+#if PW_NATIVE_CHILD_PEER_MODE
+    int directory, mkdir_calls, rmdir_calls, mkdir_error, rmdir_error;
+    int peer_open_calls, peer_exchange_calls, peer_pre_stop_calls, peer_observe_calls;
+    int peer_open_error, peer_open_cancel, peer_open_expiry, peer_failure, peer_pending_failure;
+    int peer_exit_failure, peer_cleanup_failure, peer_close_late, peer_cooperative;
 #endif
 } mock;
 
@@ -135,6 +149,72 @@ static void set_worker_report(PwNativeFdResult value)
 {
     uint64_t correlation = 100 ^ ((uint64_t)17 << 32) ^ UINT64_C(0x50574e43);
     assert(!pw_native_fd_report_encode(mock.input + 4 * PW_NC_FRAME_BYTES, 17, 42, correlation, &value));
+}
+#endif
+
+#if PW_NATIVE_CHILD_PEER_MODE
+static int test_mkdir(const char *path, mode_t mode)
+{
+    assert(!mock.directory && mode == 0700 && !strcmp(path, "/data/prospero-win/peer-test"));
+    ++mock.mkdir_calls;
+    if (mock.mkdir_error) { errno = mock.mkdir_error; return -1; }
+    mock.directory = 1; return 0;
+}
+static int test_rmdir(const char *path)
+{
+    assert(mock.directory && !strcmp(path, probe.peer_directory)); ++mock.rmdir_calls;
+    if (mock.rmdir_error) { errno = mock.rmdir_error; return -1; }
+    mock.directory = 0; return 0;
+}
+int pw_native_peer_paths(uint32_t pid, uint64_t correlation, char directory[PW_NP_PATH_CAP], char path[PW_NP_PATH_CAP])
+{
+    assert(pid == 17 && correlation); strcpy(directory, "/data/prospero-win/peer-test");
+    strcpy(path, "/data/prospero-win/peer-test/s"); return 0;
+}
+int pw_native_peer_parent_open(PwNativePeerProbe *p, const char *path, PwNativeChildIo *io, PwNativePeerResult *r)
+{
+    assert(mock.directory && !mock.socket_calls && strstr(path, "/peer-test/s"));
+    ++mock.peer_open_calls;
+    if (mock.peer_open_error) { r->status = PW_NP_OS; return -1; }
+    p->listener = 79; p->bound = 1;
+    if (mock.peer_open_cancel) pw_native_child_probe_cancel();
+    if (mock.peer_open_expiry) mock.now = io->stage_end;
+    return 0;
+}
+int pw_native_peer_parent_exchange(PwNativePeerProbe *p, PwNativeChildIo *io,
+                                    const PwNativeChildFrame *frame, PwNativePeerResult *r)
+{
+    assert(mock.directory && p->listener == 79 && frame->parent_pid == 17 && frame->child_pid == 42);
+    assert(mock.position == 4 * PW_NC_FRAME_BYTES && mock.output_size == PW_NATIVE_CHILD_SELF_BYTES + 3 * PW_NC_FRAME_BYTES);
+    assert(io == &probe.io); ++mock.peer_exchange_calls;
+    p->listener = -1; p->bound = 0; p->queue = 80; p->armed = 1;
+    r->worker_report_valid = r->nonce_match = r->reciprocal_ok = 1;
+    if (mock.peer_failure) { r->status = PW_NP_PROTOCOL; return -1; }
+    return 0;
+}
+int pw_native_peer_pre_stop(PwNativePeerProbe *p, PwNativeChildIo *io, PwNativePeerResult *r)
+{
+    assert(p->armed && io == &probe.io); ++mock.peer_pre_stop_calls;
+    assert(mock.output_size == PW_NATIVE_CHILD_SELF_BYTES + 3 * PW_NC_FRAME_BYTES);
+    if (r->status) return -1;
+    assert(!mock.directory && mock.rmdir_calls == 1);
+    if (mock.peer_pending_failure) { r->status = PW_NP_EXIT; return -1; }
+    r->prestop_empty = 1; return 0;
+}
+int pw_native_peer_observe(PwNativePeerProbe *p, PwNativeChildIo *io, int cooperative, PwNativePeerResult *r)
+{
+    assert(p->armed && p->queue == 80 && mock.close_calls == 1 && io == &probe.io);
+    ++mock.peer_observe_calls; mock.peer_cooperative = cooperative; p->queue = -1;
+    if (mock.peer_exit_failure) { if (!r->status) r->status = PW_NP_EXIT; return -1; }
+    r->exit_observed = r->exit_status_match = 1;
+    if (!cooperative || r->status) return -1;
+    r->phase = PW_NP_COMPLETE; return 0;
+}
+void pw_native_peer_parent_cleanup(PwNativePeerProbe *p, PwNativePeerResult *r)
+{
+    p->listener = p->stream = p->queue = -1; p->bound = 0;
+    if (mock.peer_cleanup_failure) r->cleanup_failed = 1;
+    if (mock.peer_close_late) mock.now = probe.io.stage_end;
 }
 #endif
 
@@ -423,6 +503,34 @@ static void test_fd_results_and_order(void)
     assert(mock.position == 4 * PW_NC_FRAME_BYTES && !probe.worker_report && !probe.result.stop_ack);
 }
 #endif
+#if PW_NATIVE_CHILD_PEER_MODE
+static void test_peer_results_and_order(void)
+{
+    reset(); run(); assert(!probe.status && mock.peer_cooperative);
+    assert(mock.peer_exchange_calls == 1 && mock.peer_pre_stop_calls == 1 && mock.peer_observe_calls == 1);
+    assert(!mock.directory && mock.rmdir_calls == 1 && probe.peer_result.exit_observed);
+    assert(strstr(mock.log, "image_identity=unverified exclusive_peer_ownership=unverified"));
+    reset(); mock.mkdir_error = EEXIST; run(); expect_failed(EEXIST);
+    assert(!mock.peer_open_calls && !mock.socket_calls && !mock.rmdir_calls);
+    reset(); mock.peer_open_error = 1; run(); expect_failed(EIO);
+    assert(!mock.socket_calls && mock.rmdir_calls == 1);
+    reset(); mock.peer_open_cancel = 1; run(); expect_failed(ECANCELED); assert(!mock.send_calls);
+    reset(); mock.peer_open_expiry = 1; run(); expect_failed(ETIMEDOUT); assert(!mock.send_calls);
+    reset(); mock.peer_failure = 1; run(); expect_failed(EIO);
+    assert(!probe.result.stop_ack && !mock.peer_cooperative && probe.peer_result.exit_observed);
+    reset(); mock.rmdir_error = EACCES; run(); expect_failed(EIO);
+    assert(!probe.result.stop_ack && !mock.peer_cooperative && probe.peer_result.cleanup_failed);
+    reset(); mock.peer_pending_failure = 1; run(); expect_failed(EIO);
+    assert(!probe.result.stop_ack && probe.peer_result.status == PW_NP_EXIT);
+    reset(); mock.peer_exit_failure = 1; run(); expect_failed(EIO);
+    assert(probe.result.stop_ack && probe.result.stream_closed && !probe.peer_result.exit_observed);
+    reset(); mock.peer_cleanup_failure = 1; run(); expect_failed(EIO);
+    reset(); mock.peer_close_late = 1; run(); expect_failed(ETIMEDOUT);
+    /* A valid independent event cannot substitute for an absent STOP_ACK. */
+    reset(); mock.input_size -= PW_NC_FRAME_BYTES; run(); expect_failed(ECONNRESET);
+    assert(!probe.result.stop_ack && !mock.peer_cooperative && probe.peer_result.exit_observed);
+}
+#endif
 int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--deadline-control")) test_poll_completion_boundary(0, 0);
@@ -437,6 +545,9 @@ int main(int argc, char **argv)
     }
 #if PW_NATIVE_CHILD_FD_MODE
     if (argc == 1) test_fd_results_and_order();
+#endif
+#if PW_NATIVE_CHILD_PEER_MODE
+    if (argc == 1) test_peer_results_and_order();
 #endif
     puts("native controller mock-only tests passed; native execution/reaping unverified");
     return 0;

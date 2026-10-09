@@ -3,8 +3,18 @@
 #include "pw_native_child_probe.h"
 #include "pw_native_child_protocol.h"
 #include "native-child-build.h"
+#ifndef PW_NATIVE_CHILD_PEER_MODE
+#define PW_NATIVE_CHILD_PEER_MODE 0
+#endif
+#if PW_NATIVE_CHILD_FD_MODE && PW_NATIVE_CHILD_PEER_MODE
+#error Native capability modes are mutually exclusive
+#endif
 #if PW_NATIVE_CHILD_FD_MODE
 #include "pw_native_fd_report.h"
+#elif PW_NATIVE_CHILD_PEER_MODE
+#include "pw_native_peer_probe.h"
+#endif
+#if PW_NATIVE_CHILD_FD_MODE || PW_NATIVE_CHILD_PEER_MODE
 #include <sys/stat.h>
 #endif
 #include "pw_diagnostics.h"
@@ -38,6 +48,12 @@ struct native_probe {
     PwNativeFdResult fd_local, fd_worker;
     char directory[PW_NATIVE_FD_PATH_CAP];
     int directory_owned, directory_cleanup, worker_report;
+#endif
+#if PW_NATIVE_CHILD_PEER_MODE
+    PwNativePeerProbe peer;
+    PwNativePeerResult peer_result;
+    char peer_directory[PW_NP_PATH_CAP];
+    int peer_directory_owned, peer_directory_cleanup;
 #endif
 };
 static struct native_probe probe;
@@ -164,6 +180,45 @@ static int fd_prepare(struct native_probe *p, uint32_t parent, uint64_t correlat
 }
 #endif
 
+#if PW_NATIVE_CHILD_PEER_MODE
+static void peer_directory_cleanup(struct native_probe *p)
+{
+    if (!p->peer_directory_owned) return;
+    p->peer_directory_owned = 0;
+    p->peer_directory_cleanup = rmdir(p->peer_directory);
+    if (p->peer_directory_cleanup) {
+        p->peer_result.cleanup_failed = 1;
+        if (!p->peer_result.status) {
+            p->peer_result.status = PW_NP_OS; p->peer_result.api = PW_NP_API_UNLINK;
+            p->peer_result.raw_result = p->peer_directory_cleanup;
+            p->peer_result.native_error = errno;
+        }
+    }
+}
+static int parent_peer_capabilities(void *context, PwNativeChildIo *io, const PwNativeChildFrame *frame)
+{
+    struct native_probe *p = context;
+    int result = pw_native_peer_parent_exchange(&p->peer, io, frame, &p->peer_result);
+    peer_directory_cleanup(p);
+    if (!result) result = pw_native_peer_pre_stop(&p->peer, io, &p->peer_result);
+    if (result || p->peer_directory_cleanup) { errno = EIO; return -1; }
+    return 0;
+}
+static int peer_prepare(struct native_probe *p, uint32_t parent, uint64_t correlation)
+{
+    char path[PW_NP_PATH_CAP];
+    unsigned remaining;
+    if (pw_native_child_remaining(&p->io, &remaining) ||
+        pw_native_peer_paths(parent, correlation, p->peer_directory, path)) return -1;
+    if (mkdir(p->peer_directory, 0700)) return -1;
+    p->peer_directory_owned = 1;
+    if (pw_native_peer_parent_open(&p->peer, path, &p->io, &p->peer_result)) {
+        errno = EIO; return -1;
+    }
+    return 0;
+}
+#endif
+
 static void *controller(void *context)
 {
     struct native_probe *p = context;
@@ -182,6 +237,10 @@ static void *controller(void *context)
     p->listener.fd = -1;
     p->io.capabilities = parent_capabilities;
 #endif
+#if PW_NATIVE_CHILD_PEER_MODE
+    p->peer.listener = p->peer.stream = p->peer.queue = -1;
+    p->io.capabilities = parent_peer_capabilities;
+#endif
     p->io.context = p; p->io.clock_ms = clock_ms;
     p->io.receive = receive; p->io.send = send_bytes;
     p->io.cancelled = cancelled; p->io.wait_ms = pace; p->io.progress = progress;
@@ -194,6 +253,8 @@ static void *controller(void *context)
     if (!correlation) correlation = 1; /* correlation only, never authentication */
 #if PW_NATIVE_CHILD_FD_MODE
     if (fd_prepare(p, (uint32_t)getpid(), correlation)) goto done;
+#elif PW_NATIVE_CHILD_PEER_MODE
+    if (peer_prepare(p, (uint32_t)getpid(), correlation)) goto done;
 #endif
     p->socket = ps5log_ps5_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (p->socket < 0 || pw_native_child_remaining(&p->io, &remaining)) goto done;
@@ -219,6 +280,37 @@ done:
     if (p->socket >= 0 && ps5log_ps5_close(p->socket)) {
         status = -1; if (!error) error = errno ? errno : EIO;
     }
+#if PW_NATIVE_CHILD_PEER_MODE
+    /* Close the control endpoint even after a failed sequence. Any later
+     * kernel event remains a separate observation and cannot erase failure. */
+    if (p->peer.armed && pw_native_peer_observe(&p->peer, &p->io,
+            !status && p->result.stop_ack && p->result.stream_closed, &p->peer_result)) {
+        status = -1; if (!error) error = EIO;
+    }
+    pw_native_peer_parent_cleanup(&p->peer, &p->peer_result);
+    peer_directory_cleanup(p);
+    if (p->peer_result.cleanup_failed || p->peer_directory_cleanup) {
+        status = -1; if (!error) error = EIO;
+    }
+    if (!status && pw_native_child_remaining(&p->io, &remaining)) { status = -1; error = errno; }
+    pw_diagnostics_log("PW_NATIVE_PEER status=%d phase=%u api=%u raw=%lld native_error=%d initial_kernel_pid=%u uid=%u euid=%u gid=%u groups=%u reciprocal=%u receipt=%u receipt_flags=%u receipt_fflags=%u receipt_data=%lld initial_empty=%u entropy_return=%lld entropy_bytes=%u entropy_ok=%u post_arm_kernel_pid=%u nonce_match=%u",
+        p->peer_result.status, p->peer_result.phase, p->peer_result.api, (long long)p->peer_result.raw_result,
+        p->peer_result.native_error, p->peer_result.initial_credential.pid, p->peer_result.initial_credential.uid,
+        p->peer_result.initial_credential.euid, p->peer_result.initial_credential.gid, p->peer_result.initial_credential.groups,
+        p->peer_result.reciprocal_ok, p->peer_result.receipt_ok, p->peer_result.receipt_flags,
+        p->peer_result.receipt_fflags, (long long)p->peer_result.receipt_data, p->peer_result.initial_empty,
+        (long long)p->peer_result.entropy_return, p->peer_result.entropy_bytes, p->peer_result.entropy_ok,
+        p->peer_result.post_arm_credential.pid, p->peer_result.nonce_match);
+    pw_diagnostics_log("PW_NATIVE_PEER worker_report=%u worker_status=%d worker_phase=%u worker_observed=%u worker_raw=%lld prestop_empty=%u exit_observed=%u exit_flags=%u exit_fflags=%u exit_data=%lld exit_status_match=%u event_pid=%llu event_filter=%d event_tag_match=%d cleanup=%u directory_cleanup=%d",
+        p->peer_result.worker_report_valid, p->peer_result.worker_report.status,
+        p->peer_result.worker_report.phase, p->peer_result.worker_report.observations,
+        (long long)p->peer_result.worker_report.raw_result, p->peer_result.prestop_empty,
+        p->peer_result.exit_observed, p->peer_result.exit_flags, p->peer_result.exit_fflags,
+        (long long)p->peer_result.exit_data, p->peer_result.exit_status_match,
+        (unsigned long long)p->peer_result.event_ident, p->peer_result.event_filter,
+        p->peer_result.event_tag_matches, p->peer_result.cleanup_failed, p->peer_directory_cleanup);
+    pw_diagnostics_log("PW_NATIVE_PEER image_identity=unverified exclusive_peer_ownership=unverified native_reap=unverified resource_reclamation=unverified wine_endpoint=untested windows_child=unsupported");
+#endif
 #if PW_NATIVE_CHILD_FD_MODE
     pw_native_fd_dispose(&p->listener, &p->fd_local);
     fd_directory_cleanup(p);
@@ -270,7 +362,8 @@ void pw_native_child_probe_tick(void)
 }
 const char *pw_native_child_probe_title(void)
 {
-    return PW_NATIVE_CHILD_FD_MODE ? "NATIVE FD CAPABILITY PROBE" : "NATIVE CHILD PROBE";
+    return PW_NATIVE_CHILD_PEER_MODE ? "NATIVE PEER AND EXIT PROBE" :
+           PW_NATIVE_CHILD_FD_MODE ? "NATIVE FD CAPABILITY PROBE" : "NATIVE CHILD PROBE";
 }
 void pw_native_child_probe_status(char *text, size_t capacity)
 {
