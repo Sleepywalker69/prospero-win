@@ -163,6 +163,34 @@ class SeedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'timestamp'):
             seed.audit_source(converter, prefix, host, records)
 
+    def test_timestamp_text_mode_line_endings_preserved(self):
+        converter, library, prefix, host, records = self.fixture()
+        timestamp = prefix / '.update-timestamp'
+        # wineboot uses _wopen without O_BINARY; MSVCRT _write turns LF
+        # into CRLF. The filesystem converter preserves those original bytes.
+        for data in (b'1791470000\r\n', b'1791470000\n', b'1791470000'):
+            with self.subTest(data=data):
+                timestamp.write_bytes(data)
+                audit = seed.audit_source(converter, prefix, host, records)
+                self.assertEqual(audit['.update-timestamp']['sha256'], hashlib.sha256(data).hexdigest())
+        timestamp.write_bytes(b'1791470000\r\n')
+        cpu = self.root / 'original-cpu.dll'
+        cpu.write_bytes(b'original inert CPU fixture')
+        remote = seed.FilesystemRemote(self.root / 'export')
+        self.assertEqual(converter.main(['push', seed.SLUG, '--library', str(library), '--cpu-dll', str(cpu)], remote), 0)
+        exported = remote.root / 'data/prospero-win/prefixes' / seed.SLUG / '.update-timestamp'
+        self.assertEqual(exported.read_bytes(), b'1791470000\r\n')
+
+    def test_timestamp_empty_markers_and_malformed_endings_rejected(self):
+        converter, _, prefix, host, records = self.fixture()
+        for data in (b'', b'disable', b'disable\r\n', b'12\r', b'12\r\r\n',
+                     b'12\nextra', b'1\n2\n', b' 123\r\n', b'+123\r\n', b'-1\r\n',
+                     b'\xef\xbb\xbf123\r\n', b'123\x00\r\n'):
+            with self.subTest(data=data):
+                (prefix / '.update-timestamp').write_bytes(data)
+                with self.assertRaisesRegex(ValueError, 'invalid initialization timestamp'):
+                    seed.audit_source(converter, prefix, host, records)
+
     def test_archive_hash_and_traversal_rejected(self):
         raw = io.BytesIO()
         with tarfile.open(fileobj=raw, mode='w:gz') as tar:

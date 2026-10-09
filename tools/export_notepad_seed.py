@@ -381,7 +381,9 @@ def audit_source(converter, prefix, host, host_files, resources=None):
             audit_text(data, name)
             source = 'generated-registry'
         elif name == '.update-timestamp':
-            require(re.fullmatch(rb'[0-9]+\n?', resolved.read_bytes()), 'invalid initialization timestamp')
+            # wineboot's text-mode _wopen/_write emits CRLF on disk. Keep
+            # the original bytes; an optional ending must be LF or CRLF.
+            require(re.fullmatch(rb'[0-9]+(?:\r?\n)?', resolved.read_bytes()), 'invalid initialization timestamp')
             source = 'generated-timestamp'
         elif name in GENERATED_TEXT:
             audit_text(resolved.read_bytes(), name)
