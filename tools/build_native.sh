@@ -19,6 +19,9 @@
 #   PW_WINE64_WAIT_WATCHDOG 1 turns on Wine's wait watchdog (patch 0680) in
 #                          every game: a snapshot of the server's waits every
 #                          two seconds, for diagnosing stalls (default 0)
+#   PW_NATIVE_CHILD_PROBE  1 builds a manual, one-attempt native SELF probe
+#                          instead of a game-launching UI (default 0)
+#   PW_NATIVE_CHILD_FOUNDATION prepared pinned PRX foundation for that worker
 #   Lapy helper             fetched from the GitHub release pinned below
 #                          (lapy_release, lapy_elf_sha256)
 set -euo pipefail
@@ -39,12 +42,17 @@ wine64_script=${PW_WINE64_SCRIPT:-0}
 wine64_seconds=${PW_WINE64_SECONDS:-0}
 wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
+native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
 title_id=PPSA99995
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
 [[ $wine64_watchdog == 0 || $wine64_watchdog == 1 ]] || {
     echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2; }
+[[ $native_child_probe == 0 || $native_child_probe == 1 ]] || {
+    echo "PW_NATIVE_CHILD_PROBE must be 0 or 1" >&2; exit 2; }
+[[ $native_child_probe == 0 || ( $wine64_script == 0 && -n $output_suffix ) ]] || {
+    echo "the native child probe requires an isolated PW_OUTPUT_SUFFIX and manual scripting-off mode" >&2; exit 2; }
 [[ $wine64_script == 0 || $wine64_script == 1 ]] && [[ $wine64_seconds =~ ^[0-9]+$ ]] &&
     [[ $wine64_cycles =~ ^[1-9][0-9]{0,3}$ ]] || {
     echo "PW_WINE64_SCRIPT must be 0 or 1, PW_WINE64_SECONDS a number and" \
@@ -151,6 +159,12 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-secti
         -I"$root/native/ps5log"
         -DPW_WINE64_SCRIPT="$wine64_script" -DPW_WINE64_SECONDS="$wine64_seconds"
         -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog")
+if [[ $native_child_probe == 1 ]]; then
+    probe_foundation=${PW_NATIVE_CHILD_FOUNDATION:-$root/.deps/ps5-native-app-boilerplate-prx}
+    python3 "$root/tools/build_native_child_probe.py" --sdk "$sdk" \
+        --foundation "$probe_foundation" --out "$build/child"
+    common+=(-DPW_NATIVE_CHILD_PROBE=1 -I"$build/child")
+fi
 
 sources=(
     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
@@ -162,12 +176,19 @@ sources=(
     src/pw_pad.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c src/pw_tsc_calibrate.c
     wine/ps5/pw_wine_prx.c
 )
+if [[ $native_child_probe == 1 ]]; then
+    sources+=(native/pw_native_child_probe.c native/pw_native_child_protocol.c)
+fi
 objects=()
 for source in "${sources[@]}"; do
     object="$build/obj/${source//\//_}.o"
     "${cc[@]}" -std=c11 "${common[@]}" -c "$root/$source" -o "$object"
     objects+=("$object")
 done
+if [[ $native_child_probe == 1 ]]; then
+    "${cc[@]}" -std=c11 "${common[@]}" -c "$build/child/native-child-image.c" -o "$build/obj/native-child-image.o"
+    objects+=("$build/obj/native-child-image.o")
+fi
 "${cc[@]}" -std=c11 "${common[@]}" \
     -include "$root/native/ps5log/ps5log_ps5_net.h" \
     -c "$root/native/ps5log/ps5log.c" -o "$build/obj/ps5log.o"
@@ -206,6 +227,9 @@ objects+=("$build/obj/ps5log.o" "$build/obj/ps5log_ps5_net.o")
 cp "$root/sce_sys/param.json" "$root/sce_sys/icon0.png" "$dist/sce_sys/"
 cp "$foundation/runtime/libc.prx" "$dist/sce_module/libc.prx"
 cp "$lapy_helper_elf" "$dist/lapy.elf"
+if [[ $native_child_probe == 1 ]]; then
+    cp "$build/child/native-child.self" "$build/child/native-child-build.json" "$dist/"
+fi
 # The console refuses to start a title whose eboot lacks execute permission
 # (exec fails with EACCES) and its loader refuses a PRX without it ("mount
 # flag / attribute error"), so mark both here. An FTP upload may still reset
