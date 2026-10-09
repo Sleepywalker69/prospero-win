@@ -450,6 +450,17 @@ diff --git a/server/ptrace.c b/server/ptrace.c
      if (thread->unix_tid != -1)
      {
          ret = tkill( thread->unix_pid, thread->unix_tid, sig );
+diff --git a/include/Makefile.in b/include/Makefile.in
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1145,6 +1145,7 @@
+ 	wine/ps5_mutex_word.h \
+ 	wine/ps5_sync_backend.h \
+ 	wine/ps5_sync_word.h \
++	wine/pw_wine_fixture_provider.h \
+ 	wine/rbtree.h \
+ 	wine/schrpc.idl \
+ 	wine/server.h \
 diff --git a/include/wine/pw_wine_fixture_provider.h b/include/wine/pw_wine_fixture_provider.h
 new file mode 100644
 --- /dev/null

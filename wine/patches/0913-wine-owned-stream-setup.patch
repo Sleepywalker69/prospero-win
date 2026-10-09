@@ -207,6 +207,17 @@ diff --git a/server/request.c b/server/request.c
              if (!(wake_fd = create_anonymous_fd( &inprocess_wake_fd_ops, wake[0], &master_socket->obj, 0 )))
                  fatal_error( "out of memory\n" );
              set_fd_events( wake_fd, POLLIN );
+diff --git a/include/Makefile.in b/include/Makefile.in
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1146,6 +1146,7 @@
+ 	wine/ps5_sync_backend.h \
+ 	wine/ps5_sync_word.h \
+ 	wine/pw_wine_fixture_provider.h \
++	wine/pw_wine_fixture_socket.h \
+ 	wine/rbtree.h \
+ 	wine/schrpc.idl \
+ 	wine/server.h \
 diff --git a/include/wine/pw_wine_fixture_socket.h b/include/wine/pw_wine_fixture_socket.h
 new file mode 100644
 --- /dev/null
