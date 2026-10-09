@@ -595,3 +595,6 @@ tests/test_pw_native_service_child.c
 tests/native_service_fixture/native-service-build.h
 tools/native_service_converter.py
 tests/test_native_service_converter.py
+native/pw_native_suite.c
+native/pw_native_suite.h
+tests/test_pw_native_suite.c
