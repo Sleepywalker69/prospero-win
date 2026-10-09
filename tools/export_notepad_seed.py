@@ -47,6 +47,24 @@ MAX_METADATA_BYTES, MAX_METADATA_PATH = 32 << 20, 1024
 VULKAN_JSON_SHA = '21f30d7ef5dd82189dfd91e09c8a01a92a3d94a95518443db444e2894b712aea'
 REGISTRIES = {'system.reg', 'user.reg', 'userdef.reg'}
 GENERATED_TEXT = {'drive_c/windows/win.ini', 'drive_c/windows/system.ini'}
+MAX_TEXT_FINDINGS, MAX_TEXT_METADATA_BYTES = 1024, 4 << 20
+# These labels are static names in pinned win32u/font.c, shell32/shellpath.c
+# and loader/wine.inf.in. Every other name is represented only by its hash.
+TEXT_KEYS = {
+    r'Software\Microsoft\Windows NT\CurrentVersion\Fonts',
+    r'Software\Microsoft\Windows\CurrentVersion\Fonts',
+    r'Software\Wine\Fonts', r'Software\Wine\Fonts\External Fonts',
+    r'Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders',
+    r'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders',
+    r'Software\Microsoft\Windows NT\CurrentVersion\ProfileList',
+    r'System\CurrentControlSet\Control\Session Manager\Environment',
+    'Environment',
+}
+TEXT_NAMES = {'', 'Path', 'PATH', 'TEMP', 'TMP', 'ProfilesDirectory', 'ProgramData',
+              'Public', 'Default', 'Personal', 'Desktop', 'AppData', 'Local AppData'}
+TEXT_CLASSIFICATIONS = {'host-' + name for name in
+                        ('home', 'root', 'tmp', 'run', 'opt', 'usr', 'etc', 'mnt', 'workspace', 'github')}
+TEXT_CLASSIFICATIONS |= {'environment-marker', 'nul', 'invalid-utf8', 'invalid-registry-header', 'oversized'}
 
 
 def require(ok, message):
@@ -249,6 +267,125 @@ def audit_text(data, name):
                                           '/mnt/', '/workspace/', '/github/', 'github_token', 'runner_temp')),
             'host path/environment in generated text: ' + name)
     require('\x00' not in text, 'NUL in generated text')
+
+
+def text_classifications(text):
+    """Same literal path inspection as audit_text; this never grants acceptance."""
+    folded = re.sub('/+', '/', text.replace('\\', '/').lower())
+    found = {'host-' + name for name in
+             ('home', 'root', 'tmp', 'run', 'opt', 'usr', 'etc', 'mnt', 'workspace', 'github')
+             if '/' + name + '/' in folded}
+    if 'github_token' in folded or 'runner_temp' in folded:
+        found.add('environment-marker')
+    if '\x00' in text:
+        found.add('nul')
+    return found
+
+
+def text_findings(data, name):
+    """Locate literal guard failures without returning a registry value or line.
+
+    This is a conservative diagnostic recognizer of server/registry.c's saved
+    key/value prefixes, not a registry decoder or a conversion implementation.
+    Unknown/escaped names remain hashes. It does not interpret hex value data.
+    """
+    require(name in REGISTRIES | GENERATED_TEXT, 'unexpected generated-text file')
+    report = {'path': name, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+              'scan_complete': True, 'findings': []}
+    key = None
+    def finding(line_number, raw, location, classes, value=None):
+        def identity(token, allowed):
+            if token is None:
+                return None, None
+            # The source writer doubles backslashes. No other escape is decoded.
+            label = token.replace(b'\\\\', b'\\').decode('ascii', errors='replace')
+            return (label if label in allowed else None), hashlib.sha256(token).hexdigest()
+        key_label, key_hash = identity(key, TEXT_KEYS)
+        value_label, value_hash = identity(value, TEXT_NAMES)
+        return {'line': line_number, 'record_bytes': len(raw),
+                'record_sha256': hashlib.sha256(raw).hexdigest(), 'location': location,
+                'key': key_label, 'key_sha256': key_hash,
+                'value_name': value_label, 'value_name_sha256': value_hash,
+                'classifications': sorted(classes)}
+    if len(data) > 16 << 20:
+        report['scan_complete'] = False
+        report['findings'].append(finding(0, b'', 'file', {'oversized'}))
+        return report
+    # Use LF only: Wine's dump_strW escapes control characters within records.
+    for number, raw in enumerate(data.split(b'\n'), 1):
+        classes = set()
+        try:
+            line = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            line = raw.decode('utf-8', errors='replace')
+            classes.add('invalid-utf8')
+        classes.update(text_classifications(line))
+        if number == 1 and name in REGISTRIES and not data.startswith(b'WINE REGISTRY Version 2'):
+            classes.add('invalid-registry-header')
+        location, value = 'other', None
+        if name in REGISTRIES:
+            if raw.startswith(b'['):
+                key = None
+                match = re.fullmatch(rb'\[((?:[^\]\\]|\\.)*)\](?: [0-9]+)?\r?', raw)
+                if match:
+                    key = match[1]
+                    location = 'key'
+            elif raw.startswith((b'#', b';')):
+                location = 'comment'
+            else:
+                match = re.match(rb'"((?:[^"\\]|\\.)*)"=', raw)
+                if match:
+                    location, value = 'value', match[1]
+                elif raw.startswith(b'@='):
+                    location, value = 'value', b''
+        if classes:
+            if len(report['findings']) == MAX_TEXT_FINDINGS:
+                report['scan_complete'] = False
+                break
+            report['findings'].append(finding(number, raw, location, classes, value))
+    return report
+
+
+def text_metadata(issues):
+    """Independently validate every emitted field before diagnostic retention."""
+    require(isinstance(issues, dict) and set(issues) == {'schema', 'files', 'scan_complete'} and
+            issues['schema'] == 'pw-seed-text-audit/1' and type(issues['scan_complete']) is bool and
+            isinstance(issues['files'], list) and len(issues['files']) <= 5, 'invalid text-audit metadata')
+    def digest(value):
+        return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value)
+    previous = ''
+    for record in issues['files']:
+        require(isinstance(record, dict) and
+                set(record) == {'path', 'bytes', 'sha256', 'scan_complete', 'findings'}, 'unexpected text-file field')
+        require(record['path'] in REGISTRIES | GENERATED_TEXT and record['path'] > previous and
+                type(record['bytes']) is int and 0 <= record['bytes'] <= MAX_FILE and digest(record['sha256']) and
+                type(record['scan_complete']) is bool and isinstance(record['findings'], list) and
+                len(record['findings']) <= MAX_TEXT_FINDINGS, 'invalid text-file identity')
+        previous = record['path']
+        last_line = -1
+        for entry in record['findings']:
+            require(isinstance(entry, dict) and set(entry) == {
+                'line', 'record_bytes', 'record_sha256', 'location', 'key', 'key_sha256',
+                'value_name', 'value_name_sha256', 'classifications'}, 'unexpected text-finding field')
+            require(type(entry['line']) is int and last_line < entry['line'] <= record['bytes'] + 1 and
+                    type(entry['record_bytes']) is int and 0 <= entry['record_bytes'] <= record['bytes'] and
+                    digest(entry['record_sha256']) and entry['location'] in ('file', 'key', 'value', 'comment', 'other'),
+                    'invalid text-finding position')
+            last_line = entry['line']
+            for label, hashed, allowed in (('key', 'key_sha256', TEXT_KEYS),
+                                           ('value_name', 'value_name_sha256', TEXT_NAMES)):
+                require(entry[label] is None or isinstance(entry[label], str) and entry[label] in allowed,
+                        'unrecognized text-finding label')
+                require(entry[hashed] is None or digest(entry[hashed]), 'invalid text-finding name hash')
+                require(entry[label] is None or entry[hashed] is not None, 'text label without hash')
+            classes = entry['classifications']
+            require(isinstance(classes, list) and 0 < len(classes) <= len(TEXT_CLASSIFICATIONS) and
+                    all(isinstance(c, str) and c in TEXT_CLASSIFICATIONS for c in classes) and
+                    classes == sorted(set(classes)), 'invalid text-finding classification')
+        require(not issues['scan_complete'] or record['scan_complete'], 'inconsistent text-scan completeness')
+    encoded = json.dumps(issues, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode('ascii')
+    require(len(encoded) + 1 <= MAX_TEXT_METADATA_BYTES, 'text-audit metadata exceeds bound')
+    return encoded + b'\n'
 
 
 def wine_resources(path, vulkan_manifest=False):
@@ -524,7 +661,7 @@ def generated_module_hashes(host, host_files, source_archive):
     return allowed
 
 
-def audit_source(converter, prefix, host, host_files, resources=None, generated=None, issues=None):
+def audit_source(converter, prefix, host, host_files, resources=None, generated=None, issues=None, text_issues=None):
     files, directories, links = converter.local_tree(prefix)
     require(len(files) <= MAX_FILES and len(directories) <= MAX_FILES, 'prefix too large')
     approved = {record['sha256'] for name, record in host_files.items() if name.startswith('pc/host-wine/usr/')}
@@ -532,6 +669,8 @@ def audit_source(converter, prefix, host, host_files, resources=None, generated=
     generated = generated or {}
     issues = issues if issues is not None else {}
     issues.update(files=[], scan_complete=False)
+    text_issues = text_issues if text_issues is not None else {}
+    text_issues.update(schema='pw-seed-text-audit/1', files=[], scan_complete=False)
     audit, total, folded_paths = {}, 0, set()
     for path in prefix.rglob('*'):
         if '.wineserver' in path.relative_to(prefix).parts:
@@ -584,6 +723,12 @@ def audit_source(converter, prefix, host, host_files, resources=None, generated=
     require(not issues['files'], 'unapproved generated/copied file: ' +
             (issues['files'][0]['path'] if issues['files'] else '-') +
             f" ({len(issues['files'])} total; export refused)")
+    # Collect all safely reached text failures before the original first-error
+    # guards run. Diagnostic output never changes their acceptance behavior.
+    for name in sorted((REGISTRIES | GENERATED_TEXT) & set(files)):
+        text_issues['files'].append(text_findings(files[name].read_bytes(), name))
+    text_issues['scan_complete'] = (REGISTRIES <= set(files) and
+                                   all(r['scan_complete'] for r in text_issues['files']))
     # These strict content checks are deferred only until the unknown-content
     # inventory is complete. None is bypassed before a successful export.
     for name, record in audit.items():
@@ -665,13 +810,17 @@ def export(args):
     converter = load_converter(checkpoint)
     host = checkpoint / 'pc/host-wine/usr'
     issues = {'files': [], 'scan_complete': False}
+    text_issues = {'schema': 'pw-seed-text-audit/1', 'files': [], 'scan_complete': False}
     try:
         audit = audit_source(converter, prefix, host, host_files, resource_hashes(host, host_files),
-                             generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz'), issues)
+                             generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz'),
+                             issues, text_issues)
     finally:
         if issues['files']:
             with (args.work / 'UNAPPROVED-FILES.json').open('xb') as stream:
                 stream.write(unapproved_metadata(issues))
+        with (args.work / 'TEXT-AUDIT.json').open('xb') as stream:
+            stream.write(text_metadata(text_issues))
     # Ensure conversion actually changes the expected existing backend section.
     system = (prefix / 'system.reg').read_bytes()
     require(converter.CPU_KEY in system and converter.to_console('system.reg', system) != system,
@@ -751,6 +900,17 @@ def diagnostics(args):
             report['unapproved_scan_complete'] = issues['scan_complete']
         except (OSError, ValueError, TypeError, KeyError):
             report['unapproved_files'] = 'withheld: invalid metadata'
+    text_audit = args.work / 'TEXT-AUDIT.json'
+    if text_audit.is_file() and not text_audit.is_symlink():
+        try:
+            require(text_audit.stat().st_size <= MAX_TEXT_METADATA_BYTES, 'oversized text metadata')
+            issues = json.loads(text_audit.read_text())
+            encoded = text_metadata(issues)
+            (args.out / 'TEXT-AUDIT.json').write_bytes(encoded)
+            report['text_findings'] = sum(len(r['findings']) for r in issues['files'])
+            report['text_scan_complete'] = issues['scan_complete']
+        except (OSError, ValueError, TypeError, KeyError):
+            report['text_findings'] = 'withheld: invalid metadata'
     (args.out / 'DIAGNOSTICS.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
 
 

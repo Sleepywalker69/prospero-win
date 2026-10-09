@@ -348,6 +348,113 @@ class SeedTests(unittest.TestCase):
         self.assertFalse((out / 'UNAPPROVED-FILES.json').exists())
         self.assertIn('withheld', json.loads((out / 'DIAGNOSTICS.json').read_text())['unapproved_files'])
 
+    def text_report(self, data, name='system.reg'):
+        record = seed.text_findings(data, name)
+        return {'schema': 'pw-seed-text-audit/1', 'files': [record],
+                'scan_complete': record['scan_complete']}
+
+    def test_text_metadata_all_files_without_changing_rejection(self):
+        converter, _, prefix, host, records = self.fixture()
+        key = br'Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts'
+        original = (prefix / 'system.reg').read_bytes()
+        system = original + b'\n[' + key + b'] 123\n"Unknown font face"="Z:\\\\home\\\\runner\\\\private-font.ttf"\n'
+        (prefix / 'system.reg').write_bytes(system)
+        user = b'WINE REGISTRY Version 2\n[Environment] 123\n"TEMP"="Z:\\\\tmp\\\\synthetic-private"\n'
+        (prefix / 'user.reg').write_bytes(user)
+        ini = b'[original]\npath=/opt/synthetic-private\n'
+        (prefix / 'drive_c/windows/win.ini').write_bytes(ini)
+        issues = {}
+        with self.assertRaisesRegex(ValueError, 'host path/environment in generated text: drive_c/windows/win.ini'):
+            seed.audit_source(converter, prefix, host, records, text_issues=issues)
+        self.assertTrue(issues['scan_complete'])
+        self.assertEqual(sum(len(r['findings']) for r in issues['files']), 3)
+        finding = next(r for r in issues['files'] if r['path'] == 'system.reg')['findings'][0]
+        self.assertEqual(finding['key'], r'Software\Microsoft\Windows NT\CurrentVersion\Fonts')
+        self.assertIsNone(finding['value_name'])
+        self.assertEqual(finding['value_name_sha256'], hashlib.sha256(b'Unknown font face').hexdigest())
+        self.assertEqual(finding['classifications'], ['host-home'])
+        encoded = seed.text_metadata(issues)
+        for private in (b'private-font', b'synthetic-private', b'Unknown font face', b'home\\\\runner'):
+            self.assertNotIn(private, encoded)
+        self.assertEqual((prefix / 'system.reg').read_bytes(), system)
+        self.assertEqual((prefix / 'user.reg').read_bytes(), user)
+        self.assertEqual((prefix / 'drive_c/windows/win.ini').read_bytes(), ini)
+
+    def test_text_metadata_labels_are_only_static_allowlist(self):
+        data = (b'WINE REGISTRY Version 2\n[Software\\\\Private-Customer-Name] 1\n'
+                b'"synthetic-secret-name"="/home/synthetic-secret-value"\n'
+                b'[Environment] 2\n"TEMP"="/tmp/another-secret"\n'
+                b'[broken /home/private-key\n"TEMP"="/usr/private"\n')
+        report = self.text_report(data)
+        encoded = seed.text_metadata(report)
+        for private in (b'Private-Customer', b'synthetic-secret', b'another-secret', b'private-key'):
+            self.assertNotIn(private, encoded)
+        findings = report['files'][0]['findings']
+        self.assertIsNone(findings[0]['key'])
+        self.assertIsNone(findings[0]['value_name'])
+        self.assertEqual(findings[1]['key'], 'Environment')
+        self.assertEqual(findings[1]['value_name'], 'TEMP')
+        self.assertIsNone(findings[2]['key'])
+        self.assertIsNone(findings[3]['key'])
+        self.assertEqual(report['files'][0]['sha256'], hashlib.sha256(data).hexdigest())
+
+    def test_text_metadata_invalid_encoding_header_nul_and_position(self):
+        data = b'invalid header\n"name"="/home/private"\n;\xff\x00\n'
+        report = self.text_report(data)
+        self.assertEqual([f['line'] for f in report['files'][0]['findings']], [1, 2, 3])
+        self.assertEqual(report['files'][0]['findings'][0]['classifications'], ['invalid-registry-header'])
+        self.assertEqual(report['files'][0]['findings'][2]['classifications'], ['invalid-utf8', 'nul'])
+        self.assertNotIn(b'private', seed.text_metadata(report))
+
+    def test_text_metadata_bound_and_structural_incompleteness(self):
+        data = b'WINE REGISTRY Version 2\n' + b'"TEMP"="/tmp/private"\n' * (seed.MAX_TEXT_FINDINGS + 1)
+        report = self.text_report(data)
+        self.assertFalse(report['scan_complete'])
+        self.assertEqual(len(report['files'][0]['findings']), seed.MAX_TEXT_FINDINGS)
+        seed.text_metadata(report)
+        converter, _, prefix, host, records = self.fixture()
+        (prefix / 'drive_c/unknown').write_bytes(b'unknown inert bytes')
+        issues = {}
+        with self.assertRaisesRegex(ValueError, 'unapproved generated/copied'):
+            seed.audit_source(converter, prefix, host, records, text_issues=issues)
+        self.assertEqual(issues, {'schema': 'pw-seed-text-audit/1', 'files': [], 'scan_complete': False})
+        seed.text_metadata(issues)
+
+    def test_text_metadata_rejects_extra_fields_names_and_types(self):
+        report = self.text_report(b'WINE REGISTRY Version 2\n[Environment] 1\n"TEMP"="/tmp/private"\n')
+        changes = [('content', 'private'), ('key', 'Software\\Private'), ('value_name', 'private'),
+                   ('line', True), ('line', -1), ('record_bytes', True), ('record_bytes', 100000),
+                   ('classifications', ['raw-private-classification']), ('key_sha256', 'invalid')]
+        for field, value in changes:
+            changed = json.loads(json.dumps(report))
+            changed['files'][0]['findings'][0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                seed.text_metadata(changed)
+        changed = json.loads(json.dumps(report)); changed['files'][0]['path'] = '../system.reg'
+        with self.assertRaises(ValueError): seed.text_metadata(changed)
+        changed = json.loads(json.dumps(report)); changed['files'][0]['scan_complete'] = False
+        with self.assertRaises(ValueError): seed.text_metadata(changed)
+        old = seed.MAX_TEXT_METADATA_BYTES
+        try:
+            seed.MAX_TEXT_METADATA_BYTES = 8
+            with self.assertRaises(ValueError): seed.text_metadata(report)
+        finally:
+            seed.MAX_TEXT_METADATA_BYTES = old
+
+    def test_diagnostics_retains_only_whitelisted_text_metadata(self):
+        work = self.root / 'work'; work.mkdir()
+        report = self.text_report(b'WINE REGISTRY Version 2\n[Environment] 1\n"TEMP"="/tmp/private"\n')
+        metadata = work / 'TEXT-AUDIT.json'; metadata.write_bytes(seed.text_metadata(report))
+        output = self.root / 'approved-text-diagnostics'
+        seed.diagnostics(SimpleNamespace(work=work, out=output))
+        self.assertEqual(json.loads((output / 'TEXT-AUDIT.json').read_text()), report)
+        report['files'][0]['findings'][0]['content'] = 'private-value-never-uploaded'
+        metadata.write_text(json.dumps(report))
+        output = self.root / 'withheld-text-diagnostics'
+        seed.diagnostics(SimpleNamespace(work=work, out=output))
+        self.assertFalse((output / 'TEXT-AUDIT.json').exists())
+        self.assertIn('withheld', json.loads((output / 'DIAGNOSTICS.json').read_text())['text_findings'])
+
     def test_archive_hash_and_traversal_rejected(self):
         raw = io.BytesIO()
         with tarfile.open(fileobj=raw, mode='w:gz') as tar:
