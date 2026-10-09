@@ -133,6 +133,22 @@ int pw_native_child_send(PwNativeChildIo *io, const void *bytes, size_t size)
     if (!bytes && size) return fail(EINVAL);
     return transfer(io, (void *)bytes, size, 1);
 }
+int pw_native_child_receive(PwNativeChildIo *io, void *bytes, size_t size)
+{
+    if (!bytes && size) return fail(EINVAL);
+    return transfer(io, bytes, size, 0);
+}
+static int capabilities(PwNativeChildIo *io, const PwNativeChildFrame *frame)
+{
+    unsigned remaining;
+    uint64_t total_end, stage_end;
+    if (pw_native_child_stage(io)) return -1;
+    total_end = io->total_end; stage_end = io->stage_end;
+    if (io->progress) io->progress(io->context, PW_NC_CAPABILITIES);
+    if (io->capabilities(io->context, io, frame)) return fail(errno ? errno : EIO);
+    if (io->total_end != total_end || io->stage_end != stage_end) return fail(EPROTO);
+    return pw_native_child_remaining(io, &remaining);
+}
 static int send_frame(PwNativeChildIo *io, const PwNativeChildFrame *frame)
 {
     uint8_t wire[PW_NC_FRAME_BYTES];
@@ -178,6 +194,11 @@ int pw_native_child_parent(PwNativeChildIo *io, uint32_t parent_pid, uint64_t co
         if (reply.kind != PW_NC_ECHO_REPLY || !same(&request, &reply)) { errno = EPROTO; goto failed; }
         result->echoes++;
     }
+    if (io->capabilities) {
+        result->stage = PW_NC_CAPABILITIES;
+        if (capabilities(io, &request)) goto failed;
+        result->capabilities_complete = 1;
+    }
     result->stage = PW_NC_STOPPING;
     request.kind = PW_NC_STOP; request.sequence = PW_NC_ECHO_COUNT + 1;
     if (pw_native_child_stage(io) || send_frame(io, &request) || receive_frame(io, &reply)) goto failed;
@@ -222,6 +243,7 @@ int pw_native_child_worker(PwNativeChildIo *io, uint32_t child_pid, uint32_t chi
             return fail(EPROTO);
         request.kind = sequence <= PW_NC_ECHO_COUNT ? PW_NC_ECHO_REPLY : PW_NC_STOP_ACK;
         if (send_frame(io, &request)) return -1;
+        if (sequence == PW_NC_ECHO_COUNT && io->capabilities && capabilities(io, &request)) return -1;
     }
     return 0; /* STOP_ACK is intent; stream closure is supplied by the caller returning/exiting. */
 }
