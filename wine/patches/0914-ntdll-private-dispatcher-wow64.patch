@@ -1,0 +1,319 @@
+Subject: [PATCH] ntdll: validate translated I386 private dispatcher paths
+
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1115,6 +1115,7 @@
+ 	wine/afd.h \
+ 	wine/asm.h \
+ 	wine/pw_private_dispatch.h \
++	wine/pw_private_dispatch_i386.h \
+ 	wine/atsvc.idl \
+ 	wine/condrv.h \
+ 	wine/dcetypes.idl \
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -231,7 +231,7 @@
+ extern pthread_mutex_t fd_cache_mutex;
+ extern struct _KUSER_SHARED_DATA *user_shared_data;
+ #if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
+-# include "wine/pw_private_dispatch.h"
++# include "wine/pw_private_dispatch_i386.h"
+ extern NTSTATUS pw_private_dispatch_validate_module( void *module, SIZE_T size,
+                                                        const UNICODE_STRING *name );
+ #endif
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1589,7 +1589,9 @@
+         return STATUS_INVALID_IMAGE_FORMAT;
+     anchor = private_dispatch_anchor( name );
+     if (!anchor) return STATUS_SUCCESS;
+-    if (!pw_private_dispatch_image_valid( module, size, anchor ))
++    if (!pw_private_dispatch_image_valid( module, size, anchor ) &&
++        !pw_private_dispatch_i386_image_valid( module, size, anchor,
++            !strcmp( anchor, "NtClose" ) ? "__wine_syscall_dispatcher" : "Wow64Transition" ))
+     {
+         ERR( "private dispatcher ABI1 mismatch in %s (%s)\n", debugstr_us(name), anchor );
+         return STATUS_INVALID_IMAGE_FORMAT;
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3823,7 +3823,8 @@
+     sigset_t sigset;
+ 
+ #if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
+-    if (pe_mapping->image.machine != IMAGE_FILE_MACHINE_AMD64 || pe_mapping->image.is_hybrid)
++    if ((pe_mapping->image.machine != IMAGE_FILE_MACHINE_AMD64 &&
++         pe_mapping->image.machine != IMAGE_FILE_MACHINE_I386) || pe_mapping->image.is_hybrid)
+         return STATUS_NOT_SUPPORTED;
+ #endif
+     if (offset >= size)
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -657,6 +657,11 @@
+ DECLSPEC_EXPORT unsigned int __wine_ps5_private_dispatch_abi(void)
+ {
+     return PW_PRIVATE_DISPATCH_ABI; /* build identity, not process readiness */
++}
++
++DECLSPEC_EXPORT unsigned int __wine_ps5_private_dispatch_wow64_abi(void)
++{
++    return PW_PRIVATE_DISPATCH_WOW64_ABI; /* additional checked I386 contract */
+ }
+ #endif
+ 
+@@ -3097,9 +3102,10 @@
+     xstate_extended_features = user_shared_data->XState.EnabledFeatures & ~(UINT64)3;
+ 
+ #if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
+-    if (!is_win64 || is_wow64() || get_host_page_size() != PW_PRIVATE_DISPATCH_PAGE)
+-    {
+-        ERR( "private dispatcher ABI requires a native AMD64 process and 16 KiB host pages\n" );
++    if (!is_win64 || (is_wow64() && main_image_info.Machine != IMAGE_FILE_MACHINE_I386) ||
++        get_host_page_size() != PW_PRIVATE_DISPATCH_PAGE)
++    {
++        ERR( "private dispatcher ABI requires an AMD64 host, AMD64/I386 guest and 16 KiB host pages\n" );
+         exit(1);
+     }
+     ptr = (void *)PW_PRIVATE_DISPATCH_SLOT;
+--- a/dlls/wow64/syscall.c
++++ b/dlls/wow64/syscall.c
+@@ -98,7 +98,11 @@
+ static void *   (WINAPI *pBTCpuGetBopCode)(void);
+ static NTSTATUS (WINAPI *pBTCpuGetContext)(HANDLE,HANDLE,void *,void *);
+ static BOOLEAN  (WINAPI *pBTCpuIsProcessorFeaturePresent)(UINT);
++#if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
++static NTSTATUS (WINAPI *pBTCpuProcessInit)(void);
++#else
+ static void     (WINAPI *pBTCpuProcessInit)(void);
++#endif
+ static NTSTATUS (WINAPI *pBTCpuSetContext)(HANDLE,HANDLE,void *,void *);
+ static void     (WINAPI *pBTCpuThreadInit)(void);
+ static void *   (WINAPI *p__wine_get_unix_opcode)(void);
+@@ -913,6 +917,24 @@
+  */
+ static HMODULE load_environment_cpu_dll(void)
+ {
++#if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
++    const WCHAR *dir = get_machine_wow64_dir( IMAGE_FILE_MACHINE_TARGET_HOST );
++    WCHAR path[MAX_PATH];
++    UNICODE_STRING str;
++    HMODULE module;
++    NTSTATUS status;
++
++    /* This experimental cohort admits only the existing I386 translator.
++     * A missing/mismatched backend cannot silently select a prefix CPU. */
++    if (current_machine != IMAGE_FILE_MACHINE_I386 || native_machine != IMAGE_FILE_MACHINE_AMD64)
++        RtlExitUserProcess( STATUS_NOT_SUPPORTED );
++    swprintf( path, MAX_PATH, L"%s\\wowprospero.dll", dir );
++    RtlInitUnicodeString( &str, path );
++    if ((status = LdrLoadDll( dir, 0, &str, &module )))
++        RtlExitUserProcess( status );
++    MESSAGE( "wow64: private dispatcher ABI1 uses matched wowprospero.dll translator\n" );
++    return module;
++#else
+     static const WCHAR *const allowed[] = { L"wow64native.dll", L"wowprospero.dll" };
+     static const char *const names[] = { "wow64native.dll", "wowprospero.dll" };
+     const WCHAR *dir = get_machine_wow64_dir( IMAGE_FILE_MACHINE_TARGET_HOST );
+@@ -943,6 +965,7 @@
+     }
+     MESSAGE( "wow64: CPU %s from WINE_PS5_WOW64_CPU\n", names[i] );
+     return module;
++#endif
+ }
+ 
+ 
+@@ -1079,7 +1102,21 @@
+     GET_PTR( sdwhwin32 );
+     syscall_tables[1] = *psdwhwin32;
+ 
++#if defined(WINE_PS5_PRIVATE_DISPATCH) && WINE_PS5_PRIVATE_DISPATCH
++    {
++        NTSTATUS status;
++        ULONG_PTR syscall_bop, unix_bop;
++        if (!pBTCpuProcessInit || !pBTCpuGetBopCode || !p__wine_get_unix_opcode || !pBTCpuSimulate)
++            RtlExitUserProcess( STATUS_ENTRYPOINT_NOT_FOUND );
++        if ((status = pBTCpuProcessInit())) RtlExitUserProcess( status );
++        syscall_bop = (ULONG_PTR)pBTCpuGetBopCode();
++        unix_bop = (ULONG_PTR)p__wine_get_unix_opcode();
++        if (!syscall_bop || syscall_bop > 0xffffffffu || !unix_bop || unix_bop > 0xffffffffu ||
++            syscall_bop == unix_bop) RtlExitUserProcess( STATUS_INVALID_ADDRESS );
++    }
++#else
+     pBTCpuProcessInit();
++#endif
+ 
+     module = (HMODULE)(ULONG_PTR)pLdrSystemDllInitBlock->ntdll_handle;
+     init_image_mapping( module );
+--- /dev/null
++++ b/include/wine/pw_private_dispatch_i386.h
+@@ -0,0 +1,171 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef __WINE_PW_PRIVATE_DISPATCH_I386_H
++#define __WINE_PW_PRIVATE_DISPATCH_I386_H
++
++#include "wine/pw_private_dispatch.h"
++
++/* Additional contract for translated I386 guests. The AMD64 private slot,
++ * mapping and ABI1 remain unchanged. This helper reads only bounded image
++ * bytes; it never invokes a thunk, dereferences an encoded VA or maps memory. */
++#define PW_PRIVATE_DISPATCH_WOW64_ABI 1
++
++static inline int pw_pd_i386_section(const struct pw_pd_image *image,
++                                    unsigned int rva, unsigned int length,
++                                    unsigned int required, unsigned int forbidden)
++{
++    unsigned int i;
++    if (!pw_pd_readable(image, rva, length)) return 0;
++    for (i = 0; i < image->section_count; i++)
++    {
++        const unsigned char *section = image->bytes + image->sections + 40 * i;
++        unsigned int start = pw_pd_u32(section + 12), span = pw_pd_u32(section + 8);
++        unsigned int flags = pw_pd_u32(section + 36);
++        if (start <= rva && rva - start < span && length <= span - (rva - start))
++            return (flags & required) == required && !(flags & forbidden);
++    }
++    return 0;
++}
++
++static inline int pw_pd_i386_name(const struct pw_pd_image *image, unsigned int rva,
++                                 const char *expected)
++{
++    unsigned int i, equal = 1;
++    for (i = 0; i < 512; i++)
++    {
++        unsigned char value;
++        if (rva > 0xffffffffu - i || !pw_pd_readable(image, rva + i, 1)) return -1;
++        value = image->bytes[rva + i];
++        if (equal && value != (unsigned char)expected[i]) equal = 0;
++        if (!value) return (int)equal;
++    }
++    return -1;
++}
++
++/* PE32 operands may still describe OptionalHeader.ImageBase when this runs:
++ * Wine can perform the final relocation after the mapping-time check.
++ * Require an exact HIGHLOW relocation for each absolute operand. Any other
++ * relocation touching either instruction sequence is refused. */
++static inline int pw_pd_i386_relocations(const struct pw_pd_image *image,
++                                        unsigned int directory, unsigned int size,
++                                        unsigned int thunk, unsigned int helper, unsigned int slot)
++{
++    unsigned int offset = 0, found_thunk = 0, found_helper = 0;
++    if (!directory || size < 8 || !pw_pd_readable(image, directory, size)) return 0;
++    while (offset < size)
++    {
++        unsigned int page, block, i;
++        if (size - offset < 8) return 0;
++        page = pw_pd_u32(image->bytes + directory + offset);
++        block = pw_pd_u32(image->bytes + directory + offset + 4);
++        if (block < 8 || block > size - offset || block % 2 || page % 0x1000) return 0;
++        for (i = 8; i < block; i += 2)
++        {
++            unsigned int entry = pw_pd_u16(image->bytes + directory + offset + i);
++            unsigned int type = entry >> 12, rva;
++            if (!type) continue; /* IMAGE_REL_BASED_ABSOLUTE padding */
++            if (type != 3 || page > 0xffffffffu - (entry & 0xfff)) return 0;
++            rva = page + (entry & 0xfff);
++            if (!pw_pd_readable(image, rva, 4) || (rva < slot + 4 && slot < rva + 4)) return 0;
++            if (rva < thunk + 15 && thunk < rva + 4)
++            {
++                if (rva != thunk + 6 || found_thunk++) return 0;
++            }
++            if (rva < helper + 6 && helper < rva + 4)
++            {
++                if (rva != helper + 2 || found_helper++) return 0;
++            }
++        }
++        offset += block;
++    }
++    return found_thunk == 1 && found_helper == 1;
++}
++
++/* Match the actual non-PIC __ASM_SYSCALL_FUNC/DEFINE_SYSCALL_HELPER32 output.
++ * The selected anchors both pop one 32-bit argument. ntdll exports its private
++ * pointer by name; win32u exposes the same private variable as Wow64Transition.
++ * Neither encoded address may refer to the shared user-data page. */
++static inline int pw_private_dispatch_i386_image_valid(const unsigned char *bytes,
++        unsigned long size, const char *anchor, const char *dispatcher)
++{
++    struct pw_pd_image image;
++    unsigned int pe, optional, optional_size, directory, directory_size, base;
++    unsigned int functions, names, function_table, name_table, ordinal_table, i;
++    unsigned int thunk = 0, slot = 0, helper, found_thunk = 0, found_slot = 0;
++    unsigned long limit;
++    const unsigned char *code;
++    if (!bytes || !anchor || !dispatcher || size < 64 || bytes[0] != 'M' || bytes[1] != 'Z') return 0;
++    limit = size < 0x1000 ? size : 0x1000;
++    pe = pw_pd_u32(bytes + 60);
++    if (pe > limit || limit - pe < 24 || pw_pd_u32(bytes + pe) != 0x00004550 ||
++        pw_pd_u16(bytes + pe + 4) != 0x014c) return 0;
++    image.section_count = pw_pd_u16(bytes + pe + 6);
++    optional_size = pw_pd_u16(bytes + pe + 20);
++    optional = pe + 24;
++    if (!image.section_count || image.section_count > 96 || optional_size < 144 ||
++        optional_size > limit - optional || pw_pd_u16(bytes + optional) != 0x10b) return 0;
++    image.bytes = bytes;
++    image.size = pw_pd_u32(bytes + optional + 56);
++    image.headers = pw_pd_u32(bytes + optional + 60);
++    image.sections = optional + optional_size;
++    base = pw_pd_u32(bytes + optional + 28);
++    if (!base || !image.size || image.size > size || image.size > 0xffffffffu - base ||
++        image.headers > limit || image.headers > image.size || image.sections > image.headers ||
++        image.section_count * 40 > image.headers - image.sections ||
++        pw_pd_u32(bytes + optional + 92) < 6) return 0;
++    for (i = 0; i < image.section_count; i++)
++    {
++        const unsigned char *section = bytes + image.sections + 40 * i;
++        unsigned int start = pw_pd_u32(section + 12), span = pw_pd_u32(section + 8), j;
++        if (start > image.size || span > image.size - start || (span && start < image.headers)) return 0;
++        for (j = 0; span && j < i; j++)
++        {
++            const unsigned char *prior = bytes + image.sections + 40 * j;
++            unsigned int old_start = pw_pd_u32(prior + 12), old_span = pw_pd_u32(prior + 8);
++            if (old_span && start < old_start + old_span && old_start < start + span) return 0;
++        }
++    }
++    directory = pw_pd_u32(bytes + optional + 96);
++    directory_size = pw_pd_u32(bytes + optional + 100);
++    if (!directory || directory_size < 40 || !pw_pd_readable(&image, directory, directory_size)) return 0;
++    functions = pw_pd_u32(bytes + directory + 20);
++    names = pw_pd_u32(bytes + directory + 24);
++    function_table = pw_pd_u32(bytes + directory + 28);
++    name_table = pw_pd_u32(bytes + directory + 32);
++    ordinal_table = pw_pd_u32(bytes + directory + 36);
++    if (!functions || functions > 65536 || !names || names > 65536 ||
++        !function_table || !name_table || !ordinal_table ||
++        !pw_pd_readable(&image, function_table, functions * 4) ||
++        !pw_pd_readable(&image, name_table, names * 4) ||
++        !pw_pd_readable(&image, ordinal_table, names * 2)) return 0;
++    for (i = 0; i < names; i++)
++    {
++        unsigned int name = pw_pd_u32(bytes + name_table + i * 4);
++        unsigned int ordinal = pw_pd_u16(bytes + ordinal_table + i * 2), function;
++        int is_anchor = pw_pd_i386_name(&image, name, anchor);
++        int is_slot = pw_pd_i386_name(&image, name, dispatcher);
++        if (is_anchor < 0 || is_slot < 0 || ordinal >= functions) return 0;
++        function = pw_pd_u32(bytes + function_table + ordinal * 4);
++        if (function && !pw_pd_readable(&image, function, 1)) return 0;
++        if (!is_anchor && !is_slot) continue;
++        if (!function || (function >= directory && function - directory < directory_size)) return 0;
++        if (is_anchor) { if (found_thunk++) return 0; thunk = function; }
++        if (is_slot) { if (found_slot++) return 0; slot = function; }
++    }
++    if (found_thunk != 1 || found_slot != 1 ||
++        !pw_pd_i386_section(&image, thunk, 15, 0x60000000, 0x90000000) ||
++        !pw_pd_i386_section(&image, slot, 4, 0xc0000000, 0x30000000) ||
++        pw_pd_u32(bytes + slot)) return 0;
++    code = bytes + thunk;
++    if (code[0] != 0xb8 || code[5] != 0xba || code[10] != 0xff || code[11] != 0xd2 ||
++        code[12] != 0xc2 || code[13] != 4 || code[14]) return 0;
++    helper = pw_pd_u32(code + 6);
++    if (helper < base) return 0;
++    helper -= base;
++    if (!pw_pd_i386_section(&image, helper, 6, 0x60000000, 0x90000000) ||
++        (helper < thunk + 15 && thunk < helper + 6) ||
++        bytes[helper] != 0xff || bytes[helper + 1] != 0x25 ||
++        pw_pd_u32(bytes + helper + 2) != base + slot) return 0;
++    return pw_pd_i386_relocations(&image, pw_pd_u32(bytes + optional + 136),
++                                  pw_pd_u32(bytes + optional + 140), thunk, helper, slot);
++}
++#endif

@@ -38,12 +38,12 @@ def decode_id(text):
 
 
 class Elf:
-    def __init__(self, data):
+    def __init__(self, data, *, module=False):
         require(64 <= len(data) <= 32 * 1024 * 1024 and data[:7] == b"\x7fELF\x02\x01\x01",
                 "not a bounded ELF64 little-endian image")
         self.data = data
         self.kind, machine, version = unpack("<HHI", data, 16)
-        require(machine == 62 and version == 1 and self.kind in (3, 0xFE10), "wrong native ELF identity")
+        require(machine == 62 and version == 1 and self.kind in ((3, 0xFE18) if module else (3, 0xFE10)), "wrong native ELF identity")
         self.entry, phoff = unpack("<QQ", data, 24)
         ehsize, phsize, count = unpack("<HHH", data, 52)
         require(ehsize == 64 and phsize == 56 and 0 < count <= 256 and phoff >= 64 and
@@ -54,9 +54,10 @@ class Elf:
                     "native segment lies outside image")
             if header[0] == 1:
                 require(header[5] <= header[6], "native LOAD has invalid extent")
-        require(any(p[0] == 1 and p[1] & 1 and p[3] <= self.entry < p[3] + p[5]
-                    for p in self.programs), "native entry is not executable file-backed memory")
-        self.offset(self.entry, 1, 1)
+        # A module/provider may have no executable entry. Callers still validate
+        # every used FUNC/descriptor address through offset(..., PF_X).
+        if not module or self.entry:
+            self.offset(self.entry, 1, 1)
         dynamic = [p for p in self.programs if p[0] == 2]
         require(len(dynamic) == 1 and dynamic[0][5] % 16 == 0, "invalid native dynamic table")
         p = dynamic[0]
@@ -144,7 +145,7 @@ class Elf:
         return self.data[self.strings + index:end].decode("ascii")
 
 
-def extract_self(data):
+def extract_self(data, *, module=False):
     """Recover and verify plaintext segments using the pinned signer's digest."""
     require(32 <= len(data) <= 32 * 1024 * 1024 and data[:4] == b"\x4f\x15\x3d\x1d",
             "not a bounded original native SELF")
@@ -190,5 +191,5 @@ def extract_self(data):
     extended = (elf_offset + header_size + 15) & ~15
     require(extended + 64 <= len(data) and sha(output) == data[extended + 32:extended + 64].hex(),
             "SELF reconstructed digest mismatch")
-    Elf(bytes(output))
+    Elf(bytes(output), module=module)
     return bytes(output)

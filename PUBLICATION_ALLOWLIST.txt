@@ -885,3 +885,9 @@ tests/fixtures/windows_child_process.c
 tests/fixtures/windows_child_process.md
 tests/test_windows_child_fixture.c
 tests/windows_fixture_mock/windows.h
+tools/private_dispatch_wow64.py
+tests/test_private_dispatch_wow64_build.py
+tests/test_private_dispatch_wow64_contract.py
+tests/fixtures/private_dispatch_i386.c
+wine/patches/0914-ntdll-private-dispatcher-wow64.patch
+docs/private-dispatch-wow64.md
