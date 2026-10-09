@@ -544,3 +544,7 @@ tools/graphics_overlay_files.py
 tools/inspect_graphics_pe.py
 tools/package_graphics_overlay.py
 tools/d3d11_smoke_contract.h
+
+docs/D3D11_SEED.md
+tests/test_d3d11_seed.py
+tools/build_d3d11_seed.py
