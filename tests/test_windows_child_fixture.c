@@ -171,6 +171,16 @@ int main(int argc,char **argv)
     reset();m.wait_fail=1;CHECK(run_parent()==1);CHECK(!has_log("automated_pass"));
     reset();m.exit_get_fail=1;CHECK(run_parent()==1);CHECK(!has_log("automated_pass"));
     reset();m.terminate_fail=1;CHECK(run_parent()==1);CHECK(!has_log("automated_pass") && m.process_alive);
+    reset();
+    { wchar_t *args[]={L"parent.exe",L"--stop-observe",NULL};
+      CHECK(fixture_wmain(2,args)==77);CHECK(has_log("STOP_OBSERVE_READY"));
+      CHECK(!has_log("automated_pass"));CHECK(!owned_handles && !m.process_alive); }
+    reset();
+    { wchar_t *args[]={L"parent.exe",L"unknown",NULL};
+      CHECK(fixture_wmain(2,args)==2);CHECK(!m.launches); }
+    reset();
+    { wchar_t *args[]={L"child.exe",L"--child",NULL};
+      CHECK((DWORD)fixture_wmain(2,args)==CHILD_ERROR); }
     reset();m.self_pid=UINT32_MAX;m.tick=UINT32_MAX;CHECK(run_parent()==0);CHECK(!owned_handles);
     for(unsigned mode=0;mode<4;mode++) {
         reset();m.self_pid=UINT32_MAX;m.write_pipe=acquire();m.event=acquire();
