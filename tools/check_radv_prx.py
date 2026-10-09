@@ -14,7 +14,13 @@ import struct
 import sys
 
 sys.dont_write_bytecode = True
-from check_wine_prx_build import Commands, FORBIDDEN, SYSTEM_DATA, data, provider_index, require
+from check_wine_prx_build import Commands, FORBIDDEN, SYSTEM_DATA as WINE_SYSTEM_DATA, data, provider_index, require
+
+# Exact ordinary-libc locale objects declared by the pinned public SDK.
+# These are address imports, not copied storage. Stub st_size=0 is not the
+# firmware object's size; every actual relocation is checked below.
+SYSTEM_DATA = {**WINE_SYSTEM_DATA, **{name: 'libSceLibcInternal.sprx' for name in (
+    '_CurrentRuneLocale', '_DefaultRuneLocale', '__mb_cur_max', '__mb_sb_limit')}}
 
 FOUNDATION = '30597512539e7edfde079cbcaf4a626bc0a948c5'
 REQUIRED_EXPORTS = {'module_start', 'module_stop', 'vkGetInstanceProcAddr', 'vkGetDeviceProcAddr',
