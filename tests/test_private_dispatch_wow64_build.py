@@ -151,6 +151,44 @@ class WoW64Build(unittest.TestCase):
         self.assertEqual(extract_self(container,module=True),bytes(converted))
         with self.assertRaises(ValueError):extract_self(container)
 
+    def test_default_converter_magic_is_module_only(self):
+        converted=bytearray(elf_fixture(True));struct.pack_into('<H',converted,16,0xfe18)
+        container=bytearray(self_fixture(bytes(converted)))
+        container[:4]=bytes.fromhex('5414f5ee')
+        self.assertEqual(extract_self(bytes(container),module=True),bytes(converted))
+        with self.assertRaisesRegex(ValueError,'not a bounded original native SELF'):
+            extract_self(bytes(container))
+        for magic in ('00000000','5414f5ef','4f153d1c'):
+            malformed=bytearray(container);malformed[:4]=bytes.fromhex(magic)
+            with self.assertRaisesRegex(ValueError,'not a bounded original native SELF'):
+                extract_self(bytes(malformed),module=True)
+        # A valid executable container cannot acquire module identity merely
+        # because it uses the converter's ordinary/default container magic.
+        executable=bytearray(self_fixture(elf_fixture(True)))
+        executable[:4]=bytes.fromhex('5414f5ee')
+        with self.assertRaisesRegex(ValueError,'wrong native ELF identity'):
+            extract_self(bytes(executable),module=True)
+
+    def test_default_module_magic_keeps_segment_and_digest_guards(self):
+        converted=bytearray(elf_fixture(True));struct.pack_into('<H',converted,16,0xfe18)
+        container=bytearray(self_fixture(bytes(converted)));container[:4]=bytes.fromhex('5414f5ee')
+        flags,start,size,_=struct.unpack_from('<QQQQ',container,32)
+        for bad_flag in (2,8):
+            malformed=bytearray(container);struct.pack_into('<Q',malformed,32,flags|bad_flag)
+            with self.assertRaisesRegex(ValueError,'compressed/encrypted'):
+                extract_self(bytes(malformed),module=True)
+        malformed=bytearray(container);struct.pack_into('<Q',malformed,40,len(container))
+        with self.assertRaisesRegex(ValueError,'segment exceeds'):
+            extract_self(bytes(malformed),module=True)
+        malformed=bytearray(container);struct.pack_into('<Q',malformed,64,flags)
+        with self.assertRaisesRegex(ValueError,'duplicate or invalid'):
+            extract_self(bytes(malformed),module=True)
+        malformed=bytearray(container);malformed[start+size-1]^=1
+        with self.assertRaisesRegex(ValueError,'digest mismatch'):
+            extract_self(bytes(malformed),module=True)
+        with self.assertRaises(ValueError):
+            extract_self(bytes(container[:-1]),module=True)
+
     def test_module_entry_alias_is_still_refused(self):
         data=bytearray(elf_fixture());count=struct.unpack_from('<H',data,56)[0]
         struct.pack_into('<H',data,56,count+1)
