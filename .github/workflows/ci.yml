@@ -475,6 +475,44 @@ jobs:
             tools/build_wine_ps5.sh --source "$WINE_SOURCE" --host-tools "$HOST_BUILD" \
             --foundation "$FOUNDATION" --prx-foundation "$FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" \
             --work "$WINE_WORK" --jobs "$BUILD_JOBS" 2>&1 | tee "$RUNNER_TEMP/prx-evidence/wine-build.log"
+      - name: Check actual compiled watchdog source and object
+        run: |
+          python3 - "$WINE_WORK" "$("$LLVM_CONFIG" --bindir)/llvm-readelf" "$RUNNER_TEMP/prx-evidence/watchdog-build.json" <<'PY'
+          from pathlib import Path
+          import hashlib, importlib.util, json, struct, subprocess, sys
+          sys.dont_write_bytecode = True
+          spec = importlib.util.spec_from_file_location('watchdog_guard', 'tests/test_wine_watchdog_process_guard.py')
+          guard = importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+          work, readelf, output = map(Path, sys.argv[1:])
+          source, obj, linked = work/'source/server/thread.c', work/'build/server/thread.o', work/'build/server/wineserver'
+          report = json.loads((work/'report.json').read_text())
+          patch = '0911-server-watchdog-local-address-space.patch'
+          if report.get('prx', {}).get('status') != '0' or patch not in report.get('patches', []):
+              raise SystemExit('watchdog build was skipped, failed or lacks the reviewed patch')
+          actual = source.read_text()
+          start = actual.index('static void wait_watchdog( void *arg )')
+          end = actual.index('static void start_wait_watchdog(void)', start)
+          expected = guard.condition(guard.patch_sides()[2])[0]
+          predicate = 'if (' + expected + ')'
+          body = actual[start:end]
+          if predicate not in body or body.index(predicate) >= body.index('thread->teb + 0x1480 + 8'):
+              raise SystemExit('actual watchdog source lacks the local-address-space guard')
+          data = obj.read_bytes()
+          if len(data) < 64 or data[:7] != b'\x7fELF\x02\x01\x01' or struct.unpack_from('<HH', data, 16) != (1, 62):
+              raise SystemExit('watchdog object is not an AMD64 ELF64 relocatable object')
+          symbols = subprocess.run([str(readelf), '--symbols', '-W', str(obj)], check=True,
+                                   capture_output=True, text=True, timeout=60).stdout
+          rows = [line.split() for line in symbols.splitlines() if len(line.split()) >= 8 and line.split()[7] == 'wait_watchdog']
+          if len(rows) != 1 or rows[0][3] != 'FUNC' or not rows[0][6].isdigit() or int(rows[0][6]) == 0 or int(rows[0][2]) == 0:
+              raise SystemExit('compiled watchdog function is absent or undefined')
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          entry = report.get('targets', {}).get('server/wineserver', {})
+          if entry.get('built') is not True or entry.get('sha256') != digest(linked):
+              raise SystemExit('linked wineserver disagrees with its build report')
+          output.write_text(json.dumps({'executed': False, 'source_sha256': digest(source),
+              'object_sha256': digest(obj), 'linked_sha256': digest(linked),
+              'patch_sha256': digest(guard.PATCH), 'scope': 'compiled local-memory guard; no server or guest-pointer execution'}, indent=2)+'\n')
+          PY
       - name: Reject skipped modules and independently inspect actual artifacts
         run: |
           python3 tools/check_wine_prx_build.py --work "$WINE_WORK" --sdk "$PS5_PAYLOAD_SDK" \
@@ -487,6 +525,7 @@ jobs:
           cp -a "$WINE_WORK/prx" "$WINE_WORK/pe" "$stage/"
           cp "$WINE_WORK/report.json" "$TLS_WORK/root/tls-build-manifest.json" "$stage/provenance/"
           cp -a "$RUNNER_TEMP/prx-evidence/inspection" "$stage/provenance/"
+          cp "$RUNNER_TEMP/prx-evidence/watchdog-build.json" "$stage/provenance/"
           git archive HEAD | gzip -n > "$stage/sources/prospero-win.tar.gz"
           git -C "$WINE_SOURCE" archive HEAD | gzip -n > "$stage/sources/wine.tar.gz"
           git -C "$FOUNDATION" archive HEAD | gzip -n > "$stage/sources/prx-foundation.tar.gz"
