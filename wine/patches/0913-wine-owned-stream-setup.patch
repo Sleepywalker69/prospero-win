@@ -1,0 +1,245 @@
+Subject: [PATCH] Prepare newly owned Wine streams with checked ordinary socket calls
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -84,6 +84,9 @@
+ #include "winnt.h"
+ #include "winioctl.h"
+ #include "wine/server.h"
++#ifdef PW_WINE_SERVICE_FIXTURE
++#include "wine/pw_wine_fixture_socket.h"
++#endif
+ #include "wine/debug.h"
+ #include "unix_private.h"
+ #include "ddk/wdm.h"
+@@ -1702,6 +1705,11 @@
+ int server_pipe( int fd[2] )
+ {
+     int ret;
++#ifdef PW_WINE_SERVICE_FIXTURE
++    /* The console compat pipe2 creates owned stream endpoints and checks
++     * every requested flag. No unchecked fallback after a real failure. */
++    return pipe2( fd, O_CLOEXEC );
++#endif
+ #ifdef HAVE_PIPE2
+     static BOOL have_pipe2 = TRUE;
+ 
+@@ -1928,6 +1936,13 @@
+         int (*install)(const PwWineFixtureProvider *) = dlsym( module, "pw_wineserver_fixture_install" );
+         if (!install || install( pw_wine_fixture_get() ))
+             fatal_error( "in-process server lacks matching fixture ownership ABI\n" );
++    }
++#endif
++#ifdef PW_WINE_SERVICE_FIXTURE
++    {
++        int (*install_sink)(PwWineFixtureSocketSink,void *) = dlsym( module, "pw_wine_fixture_socket_set_sink" );
++        if (pw_wine_fixture_socket_forward_sink( install_sink ))
++            fatal_error( "in-process server lacks matching socket failure sink\n" );
+     }
+ #endif
+     register_server_thread = dlsym( module, "pw_wine_thread_register" );
+@@ -2004,7 +2019,15 @@
+     /* no socket file and no server process: ask the in-process server */
+     s = connect_inprocess_server();
+     fchdir( initial_cwd );  /* switch back to the starting directory */
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (pw_wine_fixture_socket( s, PW_WF_SOCKET_CLOEXEC ))
++    {
++        close( s );
++        fatal_error( "invalid in-process server stream flags\n" );
++    }
++#else
+     fcntl( s, F_SETFD, FD_CLOEXEC );
++#endif
+     return s;
+ #endif
+ 
+@@ -2284,7 +2307,11 @@
+             fatal_error( "fixture inherited server requires local thread registration\n" );
+ #endif
+         fd_socket = atoi( env_socket );
++#ifdef PW_WINE_SERVICE_FIXTURE
++        if (pw_wine_fixture_socket( fd_socket, PW_WF_SOCKET_CLOEXEC ))
++#else
+         if (fcntl( fd_socket, F_SETFD, FD_CLOEXEC ) == -1)
++#endif
+             fatal_perror( "Bad server socket %d", fd_socket );
+         unsetenv( "WINESERVERSOCKET" );
+     }
+diff --git a/server/process.c b/server/process.c
+--- a/server/process.c
++++ b/server/process.c
+@@ -96,6 +96,7 @@
+ static struct list *process_get_kernel_obj_list( struct object *obj );
+ #ifdef PW_WINE_SERVICE_FIXTURE
+ #include "wine/pw_wine_fixture_provider.h"
++#include "wine/pw_wine_fixture_socket.h"
+ #endif
+ static void process_destroy( struct object *obj );
+ static void terminate_process( struct process *process, struct thread *skip, int exit_code );
+@@ -1168,7 +1169,11 @@
+     }
+     if (params.root) release_object( params.root );  /* unused */
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (pw_wine_fixture_socket( socket_fd, PW_WF_SOCKET_NONBLOCK ))
++#else
+     if (fcntl( socket_fd, F_SETFL, O_NONBLOCK ) == -1)
++#endif
+     {
+         set_error( STATUS_INVALID_HANDLE );
+         close( socket_fd );
+diff --git a/server/thread.c b/server/thread.c
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -56,6 +56,9 @@
+ #include "handle.h"
+ #include "process.h"
+ #include "thread.h"
++#ifdef PW_WINE_SERVICE_FIXTURE
++#include "wine/pw_wine_fixture_socket.h"
++#endif
+ #include "request.h"
+ #include "user.h"
+ #include "security.h"
+@@ -1818,7 +1821,11 @@
+             goto done;
+         }
+     }
++#ifdef PW_WINE_SERVICE_FIXTURE
++    else if (request_fd == -1 || pw_wine_fixture_socket( request_fd, PW_WF_SOCKET_NONBLOCK ))
++#else
+     else if (request_fd == -1 || fcntl( request_fd, F_SETFL, O_NONBLOCK ) == -1)
++#endif
+     {
+         if (request_fd != -1) close( request_fd );
+         set_error( STATUS_INVALID_HANDLE );
+@@ -1878,7 +1885,11 @@
+         goto error;
+     }
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (pw_wine_fixture_socket( reply_fd, PW_WF_SOCKET_NONBLOCK )) goto error;
++#else
+     if (fcntl( reply_fd, F_SETFL, O_NONBLOCK ) == -1) goto error;
++#endif
+ 
+     thread->reply_fd = create_anonymous_fd( &thread_fd_ops, reply_fd, &thread->obj, 0 );
+     thread->wait_fd  = create_anonymous_fd( &thread_fd_ops, wait_fd, &thread->obj, 0 );
+diff --git a/server/request.c b/server/request.c
+--- a/server/request.c
++++ b/server/request.c
+@@ -57,6 +57,9 @@
+ #include "file.h"
+ #include "process.h"
+ #include "thread.h"
++#ifdef PW_WINE_SERVICE_FIXTURE
++#include "wine/pw_wine_fixture_socket.h"
++#endif
+ #include "security.h"
+ #include "handle.h"
+ #include "request_handlers.h"
+@@ -884,6 +887,15 @@
+ 
+     if (client_channel == -1) return -1;
+     if (socketpair( AF_UNIX, SOCK_STREAM, 0, pair ) == -1) return -1;
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (pw_wine_fixture_socket( pair[0], PW_WF_SOCKET_CLOEXEC ) ||
++        pw_wine_fixture_socket( pair[1], PW_WF_SOCKET_CLOEXEC ))
++    {
++        int saved = errno;
++        close( pair[0] ); close( pair[1] ); errno = saved;
++        return -1;
++    }
++#endif
+     memset( &msg, 0, sizeof(msg) );
+     memset( &control, 0, sizeof(control) );
+     msg.msg_iov = &vec;
+@@ -931,7 +943,12 @@
+         int client = accept( get_unix_fd( master_socket->fd ), (struct sockaddr *) &dummy, &len );
+ #endif
+         if (client == -1) return;
++#ifdef PW_WINE_SERVICE_FIXTURE
++        if (pw_wine_fixture_socket( client, PW_WF_SOCKET_NONBLOCK ))
++        { close( client ); return; }
++#else
+         fcntl( client, F_SETFL, O_NONBLOCK );
++#endif
+         if ((process = create_process( client, NULL, 0, NULL, NULL, NULL, 0, NULL )))
+         {
+             struct thread *thread = create_thread( -1, process, NULL );
+@@ -1230,8 +1247,17 @@
+         server_dir = create_server_dir( 1 );
+         if (socketpair( AF_UNIX, SOCK_STREAM, 0, channel ) == -1)
+             fatal_error( "socketpair: %s\n", strerror( errno ));
++#ifdef PW_WINE_SERVICE_FIXTURE
++        if (pw_wine_fixture_socket( channel[0], PW_WF_SOCKET_CLOEXEC ) ||
++            pw_wine_fixture_socket( channel[1], PW_WF_SOCKET_CLOEXEC ))
++        {
++            close( channel[0] ); close( channel[1] );
++            fatal_error( "invalid in-process master stream flags\n" );
++        }
++#else
+         fcntl( channel[0], F_SETFD, FD_CLOEXEC );
+         fcntl( channel[1], F_SETFD, FD_CLOEXEC );
++#endif
+         if (!(master_socket = alloc_object( &master_socket_ops )) ||
+             !(master_socket->fd = create_anonymous_fd( &master_socket_fd_ops, channel[0], &master_socket->obj, 0 )))
+             fatal_error( "out of memory\n" );
+@@ -1244,10 +1270,19 @@
+             int wake[2];
+ 
+             if (pipe( wake ) == -1) fatal_error( "pipe: %s\n", strerror( errno ));
++#ifdef PW_WINE_SERVICE_FIXTURE
++            if (pw_wine_fixture_socket( wake[0], PW_WF_SOCKET_CLOEXEC | PW_WF_SOCKET_NONBLOCK ) ||
++                pw_wine_fixture_socket( wake[1], PW_WF_SOCKET_CLOEXEC | PW_WF_SOCKET_NONBLOCK ))
++            {
++                close( wake[0] ); close( wake[1] );
++                fatal_error( "invalid in-process wake stream flags\n" );
++            }
++#else
+             fcntl( wake[0], F_SETFD, FD_CLOEXEC );
+             fcntl( wake[1], F_SETFD, FD_CLOEXEC );
+             fcntl( wake[0], F_SETFL, O_NONBLOCK );
+             fcntl( wake[1], F_SETFL, O_NONBLOCK );
++#endif
+             if (!(wake_fd = create_anonymous_fd( &inprocess_wake_fd_ops, wake[0], &master_socket->obj, 0 )))
+                 fatal_error( "out of memory\n" );
+             set_fd_events( wake_fd, POLLIN );
+diff --git a/include/wine/pw_wine_fixture_socket.h b/include/wine/pw_wine_fixture_socket.h
+new file mode 100644
+--- /dev/null
++++ b/include/wine/pw_wine_fixture_socket.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_WINE_FIXTURE_SOCKET_H
++#define PW_WINE_FIXTURE_SOCKET_H
++#include <stdint.h>
++#define PW_WF_SOCKET_CLOEXEC 1u
++#define PW_WF_SOCKET_NONBLOCK 2u
++/* Ordinary socket option used by the public PS5 native callers and observed
++ * on the original owned-socket matrix. SDK v0.42 does not name this option. */
++#define PW_WF_SO_NBIO 0x1200
++
++enum { PW_WF_SOCKET_ARGUMENT=1, PW_WF_SOCKET_TYPE, PW_WF_SOCKET_CLEX,
++       PW_WF_SOCKET_NBIO_SET, PW_WF_SOCKET_NBIO_GET };
++typedef struct PwWineFixtureSocketResult {
++    int status, api, raw_result, native_error, errno_valid;
++    uint32_t returned_length;
++    int returned_value;
++} PwWineFixtureSocketResult;
++/* Only callers that already own a newly acquired ordinary stream may use
++ * this operation. It never closes or substitutes the descriptor, and never
++ * reads queued stream data. Caller owns all-path cleanup. */
++int pw_wine_fixture_socket_prepare(int fd, unsigned flags, PwWineFixtureSocketResult *result);
++typedef void (*PwWineFixtureSocketSink)(void *, const PwWineFixtureSocketResult *);
++/* Install once before Wine threads. The sink must only record locally or
++ * attempt one nonblocking control send; no wait/logging/server request. */
++int pw_wine_fixture_socket_set_sink(PwWineFixtureSocketSink sink, void *context);
++int pw_wine_fixture_socket_forward_sink(int (*install)(PwWineFixtureSocketSink, void *));
++/* Immutable first failure snapshot. Returns1 only when a full record exists. */
++int pw_wine_fixture_socket_failure(PwWineFixtureSocketResult *out);
++/* Wine adapter: publish a failure and preserve its errno. No stdio/network logger. */
++int pw_wine_fixture_socket(int fd, unsigned flags);
++#endif

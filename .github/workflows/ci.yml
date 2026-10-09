@@ -142,6 +142,8 @@ jobs:
             python3 tests/test_wowprospero_contract.py
             python3 tests/test_ws2_fqdn.py
             python3 tests/test_wine_lookup_misses.py
+            python3 tools/check_wine_fixture_consumers.py --wine-source "$RUNNER_TEMP/wine-patched" \
+              --output "$RUNNER_TEMP/wine-evidence/service-consumers"
           } 2>&1 | tee "$RUNNER_TEMP/wine-evidence/contracts.log"
       - name: Retain Wine source evidence
         if: ${{ always() }}

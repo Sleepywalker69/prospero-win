@@ -278,6 +278,11 @@ for patch in $ordered; do
     echo "applied $patch"
 done
 
+# Execute the actual composed consumer contracts before compiling either half.
+consumer_checks=$(mktemp -d "$work/consumer-checks.XXXXXX")
+python3 "$root/tools/check_wine_fixture_consumers.py" --wine-source "$tree" \
+    --output "$consumer_checks/result" || fail "composed service consumer contracts failed"
+
 # Stage Vulkan batching after the complete patch series. Failure must stop the
 # build before either half can be emitted with a different dispatch table.
 python3 "$root/tools/stage_vk_batch.py" --source "$tree" --repo "$root" ||
@@ -301,15 +306,26 @@ done
 # profile switch and not a process provider. Never infer it from parent ISA.
 case " ${CFLAGS:-} ${CPPFLAGS:-} ${CROSSCFLAGS:-} ${x86_64_CFLAGS:-} ${i386_CFLAGS:-} " in
     *WINE_PS5_PRIVATE_DISPATCH*) fail "use PW_WINE_PRIVATE_DISPATCH, not a manual compiler definition" ;;
+    *PW_WINE_SERVICE_FIXTURE*) fail "use PW_WINE_SERVICE_FIXTURE selector, not a manual compiler definition" ;;
 esac
 private_dispatch=${PW_WINE_PRIVATE_DISPATCH:-0}
 case "$private_dispatch" in 0|1) ;; *) fail "PW_WINE_PRIVATE_DISPATCH must be 0 or 1" ;; esac
+service_fixture=${PW_WINE_SERVICE_FIXTURE:-0}
+case "$service_fixture" in 0|1) ;; *) fail "PW_WINE_SERVICE_FIXTURE must be 0 or 1" ;; esac
+if [ "$service_fixture" = 1 ] && [ "$private_dispatch" != 1 ]; then
+    fail "service child runtime requires the matched private dispatcher cohort"
+fi
 opengl_cflags=${CFLAGS:--g -O2}
 if [ "$private_dispatch" = 1 ]; then
     opengl_cflags="$opengl_cflags -DWINE_PS5_PRIVATE_DISPATCH=1"
     x86_64_CFLAGS="${x86_64_CFLAGS:-${CROSSCFLAGS:--g -O2}} -DWINE_PS5_PRIVATE_DISPATCH=1"
     i386_CFLAGS="${i386_CFLAGS:-${CROSSCFLAGS:--g -O2}} -DWINE_PS5_PRIVATE_DISPATCH=1"
     export x86_64_CFLAGS i386_CFLAGS
+fi
+service_cflags=""
+if [ "$service_fixture" = 1 ]; then
+    service_cflags="-DPW_WINE_SERVICE_FIXTURE=1"
+    opengl_cflags="$opengl_cflags $service_cflags"
 fi
 if [ -n "$ps5opengl_sdk" ]; then opengl_cflags="$opengl_cflags -DWINE_PS5_OPENGL"; fi
 
@@ -318,6 +334,10 @@ stamp=$(
     { printf '%s\n' "$WINE_COMMIT" "$CONFIGURE_ARGS" "$sdk" "$FREETYPE_SHA256" \
         "$ps5opengl_sdk" "$opengl_cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" "$tls_stamp"
       [ "$private_dispatch" = 0 ] || printf '%s\n' "private-dispatch-abi=1" "private-dispatch-wow64-abi=1" "$x86_64_CFLAGS" "$i386_CFLAGS"
+      if [ "$service_fixture" = 1 ]; then
+          printf '%s\n' "service-fixture-abi=1"
+          cat "$root"/wine/ps5/pw_wine_fixture_provider.[ch] "$root"/wine/ps5/pw_wine_fixture_socket.[ch] "$root/wine/ps5/pw_wine_compat.c"
+      fi
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" "$root"/wine/ps5/pw_d3d9_window*.[ch]; } | sha256sum | cut -c1-64)
@@ -502,9 +522,21 @@ link_prx() {
 if [ "$prx_status" = 0 ]; then
     for unit in pw_wine_prx pw_wine_dl pw_wine_dl_libc pw_wine_compat pw_wine_compat_libc \
             pw_wine_threads pw_wine_threads_libc pw_wine_sink pw_wine_cwd pw_wine_cwd_libc; do
-        "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC \
+        "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC $service_cflags \
             -c "$root/wine/ps5/$unit.c" -o "$prx/obj/$unit.o" || fail "cannot compile $unit.c"
     done
+    service_objects=""
+    service_ntdll_exports=""
+    service_server_exports=""
+    if [ "$service_fixture" = 1 ]; then
+        for unit in pw_wine_fixture_provider pw_wine_fixture_socket; do
+            "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC $service_cflags \
+                -c "$root/wine/ps5/$unit.c" -o "$prx/obj/$unit.o" || fail "cannot compile $unit.c"
+            service_objects="$service_objects $prx/obj/$unit.o"
+        done
+        service_ntdll_exports="pw_wine_fixture_install pw_wine_fixture_local_threads pw_wine_fixture_socket_set_sink pw_wine_fixture_socket_failure"
+        service_server_exports="pw_wineserver_fixture_install pw_wine_fixture_socket_set_sink"
+    fi
     # ntdll: the loader, compat, and the title's present and input sink; the
     # thread registry belongs to the server alone.
     shims=""
@@ -520,7 +552,7 @@ if [ "$prx_status" = 0 ]; then
         cwd_wraps="$cwd_wraps --wrap=$name"
     done
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/ntdll_desc.c" \
-        __wine_main pw_wine_dl_adopt dlopen dlsym dlerror \
+        $service_ntdll_exports __wine_main pw_wine_dl_adopt dlopen dlsym dlerror \
         pw_wine_heap_stats pw_wine_heap_malloc pw_wine_heap_free \
         pw_wine_set_present_sink pw_wine_post_input pw_wine_sink_stats \
         pw_wine_present pw_wine_next_input pw_wine_input_fd \
@@ -540,7 +572,7 @@ if [ "$prx_status" = 0 ]; then
     fi
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/win32u_desc.c" __wine_unix_lib_init
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/wineserver_desc.c" \
-        pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
+        $service_server_exports pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
         pw_wineserver_mutex_backend \
         pw_wineserver_sync_backend \
         pw_cwd_share_changes
@@ -578,7 +610,7 @@ if [ "$prx_status" = 0 ]; then
         "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
             -c "$prx/obj/$unit.c" -o "$prx/obj/$unit.o" || fail "cannot compile $unit.c"
     done
-    link_prx ntdll dlls/ntdll/ntdll.so "$heap $dmem $shims $prx/obj/ntdll_desc.o $cwd_wraps"
+    link_prx ntdll dlls/ntdll/ntdll.so "$heap $dmem $shims $service_objects $prx/obj/ntdll_desc.o $cwd_wraps"
     if [ -n "$ps5opengl_sdk" ]; then
         # Mesa's embedded diagnostics name these libc APIs, but a title has no
         # process launcher or syslog daemon. Keep those paths inert and supply
@@ -596,7 +628,7 @@ if [ "$prx_status" = 0 ]; then
     fi
     # ntdll loads it with its own dlopen; it has its own heap, needs no
     # dlfcn of its own, and signals threads through the registry ntdll fills.
-    link_prx wineserver server/wineserver "$heap $prx/obj/pw_wine_compat.o \
+    link_prx wineserver server/wineserver "$heap $service_objects $prx/obj/pw_wine_compat.o \
         $prx/obj/pw_wine_compat_libc.o $prx/obj/pw_wine_threads.o \
         $prx/obj/pw_wine_threads_libc.o $prx/obj/wineserver_desc.o \
         $prx/obj/pw_wine_cwd.o $prx/obj/pw_wine_cwd_libc.o $cwd_wraps"
@@ -735,7 +767,7 @@ if PW_SOURCE_PRX_FOUNDATION=${source_prx_foundation:-} PW_SOURCE_PS5_MESA=${sour
     PW_SOURCE_PS5_VULKAN=${source_ps5_vulkan:-} PW_SOURCE_RADV_PAYLOAD_SDK=${source_radv_payload_sdk:-} \
     PW_SOURCE_PS5VK=${source_ps5vk:-} PW_SOURCE_PS5_OPENGL_SDK=${source_ps5_opengl_sdk:-} \
     PW_SOURCE_PS5_OPENGL=${source_ps5_opengl:-} PW_SOURCE_CA_BUNDLE=${source_ca_bundle:-} \
-    PW_PRIVATE_DISPATCH="$private_dispatch" \
+    PW_PRIVATE_DISPATCH="$private_dispatch" PW_SERVICE_FIXTURE="$service_fixture" \
     PW_TLS_ROOT="$tls" PW_TOOLS_ROOT="$root/tools" PW_TLS_ENABLED="$([ "$tls_stamp" = disabled ] && echo 0 || echo 1)" \
     python3 - "$build" "$work/make.log" "$work/report.json" "$sdk" "$WINE_COMMIT" "$prx" "$prx_status" \
     $ordered <<'PY'
@@ -850,6 +882,9 @@ result["sources"] = {key: os.environ.get(f"PW_SOURCE_{key.upper()}") or None
                      for key in ("prx_foundation", "ps5_mesa", "ps5_vulkan", "radv_payload_sdk", "ps5vk",
                                  "ps5_opengl_sdk", "ps5_opengl", "ca_bundle")}
 result["tls_configured"] = os.environ.get("PW_TLS_ENABLED") == "1"
+if os.environ.get("PW_SERVICE_FIXTURE") == "1":
+    result["service_fixture"] = {"enabled": True, "unix_define": "PW_WINE_SERVICE_FIXTURE=1",
+                                 "abi": 1, "runtime_validated": False}
 if os.environ.get("PW_PRIVATE_DISPATCH") == "1":
     result["private_dispatcher"] = {
         "abi": 1, "wow64_abi": 1, "scope": "matched native AMD64 and translated I386; no child provider",

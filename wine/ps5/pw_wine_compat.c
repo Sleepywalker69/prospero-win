@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "pw_wine_compat.h"
+#ifdef PW_WINE_SERVICE_FIXTURE
+#include "pw_wine_fixture_socket.h"
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -57,11 +60,17 @@ int pw_compat_pipe2(int fds[2],int flags)
     int pair[2];if(pw_compat_pipe(pair))return -1;
     for(int i=0;i<2;i++) {
         int status=0;
+#ifdef PW_WINE_SERVICE_FIXTURE
+        unsigned requested=((flags&O_CLOEXEC)?PW_WF_SOCKET_CLOEXEC:0)|
+                           ((flags&O_NONBLOCK)?PW_WF_SOCKET_NONBLOCK:0);
+        status=pw_wine_fixture_socket(pair[i],requested);
+#else
         if(flags&O_CLOEXEC)status=fcntl(pair[i],F_SETFD,FD_CLOEXEC);
         if(!status && (flags&O_NONBLOCK)) {
             int current=fcntl(pair[i],F_GETFL);
             status=current<0?-1:fcntl(pair[i],F_SETFL,current|O_NONBLOCK);
         }
+#endif
         if(status) {
             int saved=errno;close(pair[0]);close(pair[1]);errno=saved;return -1;
         }
