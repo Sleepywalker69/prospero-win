@@ -528,3 +528,9 @@ docs/DIAGNOSTIC_KIT.md
 tools/package_radv_archive.py
 tests/test_radv_archive_ci.py
 docs/RADV_ARCHIVE_CI.md
+
+.github/workflows/radv-prx.yml
+tools/check_radv_prx.py
+tools/prepare_radv_prx.py
+tests/test_radv_prx.py
+docs/RADV_PRX_CI.md
