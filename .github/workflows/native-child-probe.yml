@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Original native child probe build
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+concurrency:
+  group: native-child-probe-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+jobs:
+  native-child-probe:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'build-native-child-probe')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Prepare supported build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 curl wget unzip zlib1g-dev
+          python3 -m pip install pyyaml==6.0.1
+          mkdir -p "$RUNNER_TEMP/native-child-evidence" "$RUNNER_TEMP/native-child-cache"
+          printf 'XDG_CACHE_HOME=%s\n' "$RUNNER_TEMP/native-child-cache" >> "$GITHUB_ENV"
+      - name: Check portable protocol and build acceptance controls
+        run: |
+          {
+            make build/host/test_pw_native_child_protocol build/host/test_pw_native_child_probe
+            build/host/test_pw_native_child_protocol
+            build/host/test_pw_native_child_probe
+            python3 tests/test_build_native_child_probe.py
+          } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/host-controls.log"
+      - name: Prepare exact public worker converter dependencies
+        run: |
+          {
+            foundation="$RUNNER_TEMP/native-child-foundation"
+            git init "$foundation"
+            git -C "$foundation" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+            git -C "$foundation" fetch --depth=1 origin 30597512539e7edfde079cbcaf4a626bc0a948c5
+            git -C "$foundation" checkout --detach FETCH_HEAD
+            test "$(git -C "$foundation" rev-parse HEAD)" = 30597512539e7edfde079cbcaf4a626bc0a948c5
+            make -C "$foundation" deps
+            printf 'PW_NATIVE_CHILD_FOUNDATION=%s\n' "$foundation" >> "$GITHUB_ENV"
+          } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/foundation.log"
+      - name: Build and inspect original worker and probe launcher
+        env:
+          PW_NATIVE_CHILD_PROBE: "1"
+          PW_OUTPUT_SUFFIX: -native-child
+          PW_WINE64_SCRIPT: "0"
+          PS5LOG_DEV_CONF: ${{ runner.temp }}/no-private-dev-conf
+        run: |
+          {
+            tools/build_native.sh
+            test -s dist/PPSA99995-native-child/eboot.bin
+            test -x dist/PPSA99995-native-child/eboot.bin
+            test -s dist/PPSA99995-native-child/native-child.self
+            test -x dist/PPSA99995-native-child/native-child.self
+            test ! -e dist/PPSA99995-native-child/dev.conf
+            cmp build/native-native-child/child/native-child.self dist/PPSA99995-native-child/native-child.self
+          } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/build.log"
+      - name: Bundle verified outputs with exact source and notices
+        run: |
+          stage="$RUNNER_TEMP/native-child-artifact"
+          mkdir -p "$stage/sources" "$stage/provenance"
+          cp -a dist/PPSA99995-native-child "$stage/PPSA99995"
+          cp LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md "$stage/"
+          cp -a LICENSES "$stage/"
+          cp docs/NATIVE_CHILD_PROBE.md "$stage/README.md"
+          cp build/native-native-child/lapy-helper-{release,manifest}.json "$stage/provenance/"
+          cp build/native-native-child/PW_DYNAMIC_IMPORTS.txt "$stage/provenance/"
+          cp -a build/native-native-child/child "$stage/provenance/worker"
+          git archive HEAD | gzip -n > "$stage/sources/prospero-win.tar.gz"
+          foundation="$GITHUB_WORKSPACE/.deps/ps5-native-app-boilerplate"
+          git -C "$foundation" archive HEAD | gzip -n > "$stage/sources/title-foundation.tar.gz"
+          git -C "$PW_NATIVE_CHILD_FOUNDATION" archive HEAD | gzip -n > "$stage/sources/worker-foundation.tar.gz"
+          cp "$PW_NATIVE_CHILD_FOUNDATION"/.deps/native/zlib/zlib-*.tar.gz "$stage/sources/"
+          cp "$foundation/tools/setup-native-dependencies.sh" "$stage/provenance/title-dependency-recipe.sh"
+          cp "$PW_NATIVE_CHILD_FOUNDATION/tools/setup-native-dependencies.sh" "$stage/provenance/worker-dependency-recipe.sh"
+          {
+            printf 'Original native two-process probe; compile/link/conversion evidence only.\n'
+            printf 'Console execution, platform authentication, native reaping and Windows children are unverified.\n'
+            printf 'This native-only package is not a complete Wine/runtime/installer kit.\n'
+            printf 'Repository: %s\nCommit: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$(git rev-parse HEAD)"
+            printf 'Run: %s/actions/runs/%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Public SDK source: https://github.com/ps5-payload-dev/sdk/tree/v0.42\n'
+            printf 'Lapy source/artifact identity: provenance/lapy-helper-release.json\n'
+          } > "$stage/BUILD-INFO.txt"
+          (cd "$stage" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          tar -czf "$RUNNER_TEMP/native-child-probe.tar.gz" -C "$stage" .
+      - name: Retain original worker files and corresponding source on failure
+        if: ${{ always() }}
+        run: |
+          evidence="$RUNNER_TEMP/native-child-evidence"
+          mkdir -p "$evidence/source"
+          git archive HEAD | gzip -n > "$evidence/source/prospero-win.tar.gz"
+          cp LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md "$evidence/source/"
+          python3 - build/native-native-child/child "$evidence/worker-files" <<'PY'
+          import hashlib, json, pathlib, shutil, sys
+          source, target = map(pathlib.Path, sys.argv[1:])
+          if source.is_symlink() or (source.exists() and not source.is_dir()):
+              raise SystemExit('worker diagnostics require an owned output directory')
+          target.mkdir(parents=True, exist_ok=True)
+          files = {}
+          for pattern in ('*.elf', '*.self', '*.o'):
+              for path in sorted(source.glob(pattern)):
+                  if path.is_symlink() or not path.is_file():
+                      raise SystemExit('worker diagnostic must be an owned regular file')
+                  if path.stat().st_size > 128 * 1024 * 1024:
+                      raise SystemExit('worker diagnostic exceeds the artifact bound')
+                  shutil.copy2(path, target / path.name)
+                  value = (target / path.name).read_bytes()
+                  files[path.name] = {'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+          (target / 'FILES.json').write_text(json.dumps(files, indent=2, sort_keys=True) + '\n')
+          PY
+      - name: Preserve actual compiler and inspection evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-child-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |-
+            ${{ runner.temp }}/native-child-evidence/
+            build/native-native-child/child/inspection/
+            build/native-native-child/child/native-child-build.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload successful original native probe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-child-probe-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-child-probe.tar.gz
+          if-no-files-found: error
+          retention-days: 7

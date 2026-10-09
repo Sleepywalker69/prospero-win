@@ -241,4 +241,40 @@ with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
     assert '--dyn-syms -r -W' in (evidence / 'later.shared.elf.log').read_text()
     assert (evidence / 'later.shared.elf-disassembly.log').is_file()
     assert (evidence / 'later.elf.log').is_file()
-print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX build artifacts")
+native_probe = yaml.load((ROOT / '.github/workflows/native-child-probe.yml').read_text(), Loader=yaml.BaseLoader)
+retention = next(step for step in native_probe['jobs']['native-child-probe']['steps'] if step.get('name') ==
+                 'Retain original worker files and corresponding source on failure')
+assert 'always()' in retention['if']
+assert 'git archive HEAD' in retention['run'] and 'LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md' in retention['run']
+retention_code = retention['run'].split("<<'PY'\n", 1)[1].split('\nPY', 1)[0]
+with tempfile.TemporaryDirectory(prefix='pw-native-failure-evidence-') as directory:
+    root = Path(directory); source = root / 'worker'; target = root / 'evidence'; source.mkdir()
+    expected = {'worker.linked.elf': b'original linked fixture', 'worker.elf': b'original converted fixture',
+                'worker.original.self': b'original container fixture', 'native-child.self': b'final container fixture',
+                'native-child.before.elf': b'before extraction', 'native-child.after.elf': b'after extraction',
+                'worker.o': b'original compiled fixture'}
+    for name, content in expected.items():
+        (source / name).write_bytes(content)
+    def retain(destination):
+        return subprocess.run([sys.executable, '-c', retention_code, str(source), str(destination)],
+                              capture_output=True, text=True)
+    assert retain(target).returncode == 0
+    import hashlib, json
+    index = json.loads((target / 'FILES.json').read_text())
+    assert set(index) == set(expected)
+    for name, content in expected.items():
+        assert (target / name).read_bytes() == content
+        assert index[name] == {'bytes': len(content), 'sha256': hashlib.sha256(content).hexdigest()}
+    # Early failure may precede every output; retain an explicit empty index.
+    for path in source.iterdir():
+        path.unlink()
+    assert retain(root / 'early').returncode == 0
+    assert json.loads((root / 'early/FILES.json').read_text()) == {}
+    private = root / 'outside'; private.write_bytes(b'not an owned worker input')
+    (source / 'escape.elf').symlink_to(private)
+    assert retain(root / 'rejected').returncode != 0
+    assert not (root / 'rejected/escape.elf').exists()
+    (source / 'escape.elf').unlink(); source.rmdir()
+    source.symlink_to(root, target_is_directory=True)
+    assert retain(root / 'rejected-directory').returncode != 0
+print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX/native artifacts")
