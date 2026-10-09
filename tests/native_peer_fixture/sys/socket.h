@@ -24,6 +24,7 @@ struct cmsgcred { int32_t cmcred_pid; uint32_t cmcred_uid,cmcred_euid,cmcred_gid
 #define SOL_SOCKET 0xffff
 #define SCM_RIGHTS 1
 #define SCM_CREDS 3
+#define SO_NBIO 0x1200 /* Documented platform option; absent from SDK v0.42. */
 #define SO_NOSIGPIPE 0x0800
 #define MSG_TRUNC 0x10
 #define MSG_CTRUNC 0x20

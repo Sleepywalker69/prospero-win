@@ -195,16 +195,17 @@ class WorkerBuildTests(unittest.TestCase):
                 build.validate_link(linked, sdk, root, analyzer, 'peer-exit')
             analyzer.imports = set(build.PEER_IMPORTS)
             self.assertEqual(build.validate_link(linked, sdk, root, analyzer, 'peer-exit')['imports'], sorted(build.PEER_IMPORTS))
-            # Ordinary AF_UNIX setup uses ioctl; inherited stdio still uses
-            # fcntl. Neither may silently disappear from this mode's closure.
-            for missing in ('ioctl', 'fcntl'):
+            # Ordinary AF_UNIX setup requires close-on-exec and SO_NBIO
+            # readback; inherited stdio still uses fcntl.
+            for missing in ('ioctl', 'fcntl', 'getsockopt'):
                 analyzer.imports = build.PEER_IMPORTS - {missing}
                 with self.subTest(peer_missing=missing), self.assertRaises(ValueError):
                     build.validate_link(linked, sdk, root, analyzer, 'peer-exit')
             for other_mode, expected in (('hello', build.IMPORTS), ('fd', build.FD_IMPORTS)):
-                analyzer.imports = expected | {'ioctl'}
-                with self.subTest(mode=other_mode), self.assertRaises(ValueError):
-                    build.validate_link(linked, sdk, root, analyzer, other_mode)
+                for extra in ('ioctl', 'getsockopt'):
+                    analyzer.imports = expected | {extra}
+                    with self.subTest(mode=other_mode, extra=extra), self.assertRaises(ValueError):
+                        build.validate_link(linked, sdk, root, analyzer, other_mode)
             for forbidden in ('__error', 'kqueue', 'kevent', 'sysctl', 'socketpair', 'shutdown', '__patch_init'):
                 analyzer.imports = build.PEER_IMPORTS | {forbidden}
                 with self.subTest(peer_forbidden=forbidden), self.assertRaises(ValueError):

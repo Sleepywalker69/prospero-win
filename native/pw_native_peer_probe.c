@@ -23,6 +23,9 @@
 
 enum { CONTROL_BYTES = 2*CMSG_SPACE(sizeof(struct cmsgcred)) + CMSG_SPACE(8*sizeof(int)),
        MAX_RIGHTS = CONTROL_BYTES / sizeof(int) };
+/* Public PS5 socket callers name option 0x1200 SO_NBIO; SDK v0.42 does not
+ * declare it. This ordinary socket option still requires target validation. */
+enum { PW_NATIVE_PEER_SO_NBIO = 0x1200 };
 static int fail(PwNativePeerResult *r, int status, int64_t raw)
 {
     if(!r->status){
@@ -84,12 +87,16 @@ static int ready(int fd, short events, int worker, int challenge_pending,
 }
 static int prepare(int fd, PwNativePeerResult *r)
 {
-    /* BSD setters change only these bits, without a flag read/modify/write.
-     * This ordinary descriptor API is separate from SceNet's socket IDs. */
+    /* Keep close-on-exec mandatory on this ordinary owned descriptor. */
     api(r,PW_NP_API_IOCTL_FIOCLEX);int rc=ioctl(fd,FIOCLEX,(void *)0);
     if(rc)return fail(r,PW_NP_OS,rc);
-    int one=1;api(r,PW_NP_API_IOCTL_FIONBIO);rc=ioctl(fd,FIONBIO,&one);
+    int one=1;api(r,PW_NP_API_SETSOCKOPT_NBIO);
+    rc=setsockopt(fd,SOL_SOCKET,PW_NATIVE_PEER_SO_NBIO,&one,sizeof(one));
     if(rc)return fail(r,PW_NP_OS,rc);
+    int on=0;socklen_t length=sizeof(on);api(r,PW_NP_API_GETSOCKOPT_NBIO);
+    rc=getsockopt(fd,SOL_SOCKET,PW_NATIVE_PEER_SO_NBIO,&on,&length);
+    if(rc)return fail(r,PW_NP_OS,rc);
+    if(length!=sizeof(on) || on!=1)return fail(r,PW_NP_PROTOCOL,rc);
 #if defined(__FreeBSD__) || defined(__PROSPERO__) || defined(PW_NATIVE_PEER_TEST_ABI)
     api(r,PW_NP_API_SETSOCKOPT);
     rc=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));

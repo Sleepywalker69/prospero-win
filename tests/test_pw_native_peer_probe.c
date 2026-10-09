@@ -20,6 +20,7 @@ _Static_assert(FD_CLOEXEC==1, "target descriptor close-on-exec flag");
 static int mock_close(int),mock_socket(int,int,int),mock_fcntl(int,int,...);
 static int mock_ioctl(int,unsigned long,...);
 static int mock_setsockopt(int,int,int,const void *,socklen_t);
+static int mock_getsockopt(int,int,int,void *,socklen_t *);
 static int mock_bind(int,const struct sockaddr *,socklen_t),mock_listen(int,int);
 static int mock_accept(int,struct sockaddr *,socklen_t *),mock_connect(int,const struct sockaddr *,socklen_t);
 static int mock_poll(struct pollfd *,nfds_t,int),mock_unlink(const char *),mock_kqueue(void);
@@ -33,6 +34,7 @@ static int mock_sysctl(const int *,unsigned,void *,size_t *,const void *,size_t)
 #define fcntl mock_fcntl
 #define ioctl mock_ioctl
 #define setsockopt mock_setsockopt
+#define getsockopt mock_getsockopt
 #define bind mock_bind
 #define listen mock_listen
 #define accept mock_accept
@@ -50,6 +52,7 @@ static int mock_sysctl(const int *,unsigned,void *,size_t *,const void *,size_t)
 #undef fcntl
 #undef ioctl
 #undef setsockopt
+#undef getsockopt
 #undef bind
 #undef listen
 #undef accept
@@ -72,6 +75,9 @@ static struct {
  int eof_after,wire_bad,echo_bit,control_eof;int credential_pid_override,credential_pid_set;
  int socket_fail,accept_fail,connect_fail,bind_fail,listen_fail,prepare_fail,unlink_fail,queue_fail;
  int close_fail,close_effect,close_count[256],sockets,accepts,sends,receives,unlinks,queues;
+ int nbio_set_calls[256],nbio_get_calls[256],sigpipe_calls[256],prepare_step[256],forbidden_fionbio_calls;
+ int nbio_fail_fd,nbio_set_result,nbio_get_result,nbio_length,nbio_value,nbio_unwritten,nbio_no_effect;
+ int setup_effect_fd,clex_effect,nbio_set_effect,nbio_get_effect;
  int fcntl_calls,close_errno,ioctl_calls[256],fd_flags[256],file_flags[256];
  int ioctl_fail_fd,ioctl_fail_result,setsockopt_fail_fd,connects,worker_reports;
  unsigned long ioctl_fail_request;PwNativePeerRecord sent_worker_report;
@@ -118,7 +124,7 @@ static long control_send(void *p,const void *in,size_t n,unsigned ms)
 }
 static void reset(void)
 {
- memset(&m,0,sizeof(m));m.now=100;m.chunk=128;m.recv_return=-999;m.send_return=128;m.rng_size=32;m.ioctl_fail_fd=-1;m.ioctl_fail_result=-1;m.setsockopt_fail_fd=-1;
+ memset(&m,0,sizeof(m));m.now=100;m.chunk=128;m.recv_return=-999;m.send_return=128;m.rng_size=32;m.ioctl_fail_fd=-1;m.ioctl_fail_result=-1;m.setsockopt_fail_fd=-1;m.nbio_fail_fd=-1;m.nbio_length=sizeof(int);m.nbio_value=1;m.setup_effect_fd=20;
  m.close_fail=-1;m.eof_after=-1;m.control_eof=-1;m.echo_bit=-1;m.session.parent_pid=101;m.session.child_pid=202;m.session.child_ppid=303;
  m.session.correlation=UINT64_C(0x1020304050607080);memcpy(m.session.build_id,"peer-model-test",16);
  m.io=(PwNativeChildIo){.clock_ms=clock_cb,.receive=control_receive,.send=control_send,
@@ -137,21 +143,47 @@ static int mock_fcntl(int fd,int cmd,...)
 { (void)fd;(void)cmd;m.fcntl_calls++;errno=EINVAL;return -1; }
 static int mock_ioctl(int fd,unsigned long request,...)
 {
- assert(fd==20||fd==30);int step=m.ioctl_calls[fd]++;
- assert(request==(step==0?FIOCLEX:FIONBIO));assert(step<2);
+ assert(fd==20||fd==30);m.ioctl_calls[fd]++;
  va_list args;va_start(args,request);
- if(request==FIOCLEX){assert(va_arg(args,void *)==NULL);}
- else {int *one=va_arg(args,int *);assert(one&&*one==1);}
+ if(request==FIOCLEX){assert(!m.prepare_step[fd]);assert(va_arg(args,void *)==NULL);m.prepare_step[fd]=1;}
+ else {assert(request==FIONBIO);m.forbidden_fionbio_calls++;int *one=va_arg(args,int *);assert(one&&*one==1);}
  va_end(args);
  if(m.prepare_fail||(fd==m.ioctl_fail_fd&&request==m.ioctl_fail_request)){
-  errno=EINVAL;return m.ioctl_fail_result;
+  errno=EACCES;return m.ioctl_fail_result;
  }
  if(request==FIOCLEX)m.fd_flags[fd]|=FD_CLOEXEC;
  else m.file_flags[fd]|=O_NONBLOCK;
+ if(fd==m.setup_effect_fd)effect(m.clex_effect);
  return 0;
 }
 static int mock_setsockopt(int fd,int level,int name,const void *value,socklen_t n)
-{ m.setsockopt_calls++;assert(fd==20||fd==30);assert(level==SOL_SOCKET&&name==SO_NOSIGPIPE&&n==sizeof(int)&&*(const int *)value==1);assert(m.ioctl_calls[fd]==2);if(fd==m.setsockopt_fail_fd){errno=EINVAL;return -1;}effect(m.prepare_effect);return 0; }
+{
+ m.setsockopt_calls++;assert(fd==20||fd==30);assert(level==SOL_SOCKET&&n==sizeof(int)&&value&&*(const int *)value==1);
+ assert(m.ioctl_calls[fd]==1);
+ if(name==SO_NBIO){
+  assert(m.prepare_step[fd]==1);m.prepare_step[fd]=2;m.nbio_set_calls[fd]++;
+  if(fd==m.nbio_fail_fd&&m.nbio_set_result){errno=EACCES;return m.nbio_set_result;}
+  if(!m.nbio_no_effect)m.file_flags[fd]|=O_NONBLOCK;
+  if(fd==m.setup_effect_fd)effect(m.nbio_set_effect);
+ }else{
+  assert(name==SO_NOSIGPIPE&&m.prepare_step[fd]==3);m.prepare_step[fd]=4;m.sigpipe_calls[fd]++;
+  if(fd==m.setsockopt_fail_fd){errno=EACCES;return -1;}
+  effect(m.prepare_effect);
+ }
+ return 0;
+}
+static int mock_getsockopt(int fd,int level,int name,void *value,socklen_t *n)
+{
+ assert((fd==20||fd==30)&&level==SOL_SOCKET&&name==SO_NBIO&&value&&n&&*n==sizeof(int));
+ assert(*(int *)value!=1); /* An unwritten readback must never inherit success. */
+ assert(m.prepare_step[fd]==2);m.prepare_step[fd]=3;m.nbio_get_calls[fd]++;
+ if(fd==m.nbio_fail_fd&&m.nbio_get_result){errno=EACCES;return m.nbio_get_result;}
+ *n=(socklen_t)m.nbio_length;
+ if(!m.nbio_unwritten)*(int *)value=(m.file_flags[fd]&O_NONBLOCK)?m.nbio_value:0;
+ errno=EACCES; /* Successful malformed readback must not report this stale errno. */
+ if(fd==m.setup_effect_fd)effect(m.nbio_get_effect);
+ return 0;
+}
 static int mock_bind(int fd,const struct sockaddr *a,socklen_t n)
 { m.bind_calls++;assert(fd==20&&a&&n>2&&a->sa_len==n&&a->sa_family==AF_UNIX);return m.bind_fail?-1:0; }
 static int mock_listen(int fd,int backlog){m.listen_calls++;assert(fd==20&&backlog==1);return m.listen_fail?-1:0;}
@@ -324,36 +356,42 @@ static int test_worker_cleanup(void)
  reset();armed();m.close_fail=40;CHECK(pw_native_peer_observe(&m.probe,&m.io,1,&m.result)<0);CHECK(m.result.cleanup_failed&&m.close_count[40]==1);
  return 0;
 }
-static int test_ioctl_contract(void)
+static int role_begin(int role)
+{ if(role==1)return open_parent();if(role==2)m.worker=1;return 0; }
+static int role_run(int role)
+{ return role==0?open_parent():role==1?exchange_parent():pw_native_peer_worker_exchange(&m.io,&m.session,&m.result); }
+static int test_socket_flag_contract(void)
 {
- const unsigned expected_api[]={PW_NP_API_IOCTL_FIOCLEX,PW_NP_API_IOCTL_FIONBIO};
- CHECK(expected_api[0]==24&&expected_api[1]==25);
- /* Model only the documented bit-specific effect; this is no target kernel proof. */
+ _Static_assert(sizeof(int)==4&&SO_NBIO==0x1200&&SOL_SOCKET==0xffff,"target socket option ABI");
+ const unsigned expected_api[]={PW_NP_API_IOCTL_FIOCLEX,PW_NP_API_SETSOCKOPT_NBIO,PW_NP_API_GETSOCKOPT_NBIO};
+ CHECK(PW_NP_API_IOCTL_FIONBIO==25&&expected_api[0]==24&&expected_api[1]==26&&expected_api[2]==27);
+ /* Only a model of documented bit-specific effects; not target kernel proof. */
  for(int role=0;role<3;role++)for(int already=0;already<2;already++){
   reset();m.fd_flags[20]=m.fd_flags[30]=0x40|(already?FD_CLOEXEC:0);
   m.file_flags[20]=m.file_flags[30]=2|8|(already?O_NONBLOCK:0);
-  int rc;if(role==2){m.worker=1;rc=pw_native_peer_worker_exchange(&m.io,&m.session,&m.result);}
-  else {rc=open_parent();if(!rc&&role==1)rc=exchange_parent();}
-  CHECK(!m.fcntl_calls);CHECK(!rc);
-  int fd=role==1?30:20;CHECK(m.ioctl_calls[fd]==2);
+  CHECK(!role_begin(role));CHECK(!role_run(role));int fd=role==1?30:20;
+  CHECK(!m.fcntl_calls&&!m.forbidden_fionbio_calls);CHECK(m.ioctl_calls[fd]==1);
+  CHECK(m.nbio_set_calls[fd]==1&&m.nbio_get_calls[fd]==1&&m.sigpipe_calls[fd]==1);
   CHECK(m.fd_flags[fd]==(0x40|FD_CLOEXEC)&&m.file_flags[fd]==(2|8|O_NONBLOCK));
-  CHECK(m.setsockopt_calls==(role==1?2:1));
   if(role!=2)pw_native_peer_parent_cleanup(&m.probe,&m.result);
   CHECK(m.close_count[20]==1);if(role==1)CHECK(m.close_count[30]==1);
  }
- for(int role=0;role<3;role++)for(int command=0;command<2;command++)
+ for(int role=0;role<3;role++)for(int command=0;command<3;command++)
  for(int close_error=0;close_error<2;close_error++)for(int positive=0;positive<2;positive++){
-  reset();if(role==1)CHECK(!open_parent());if(role==2)m.worker=1;
-  int fd=role==1?30:20;m.fd_flags[fd]=0x40;m.file_flags[fd]=2|8;
-  m.ioctl_fail_fd=fd;m.ioctl_fail_request=command?FIONBIO:FIOCLEX;m.ioctl_fail_result=positive?1:-1;
+  reset();CHECK(!role_begin(role));int fd=role==1?30:20;
+  m.fd_flags[fd]=0x40;m.file_flags[fd]=2|8;m.nbio_fail_fd=m.ioctl_fail_fd=fd;
+  int raw=positive?1:-1;
+  if(!command){m.ioctl_fail_request=FIOCLEX;m.ioctl_fail_result=raw;}
+  else if(command==1)m.nbio_set_result=raw;else m.nbio_get_result=raw;
   m.close_errno=EBADF;if(close_error)m.close_fail=fd;
-  int rc=role==0?open_parent():role==1?exchange_parent():pw_native_peer_worker_exchange(&m.io,&m.session,&m.result);
-  CHECK(rc<0&&m.result.status==PW_NP_OS);CHECK(m.result.phase==(role==1?PW_NP_READY:PW_NP_SETUP));
-  CHECK(m.result.api==expected_api[command]&&m.result.raw_result==m.ioctl_fail_result);
-  CHECK(m.result.native_error==(positive?0:EINVAL));CHECK(!m.fcntl_calls);
-  CHECK(m.ioctl_calls[fd]==command+1&&m.close_count[fd]==1);
-  CHECK(m.fd_flags[fd]==(0x40|(command?FD_CLOEXEC:0))&&m.file_flags[fd]==(2|8));
-  CHECK(m.setsockopt_calls==(role==1?1:0)&&m.bind_calls==(role==1?1:0)&&m.listen_calls==(role==1?1:0));
+  CHECK(role_run(role)<0&&m.result.status==PW_NP_OS);
+  CHECK(m.result.phase==(role==1?PW_NP_READY:PW_NP_SETUP));
+  CHECK(m.result.api==expected_api[command]&&m.result.raw_result==raw);
+  CHECK(m.result.native_error==(positive?0:EACCES));CHECK(!m.fcntl_calls&&!m.forbidden_fionbio_calls);
+  CHECK(m.ioctl_calls[fd]==1&&m.close_count[fd]==1);
+  CHECK(m.nbio_set_calls[fd]==(command>=1)&&m.nbio_get_calls[fd]==(command>=2)&&!m.sigpipe_calls[fd]);
+  CHECK(m.fd_flags[fd]==(0x40|(command?FD_CLOEXEC:0))&&m.file_flags[fd]==(2|8|(command==2?O_NONBLOCK:0)));
+  CHECK(m.bind_calls==(role==1?1:0)&&m.listen_calls==(role==1?1:0));
   CHECK(!m.connects&&!m.sends&&!m.receives&&!m.queues&&!m.rng_calls);
   CHECK(m.result.cleanup_failed==(unsigned)close_error);
   if(role==2){CHECK(m.worker_reports==1&&!pw_native_peer_worker_success(&m.sent_worker_report));
@@ -361,18 +399,46 @@ static int test_ioctl_contract(void)
    CHECK(m.sent_worker_report.observations==(close_error?0u:PW_NP_WORKER_CLOSED));}
   else {pw_native_peer_parent_cleanup(&m.probe,&m.result);CHECK(m.close_count[20]==1);
    CHECK(m.unlinks==(role==1));if(role==1)CHECK(m.close_count[30]==1);}
-  CHECK(m.result.api==expected_api[command]&&m.result.raw_result==m.ioctl_fail_result);
-  CHECK(m.result.native_error==(positive?0:EINVAL));
+  CHECK(m.result.api==expected_api[command]&&m.result.raw_result==raw);
+  CHECK(m.result.native_error==(positive?0:EACCES));
  }
- /* Both flags remain required if the later SIGPIPE setup fails. */
+ for(int role=0;role<3;role++)for(int malformed=0;malformed<7;malformed++)for(int close_error=0;close_error<2;close_error++){
+  reset();CHECK(!role_begin(role));int fd=role==1?30:20;m.close_errno=EBADF;if(close_error)m.close_fail=fd;
+  switch(malformed){case 0:m.nbio_length=3;break;case 1:m.nbio_length=5;break;
+   case 2:m.nbio_value=0;break;case 3:m.nbio_value=2;break;case 4:m.nbio_value=-1;break;
+   case 5:m.nbio_unwritten=1;break;case 6:m.nbio_no_effect=1;break;}
+  CHECK(role_run(role)<0&&m.result.status==PW_NP_PROTOCOL);
+  CHECK(m.result.api==PW_NP_API_GETSOCKOPT_NBIO&&m.result.raw_result==0&&!m.result.native_error);
+  CHECK(m.result.cleanup_failed==(unsigned)close_error);
+  CHECK(m.nbio_set_calls[fd]==1&&m.nbio_get_calls[fd]==1&&!m.sigpipe_calls[fd]);
+  CHECK(m.close_count[fd]==1&&!m.connects&&!m.sends&&!m.receives&&!m.queues);
+  CHECK(m.bind_calls==(role==1)&&m.listen_calls==(role==1));
+  if(role==2)CHECK(m.worker_reports==1&&!pw_native_peer_worker_success(&m.sent_worker_report));
+  else {pw_native_peer_parent_cleanup(&m.probe,&m.result);CHECK(m.close_count[20]==1);}
+ }
+ /* Verified nonblocking state does not make SIGPIPE setup optional. */
  for(int role=0;role<3;role++){
-  reset();if(role==1)CHECK(!open_parent());if(role==2)m.worker=1;
-  int fd=role==1?30:20;m.setsockopt_fail_fd=fd;
-  int rc=role==0?open_parent():role==1?exchange_parent():pw_native_peer_worker_exchange(&m.io,&m.session,&m.result);
-  CHECK(rc<0&&m.result.api==PW_NP_API_SETSOCKOPT&&m.result.native_error==EINVAL);
-  CHECK(m.ioctl_calls[fd]==2&&m.close_count[fd]==1&&!m.fcntl_calls);
+  reset();CHECK(!role_begin(role));int fd=role==1?30:20;m.setsockopt_fail_fd=fd;
+  CHECK(role_run(role)<0&&m.result.api==PW_NP_API_SETSOCKOPT&&m.result.native_error==EACCES);
+  CHECK(m.ioctl_calls[fd]==1&&m.nbio_set_calls[fd]==1&&m.nbio_get_calls[fd]==1&&m.sigpipe_calls[fd]==1);
+  CHECK(m.close_count[fd]==1&&!m.fcntl_calls&&!m.forbidden_fionbio_calls);
   CHECK(!m.connects&&!m.sends&&!m.receives&&!m.queues);
   if(role!=2)pw_native_peer_parent_cleanup(&m.probe,&m.result);
+ }
+ return 0;
+}
+static int test_socket_flag_boundaries(void)
+{
+ for(int role=0;role<3;role++)for(int step=0;step<3;step++)for(int e=1;e<=4;e++){
+  reset();CHECK(!role_begin(role));int fd=role==1?30:20;m.setup_effect_fd=fd;
+  if(!step)m.clex_effect=e;else if(step==1)m.nbio_set_effect=e;else m.nbio_get_effect=e;
+  CHECK(role_run(role)<0);
+  CHECK(m.result.status==(e==1?PW_NP_TIMEOUT:e==2?PW_NP_CANCELLED:PW_NP_CLOCK));
+  /* The finite setup calls may finish; the established caller boundary must stop further work. */
+  CHECK(m.ioctl_calls[fd]==1&&m.nbio_set_calls[fd]==1&&m.nbio_get_calls[fd]==1&&m.sigpipe_calls[fd]==1);
+  CHECK(m.close_count[fd]==1&&!m.connects&&!m.sends&&!m.receives&&!m.queues&&!m.rng_calls);
+  CHECK(m.bind_calls==(role==1)&&m.listen_calls==(role==1));
+  if(role!=2){pw_native_peer_parent_cleanup(&m.probe,&m.result);CHECK(m.close_count[20]==1);}
  }
  return 0;
 }
@@ -390,19 +456,20 @@ static int test_prepare_boundary(int worker,int cancelled)
 }
 int main(int argc,char **argv)
 {
- (void)mock_ioctl;(void)mock_fcntl;
+ (void)mock_ioctl;(void)mock_fcntl;(void)mock_getsockopt;
  if(argc>1){
   if(!strcmp(argv[1],"prepare-parent-expiry"))return test_prepare_boundary(0,0);
   if(!strcmp(argv[1],"prepare-parent-cancel"))return test_prepare_boundary(0,1);
   if(!strcmp(argv[1],"prepare-worker-expiry"))return test_prepare_boundary(1,0);
   if(!strcmp(argv[1],"prepare-worker-cancel"))return test_prepare_boundary(1,1);
-  if(!strcmp(argv[1],"ioctl"))return test_ioctl_contract();
+  if(!strcmp(argv[1],"socket-flags"))return test_socket_flag_contract();
+  if(!strcmp(argv[1],"socket-boundaries"))return test_socket_flag_boundaries();
   if(!strcmp(argv[1],"receipt"))return test_receipt();
   if(!strcmp(argv[1],"reserve"))return test_reserve();
   if(!strcmp(argv[1],"close-budget"))return test_close_budget();
   return 2;
  }
  if(test_prepare_boundary(0,0)||test_prepare_boundary(0,1)||test_prepare_boundary(1,0)||test_prepare_boundary(1,1)||
-    test_ioctl_contract()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
+    test_socket_flag_contract()||test_socket_flag_boundaries()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
  printf("native peer target-ABI pure mocks: %u checks passed; no native capabilities verified\n",checks);return 0;
 }
