@@ -15,6 +15,10 @@ presentation) is written to import almost nothing.
 from __future__ import annotations
 
 import re
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +123,72 @@ def test_agc_submit_establishes_a_suspend_point() -> None:
     assert "pw_agc_submit_and_suspend(&submit,sceAgcDriverSubmitDcb," in adapter
     assert "sceAgcSuspendPoint);" in adapter
     assert "int32_t sceAgcSuspendPoint(void)" in stub
+
+
+def test_native_suite_routes_only_selected_native_tests() -> None:
+    # Preprocess the actual title in both modes, without linking or executing it.
+    compiler = shutil.which("cc")
+    assert compiler, "host C preprocessor is required"
+    def source(multi: int) -> str:
+        result = subprocess.run([compiler, "-E", "-P", "-DPW_NATIVE_CHILD_PROBE=1",
+                                 f"-DPW_NATIVE_MULTI_PROBE={multi}", "-Iinclude", "-Isrc", "-Inative",
+                                 "native/wine64_main.c"], cwd=ROOT, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.split("static void run_launcher(void)", 1)[1].split("int main(", 1)[0]
+    suite, legacy = source(1), source(0)
+    for call in ("pw_native_suite_start((unsigned)chosen)", "pw_native_suite_available(i)",
+                 "pw_native_suite_cancel()", "pw_native_suite_tick()", "pw_native_suite_item(i)"):
+        assert call in suite, call
+        assert call not in legacy, call
+    assert "pw_native_child_probe_start()" in legacy
+    assert "pw_native_child_probe_start()" not in suite
+    assert "items[0].available = 0" not in suite
+    assert "items[0].available = 0" in legacy
+    # Execute the real preprocessed refresh block with Options help open.
+    # A successful presentation, rather than status text updates, supplies ticks.
+    for text, multi in ((suite, 1), (legacy, 0)):
+        end = text.index("uint32_t before = scene.selected;")
+        begin = (text.rindex("for (unsigned i = 0; i < PW_SUITE_COUNT; i++)", 0, end) if multi
+                 else text.rindex("if (!report_help)", 0, end))
+        block = text[begin:end]
+        prefix = """#include <assert.h>
+#include <stddef.h>
+enum { PW_SUITE_COUNT = 3 };
+static int calls;
+static int pw_native_suite_available(unsigned i) { return i != 1; }
+static void pw_native_suite_status(char *p, size_t n) { (void)p; (void)n; calls++; }
+static void pw_native_child_probe_status(char *p, size_t n) { (void)p; (void)n; calls++; }
+int main(void) {
+struct { int available; } items[3] = {{0},{0},{0}};
+char log_status[80];
+const int help_sequence[] = {1, 0, 1, 1};
+for (unsigned step = 0; step < 4; step++) {
+int dirty = 0, report_help = help_sequence[step], prior_calls = calls;
+"""
+        suffix = (f"assert(dirty == ({multi} || !report_help)); "
+                  "assert(calls == prior_calls + !report_help); } (void)items; return 0; }\n")
+        with tempfile.TemporaryDirectory(prefix="pw-native-help-") as directory:
+            binary = Path(directory) / "control"
+            result = subprocess.run([compiler, "-x", "c", "-o", str(binary), "-"],
+                                    input=prefix + block + suffix, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            result = subprocess.run([str(binary)], capture_output=True, text=True)
+            assert result.returncode == 0, (multi, result.stderr)
+
+
+def test_suite_build_requires_explicit_manual_isolation() -> None:
+    build = read("tools/build_native.sh")
+    early = build[build.index("native_mode="):build.index("helper_download=")]
+    cases = (("hello", 0, "", 0, 0), ("suite", 0, "-suite", 0, 2),
+             ("suite", 1, "", 0, 2), ("suite", 1, "-suite", 1, 2),
+             ("suite", 1, "-suite", 0, 0), ("peer-exit", 1, "-peer", 0, 0),
+             ("fd", 1, "-fd", 0, 0))
+    for mode, enabled, suffix, scripted, expected in cases:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PW_NATIVE_CHILD_MODE": mode,
+               "PW_NATIVE_CHILD_PROBE": str(enabled), "PW_OUTPUT_SUFFIX": suffix,
+               "PW_WINE64_SCRIPT": str(scripted)}
+        result = subprocess.run(["bash", "-e", "-c", early], env=env, capture_output=True, text=True)
+        assert result.returncode == expected, (mode, result.stderr)
 
 
 def main() -> int:

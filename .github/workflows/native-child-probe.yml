@@ -6,7 +6,7 @@ on:
       mode:
         description: Original native diagnostic mode
         type: choice
-        options: [hello, fd, peer-exit]
+        options: [hello, fd, peer-exit, suite]
         default: hello
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -28,11 +28,12 @@ jobs:
           (github.event.pull_request.head.repo.full_name == github.repository &&
            (contains(github.event.pull_request.labels.*.name, 'build-native-child-probe') ||
             contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe') ||
-            contains(github.event.pull_request.labels.*.name, 'build-native-peer-exit-probe'))) }}
+            contains(github.event.pull_request.labels.*.name, 'build-native-peer-exit-probe') ||
+            contains(github.event.pull_request.labels.*.name, 'build-native-diagnostics-suite'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      PW_NATIVE_CHILD_MODE: ${{ (inputs.mode == 'peer-exit' || contains(github.event.pull_request.labels.*.name, 'build-native-peer-exit-probe')) && 'peer-exit' || (inputs.mode == 'fd' || contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe')) && 'fd' || 'hello' }}
+      PW_NATIVE_CHILD_MODE: ${{ (inputs.mode == 'suite' || contains(github.event.pull_request.labels.*.name, 'build-native-diagnostics-suite')) && 'suite' || (inputs.mode == 'peer-exit' || contains(github.event.pull_request.labels.*.name, 'build-native-peer-exit-probe')) && 'peer-exit' || (inputs.mode == 'fd' || contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe')) && 'fd' || 'hello' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -46,9 +47,13 @@ jobs:
             hello) suffix=-native-child ;;
             fd) suffix=-native-fd ;;
             peer-exit) suffix=-native-peer-exit ;;
+            suite) suffix=-native-suite ;;
             *) exit 2 ;;
           esac
           printf 'PW_OUTPUT_SUFFIX=%s\n' "$suffix" >> "$GITHUB_ENV"
+          archive=native-child-probe.tar.gz
+          [[ $PW_NATIVE_CHILD_MODE != suite ]] || archive=native-diagnostics-suite.tar.gz
+          printf 'PW_NATIVE_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
       - name: Prepare supported build tools
         run: |
           sudo apt-get update
@@ -73,6 +78,15 @@ jobs:
             build/host/test_pw_native_peer_worker
             build/host/test_pw_native_peer_probe
             python3 tests/test_build_native_child_probe.py
+            python3 tests/test_native_service_converter.py
+            python3 tests/test_native_suite.py
+            make build/host/test_pw_native_socket_diagnostic build/host/test_pw_native_service_packet build/host/test_pw_native_service_packet_worker build/host/test_pw_native_service_worker build/host/test_pw_native_service_child build/host/test_pw_native_suite
+            build/host/test_pw_native_socket_diagnostic
+            build/host/test_pw_native_service_packet
+            build/host/test_pw_native_service_packet_worker
+            build/host/test_pw_native_service_worker
+            build/host/test_pw_native_service_child
+            build/host/test_pw_native_suite
           } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/host-controls.log"
       - name: Prepare exact public worker converter dependencies
         run: |
@@ -86,6 +100,18 @@ jobs:
             make -C "$foundation" deps
             printf 'PW_NATIVE_CHILD_FOUNDATION=%s\n' "$foundation" >> "$GITHUB_ENV"
           } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/foundation.log"
+      - name: Retain exact public SDK source for suite provider evidence
+        if: ${{ env.PW_NATIVE_CHILD_MODE == 'suite' }}
+        run: |
+          source="$RUNNER_TEMP/native-sdk-source"
+          git init "$source"
+          git -C "$source" remote add origin https://github.com/ps5-payload-dev/sdk.git
+          git -C "$source" fetch --depth=1 origin 4eb701204fc3f8d31e84cf8ca272974e2be9c867
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = 4eb701204fc3f8d31e84cf8ca272974e2be9c867
+          mkdir -p "$RUNNER_TEMP/native-child-evidence/source"
+          git -C "$source" archive HEAD | gzip -n > "$RUNNER_TEMP/native-child-evidence/source/ps5-payload-sdk.tar.gz"
+          printf 'PW_NATIVE_SDK_SOURCE_ARCHIVE=%s\n' "$RUNNER_TEMP/native-child-evidence/source/ps5-payload-sdk.tar.gz" >> "$GITHUB_ENV"
       - name: Build and inspect original worker and probe launcher
         env:
           PW_NATIVE_CHILD_PROBE: "1"
@@ -100,6 +126,10 @@ jobs:
             test -x "dist/PPSA99995$PW_OUTPUT_SUFFIX"/native-child.self
             test ! -e "dist/PPSA99995$PW_OUTPUT_SUFFIX"/dev.conf
             cmp "build/native$PW_OUTPUT_SUFFIX"/child/native-child.self "dist/PPSA99995$PW_OUTPUT_SUFFIX"/native-child.self
+            if [[ $PW_NATIVE_CHILD_MODE == suite ]]; then
+              test -x "dist/PPSA99995$PW_OUTPUT_SUFFIX"/native-service.self
+              cmp "build/native$PW_OUTPUT_SUFFIX"/service/native-service.self "dist/PPSA99995$PW_OUTPUT_SUFFIX"/native-service.self
+            fi
           } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/build.log"
       - name: Bundle verified outputs with exact source and notices
         run: |
@@ -112,6 +142,17 @@ jobs:
           cp "build/native$PW_OUTPUT_SUFFIX"/lapy-helper-{release,manifest}.json "$stage/provenance/"
           cp "build/native$PW_OUTPUT_SUFFIX"/PW_DYNAMIC_IMPORTS.txt "$stage/provenance/"
           cp -a "build/native$PW_OUTPUT_SUFFIX"/child "$stage/provenance/worker"
+          if [[ $PW_NATIVE_CHILD_MODE == suite ]]; then
+            cp docs/NATIVE_DIAGNOSTIC_SUITE.md "$stage/README.md"
+            cp "$RUNNER_TEMP/native-child-evidence/source/ps5-payload-sdk.tar.gz" "$stage/sources/"
+            cp -a "build/native$PW_OUTPUT_SUFFIX"/service "$stage/provenance/service-worker"
+            cp -a "build/native$PW_OUTPUT_SUFFIX"/default-control "$stage/provenance/default-control"
+            cp "build/native$PW_OUTPUT_SUFFIX"/default-mode-comparison.json "$stage/provenance/"
+            cp -a "build/native$PW_OUTPUT_SUFFIX"/suite-inspection "$stage/provenance/title-inspection"
+            cp "build/native$PW_OUTPUT_SUFFIX"/llvm-pie.elf "$stage/provenance/title-inspection/title.linked.elf"
+            cp "build/native$PW_OUTPUT_SUFFIX"/eboot.elf "$stage/provenance/title-inspection/title.converted.elf"
+            cp "build/native$PW_OUTPUT_SUFFIX"/suite-inspection/native-probe-suite.json "$stage/provenance/"
+          fi
           git archive HEAD | gzip -n > "$stage/sources/prospero-win.tar.gz"
           foundation="$GITHUB_WORKSPACE/.deps/ps5-native-app-boilerplate"
           git -C "$foundation" archive HEAD | gzip -n > "$stage/sources/title-foundation.tar.gz"
@@ -120,19 +161,29 @@ jobs:
           cp "$foundation/tools/setup-native-dependencies.sh" "$stage/provenance/title-dependency-recipe.sh"
           cp "$PW_NATIVE_CHILD_FOUNDATION/tools/setup-native-dependencies.sh" "$stage/provenance/worker-dependency-recipe.sh"
           {
-            printf 'Original native two-process probe; compile/link/conversion evidence only.\n'
+            if [[ $PW_NATIVE_CHILD_MODE == suite ]]; then
+              printf 'Original native diagnostic suite; compile/link/conversion evidence only.\n'
+            else
+              printf 'Original native two-process probe; compile/link/conversion evidence only.\n'
+            fi
             printf 'Mode: %s\n' "$PW_NATIVE_CHILD_MODE"
             printf 'FD mode exchanges synthetic descriptors only; peer identity and Wine endpoint transfer are unverified.\n'
             printf 'Peer/exit mode compiles a separate credential, post-arm challenge and kernel-event diagnostic; console capability is unverified.\n'
             printf 'Console execution, platform authentication, native reaping and Windows children are unverified.\n'
             printf 'This native-only package is not a complete Wine/runtime/installer kit.\n'
+            if [[ $PW_NATIVE_CHILD_MODE == suite ]]; then
+              printf 'Suite: socket matrix, service child and legacy peer/exit; each is separately selected after title startup.\n'
+              printf 'Service helper requests exit0; native service exit/reap is unverified. Legacy peer expects exit37.\n'
+              printf 'Four direct SystemService imports are a combined-title startup gate; keep the prior peer-only archive.\n'
+              printf 'Suite identities: provenance/native-probe-suite.json\n'
+            fi
             printf 'Repository: %s\nCommit: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$(git rev-parse HEAD)"
             printf 'Run: %s/actions/runs/%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf 'Public SDK source: https://github.com/ps5-payload-dev/sdk/tree/v0.42\n'
             printf 'Lapy source/artifact identity: provenance/lapy-helper-release.json\n'
           } > "$stage/BUILD-INFO.txt"
           (cd "$stage" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
-          tar -czf "$RUNNER_TEMP/native-child-probe.tar.gz" -C "$stage" .
+          tar -czf "$RUNNER_TEMP/$PW_NATIVE_ARCHIVE" -C "$stage" .
       - name: Retain original worker files and corresponding source on failure
         if: ${{ always() }}
         run: |
@@ -140,14 +191,15 @@ jobs:
           mkdir -p "$evidence/source"
           git archive HEAD | gzip -n > "$evidence/source/prospero-win.tar.gz"
           cp LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md "$evidence/source/"
-          python3 - "build/native$PW_OUTPUT_SUFFIX"/child "$evidence/worker-files" <<'PY'
+          for role in child service default-control .; do
+          python3 - "build/native$PW_OUTPUT_SUFFIX/$role" "$evidence/${role/./title}-files" <<'PY'
           import hashlib, json, pathlib, shutil, sys
           source, target = map(pathlib.Path, sys.argv[1:])
           if source.is_symlink() or (source.exists() and not source.is_dir()):
               raise SystemExit('worker diagnostics require an owned output directory')
           target.mkdir(parents=True, exist_ok=True)
           files = {}
-          for pattern in ('*.elf', '*.self', '*.o'):
+          for pattern in ('*.elf', '*.self', '*.o', '*.cpp', '*.json', '*.h', '*.c'):
               for path in sorted(source.glob(pattern)):
                   if path.is_symlink() or not path.is_file():
                       raise SystemExit('worker diagnostic must be an owned regular file')
@@ -158,6 +210,7 @@ jobs:
                   files[path.name] = {'bytes': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
           (target / 'FILES.json').write_text(json.dumps(files, indent=2, sort_keys=True) + '\n')
           PY
+          done
       - name: Preserve actual compiler and inspection evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -167,12 +220,17 @@ jobs:
             ${{ runner.temp }}/native-child-evidence/
             build/native${{ env.PW_OUTPUT_SUFFIX }}/child/inspection/
             build/native${{ env.PW_OUTPUT_SUFFIX }}/child/native-child-build.json
+            build/native${{ env.PW_OUTPUT_SUFFIX }}/service/inspection/
+            build/native${{ env.PW_OUTPUT_SUFFIX }}/service/native-service-build.json
+            build/native${{ env.PW_OUTPUT_SUFFIX }}/default-control/inspection/
+            build/native${{ env.PW_OUTPUT_SUFFIX }}/default-mode-comparison.json
+            build/native${{ env.PW_OUTPUT_SUFFIX }}/suite-inspection/
           if-no-files-found: warn
           retention-days: 7
       - name: Upload successful original native probe
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-child-${{ env.PW_NATIVE_CHILD_MODE }}-probe-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/native-child-probe.tar.gz
+          path: ${{ runner.temp }}/${{ env.PW_NATIVE_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7

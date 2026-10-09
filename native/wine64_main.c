@@ -47,6 +47,16 @@
 #endif
 #if PW_NATIVE_CHILD_PROBE
 #include "pw_native_child_probe.h"
+#ifndef PW_NATIVE_MULTI_PROBE
+#define PW_NATIVE_MULTI_PROBE 0
+#endif
+#if PW_NATIVE_MULTI_PROBE
+#include "pw_native_suite.h"
+#define pw_native_child_probe_title pw_native_suite_title
+#define pw_native_child_probe_status pw_native_suite_status
+#define pw_native_child_probe_cancel pw_native_suite_cancel
+#define pw_native_child_probe_tick pw_native_suite_tick
+#endif
 #endif
 #include "../include/prospero_win.h"
 
@@ -745,8 +755,14 @@ static void run_launcher(void)
     }
     /* The games, then the refused profiles, listed by file as not available. */
 #if PW_NATIVE_CHILD_PROBE
+#if PW_NATIVE_MULTI_PROBE
+    for (unsigned i = 0; i < PW_SUITE_COUNT; i++)
+        items[scene.count++] = (PwLauncherItem){ pw_native_suite_item(i), "ONE ATTEMPT PER TEST. GET SAVED LOG AFTER EACH.", 1 };
+    selectable = PW_SUITE_COUNT;
+#else
     items[scene.count++] = (PwLauncherItem){ "NATIVE TWO-PROCESS PROBE", "ONE ATTEMPT. WINDOWS CHILDREN REMAIN UNSUPPORTED.", 1 };
     selectable = 1;
+#endif
 #else
     for (size_t i = 0; i < catalog_count; i++)
         items[scene.count++] = (PwLauncherItem){ catalog[i].name, catalog[i].detail, 1 };
@@ -770,6 +786,12 @@ static void run_launcher(void)
             pw_diagnostics_status(log_status, sizeof(log_status)); dirty = 1;
         }
 #if PW_NATIVE_CHILD_PROBE
+#if PW_NATIVE_MULTI_PROBE
+        for (unsigned i = 0; i < PW_SUITE_COUNT; i++)
+            items[i].available = pw_native_suite_available(i);
+        /* Keep presenting real frames even while the saved-log help is open. */
+        dirty = 1;
+#endif
         if (!report_help) {
             pw_native_child_probe_status(log_status, sizeof(log_status));
             dirty = 1;
@@ -814,11 +836,18 @@ static void run_launcher(void)
         }
 #if PW_NATIVE_CHILD_PROBE
         if (chosen >= 0) {
-            if (video_status == PW_OK && frame != MAP_FAILED)
+            if (video_status == PW_OK && frame != MAP_FAILED) {
+#if PW_NATIVE_MULTI_PROBE
+                (void)pw_native_suite_start((unsigned)chosen);
+#else
                 (void)pw_native_child_probe_start();
+#endif
+            }
             else
                 PS5LOG_LOG("PW_NATIVE_CHILD stage=refused reason=launcher-video-unavailable");
+#if !PW_NATIVE_MULTI_PROBE
             items[0].available = 0;
+#endif
             chosen = -1;
         }
 #endif

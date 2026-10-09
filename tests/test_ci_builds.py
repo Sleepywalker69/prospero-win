@@ -243,22 +243,30 @@ with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
     assert (evidence / 'later.elf.log').is_file()
 native_probe = yaml.load((ROOT / '.github/workflows/native-child-probe.yml').read_text(), Loader=yaml.BaseLoader)
 probe_job = native_probe['jobs']['native-child-probe']
-assert native_probe['on']['workflow_dispatch']['inputs']['mode']['options'] == ['hello', 'fd', 'peer-exit']
+assert native_probe['on']['workflow_dispatch']['inputs']['mode']['options'] == ['hello', 'fd', 'peer-exit', 'suite']
 assert native_probe['on']['workflow_dispatch']['inputs']['mode']['default'] == 'hello'
 assert 'build-native-fd-probe' in probe_job['if']
 assert 'build-native-peer-exit-probe' in probe_job['if']
+assert 'build-native-diagnostics-suite' in probe_job['if']
 assert 'github.event.pull_request.head.repo.full_name == github.repository' in probe_job['if']
 selection = next(step['run'] for step in probe_job['steps'] if step.get('name') ==
                  'Select isolated original diagnostic mode')
 with tempfile.TemporaryDirectory() as tmp:
     result_file = Path(tmp) / 'environment'
-    for mode, expected in (('hello', '-native-child'), ('fd', '-native-fd'), ('peer-exit', '-native-peer-exit'), ('unexpected', None)):
+    for mode, expected in (('hello', '-native-child'), ('fd', '-native-fd'), ('peer-exit', '-native-peer-exit'), ('suite', '-native-suite'), ('unexpected', None)):
         result_file.write_text('')
         result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', selection], capture_output=True, text=True,
                                 env={**os.environ, 'PW_NATIVE_CHILD_MODE': mode, 'GITHUB_ENV': str(result_file)})
         assert result.returncode == (0 if expected else 2), (mode, result.stderr)
-        assert result_file.read_text() == (f'PW_OUTPUT_SUFFIX={expected}\n' if expected else '')
+        archive = 'native-diagnostics-suite.tar.gz' if mode == 'suite' else 'native-child-probe.tar.gz'
+        assert result_file.read_text() == (f'PW_OUTPUT_SUFFIX={expected}\nPW_NATIVE_ARCHIVE={archive}\n' if expected else '')
 probe_runs = '\n'.join(step.get('run', '') for step in probe_job['steps'])
+assert '4eb701204fc3f8d31e84cf8ca272974e2be9c867' in probe_runs
+assert 'PW_NATIVE_SDK_SOURCE_ARCHIVE' in probe_runs and 'ps5-payload-sdk.tar.gz' in probe_runs
+assert 'suite-inspection/native-probe-suite.json' in probe_runs
+assert 'build/host/test_pw_native_suite' in probe_runs
+assert 'python3 tests/test_native_suite.py' in probe_runs
+
 assert 'build/host/test_pw_native_fd_controller' in probe_runs and 'build/host/test_pw_native_fd_report' in probe_runs
 assert 'build/host/test_pw_native_peer_controller' in probe_runs and 'build/host/test_pw_native_peer_protocol' in probe_runs
 for step in probe_job['steps']:
@@ -274,7 +282,8 @@ with tempfile.TemporaryDirectory(prefix='pw-native-failure-evidence-') as direct
     expected = {'worker.linked.elf': b'original linked fixture', 'worker.elf': b'original converted fixture',
                 'worker.original.self': b'original container fixture', 'native-child.self': b'final container fixture',
                 'native-child.before.elf': b'before extraction', 'native-child.after.elf': b'after extraction',
-                'worker.o': b'original compiled fixture'}
+                'worker.o': b'original compiled fixture', 'sce_module_writer.service.cpp': b'original converter source copy',
+                'native-service-build.json': b'original build record', 'native-service-build.h': b'original identity'}
     for name, content in expected.items():
         (source / name).write_bytes(content)
     def retain(destination):
@@ -299,4 +308,21 @@ with tempfile.TemporaryDirectory(prefix='pw-native-failure-evidence-') as direct
     (source / 'escape.elf').unlink(); source.rmdir()
     source.symlink_to(root, target_is_directory=True)
     assert retain(root / 'rejected-directory').returncode != 0
+# The actual default-mode comparison checks every named output independently.
+comparison = (ROOT / 'tools/build_native.sh').read_text().split("<<'PYCOMPARE'\n", 1)[1].split('\nPYCOMPARE', 1)[0]
+with tempfile.TemporaryDirectory(prefix='pw-native-default-comparison-') as directory:
+    root = Path(directory)
+    for role in ('child', 'default-control'):
+        (root / role).mkdir()
+        for name in ('worker.linked.elf', 'worker.elf', 'native-child.self'):
+            (root / role / name).write_bytes(('original ' + name).encode())
+    def compare():
+        return subprocess.run([sys.executable, '-c', comparison, str(root)], capture_output=True, text=True)
+    assert compare().returncode == 0
+    for name in ('worker.linked.elf', 'worker.elf', 'native-child.self'):
+        path = root / 'default-control' / name
+        original = path.read_bytes(); path.write_bytes(original + b'changed')
+        assert compare().returncode != 0
+        path.write_bytes(original)
+    assert compare().returncode == 0
 print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX/native artifacts")
