@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION = "30597512539e7edfde079cbcaf4a626bc0a948c5"
 SOURCES = ("native/pw_native_child_worker.c", "native/pw_native_child_protocol.c",
            "native/pw_native_child_protocol.h", "tools/build_native_child_probe.py")
+WORKER_FLAGS = ("--no-default-config", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                "-ffreestanding", "-fno-builtin", "-fPIE", "-fasynchronous-unwind-tables")
 IMPORTS = {"_exit", "getpid", "getppid", "clock_gettime", "fcntl", "poll", "read", "write", "setsockopt"}
 MAX_WORKER = 4 * 1024 * 1024
 
@@ -82,6 +84,11 @@ def streamable_self(source, target, tool, commands):
 def validate_link(path, sdk, bindir, commands):
     value, _ = elf(path, 3)
     require(entry_mapped(value), "worker entry is not executable file-backed memory")
+    sections = commands.run(bindir / "llvm-readelf", "--section-headers", "-W", path)
+    unwind = re.findall(r"^\s*\[\s*\d+\]\s+(\.eh_frame(?:_hdr)?)\s+(PROGBITS|X86_64_UNWIND)"
+                        r"\s+[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+([0-9a-fA-F]+)\b", sections, re.M)
+    require(len(unwind) == 2 and {name for name, _, _ in unwind} == {".eh_frame", ".eh_frame_hdr"} and
+            all(int(size, 16) > 0 for _, _, size in unwind), "worker lacks linked unwind records/header")
     dynamic = commands.run(bindir / "llvm-readelf", "-dW", path)
     require(re.findall(r"Shared library: \[([^\]]+)\]", dynamic) == ["libkernel.sprx"],
             "worker may depend only on the ordinary libkernel provider")
@@ -118,7 +125,8 @@ def validate_link(path, sdk, bindir, commands):
             "worker entry does not identify its original _start")
     require(not re.search(r"\b(?:__patch_init|_init_env|kernel_get_proc|kernel_set_ucred_caps)\b", symbols),
             "worker unexpectedly contains payload or libc initialization")
-    return {"needed": ["libkernel.sprx"], "imports": sorted(names), "provider_sha256": digest(provider)}
+    return {"needed": ["libkernel.sprx"], "imports": sorted(names), "provider_sha256": digest(provider),
+            "unwind_bytes": {name: int(size, 16) for name, _, size in unwind}}
 
 
 def build(args):
@@ -156,8 +164,7 @@ def build(args):
     objects = []
     for source in SOURCES[:2]:
         obj = output / (Path(source).stem + ".o")
-        commands.run(*environment, sdk / "bin/prospero-clang", "--no-default-config", "-std=c11", "-O2",
-                     "-Wall", "-Wextra", "-Werror", "-ffreestanding", "-fno-builtin", "-fPIE",
+        commands.run(*environment, sdk / "bin/prospero-clang", *WORKER_FLAGS,
                      "-DPW_NATIVE_CHILD_FREESTANDING", '-DPW_NATIVE_CHILD_BUILD_ID="' + build_id + '"',
                      "-c", ROOT / source, "-o", obj)
         objects.append(obj)

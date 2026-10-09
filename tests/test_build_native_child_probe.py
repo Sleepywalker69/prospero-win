@@ -4,7 +4,9 @@
 from pathlib import Path
 import hashlib
 import importlib.util
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +28,22 @@ def elf(kind):
 
 
 class WorkerBuildTests(unittest.TestCase):
+    def test_real_ps5_target_emits_unwind_records(self):
+        compiler = shutil.which('clang-18') or shutil.which('clang')
+        readelf = shutil.which('readelf')
+        if not compiler or not readelf:
+            self.skipTest('Clang and readelf are required for the compile-only target check')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'original.c'; obj = root / 'original.o'
+            source.write_text('extern void original_external(void);\n'
+                              'long original_worker(long value) { original_external(); return value + 1; }\n')
+            subprocess.run([compiler, '-target', 'x86_64-sie-ps5', *build.WORKER_FLAGS,
+                            '-c', str(source), '-o', str(obj)], check=True, capture_output=True, text=True)
+            frames = subprocess.run([readelf, '--debug-dump=frames', str(obj)],
+                                    check=True, capture_output=True, text=True).stdout
+            self.assertIn(' CIE', frames)
+            self.assertRegex(frames, r'FDE .*pc=')
+
     def test_only_extent_changes_and_exact_extraction_is_required(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'before.self'; target = root / 'after.self'
@@ -78,11 +96,15 @@ class WorkerBuildTests(unittest.TestCase):
                 initialization = ''
                 instruction = 'retq'
                 copy_instruction = 'retq'
+                sections = ('  [ 2] .eh_frame_hdr PROGBITS 00004000 004000 000024 00 A 0 0 4\n'
+                            '  [ 3] .eh_frame X86_64_UNWIND 00004028 004028 000040 00 A 0 0 8\n')
                 failed = False
                 def run(self, *args):
                     if self.failed:
                         raise ValueError('analyzer failed')
                     path = Path(args[-1])
+                    if '--section-headers' in args:
+                        return self.sections
                     if '-dW' in args:
                         return (f'Shared library: [{self.needed}]\n' if path == linked else
                                 'Library soname: [libkernel.sprx]\n')
@@ -100,6 +122,11 @@ class WorkerBuildTests(unittest.TestCase):
             for field, bad in (('needed', 'libkernel_web.sprx'), ('imports', build.IMPORTS | {'__error'}),
                                ('imports', build.IMPORTS - {'_exit'}), ('kind', 'OBJECT'), ('binding', 'LOCAL'),
                                ('entry', '81'), ('initialization', '__patch_init'), ('instruction', 'syscall'),
+                               ('sections', ''),
+                               ('sections', analyzer.sections.splitlines()[0]),
+                               ('sections', analyzer.sections.splitlines()[1]),
+                               ('sections', analyzer.sections.replace('000040 00 A', '000000 00 A')),
+                               ('sections', analyzer.sections + analyzer.sections),
                                ('copy_instruction', 'callq 90 <memcpy>'), ('failed', True)):
                 with self.subTest(field=field, value=bad):
                     old = getattr(analyzer, field); setattr(analyzer, field, bad)
