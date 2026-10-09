@@ -15,6 +15,15 @@ zlib dependencies. The supported worker compiler is LLVM 18. Then run:
       PW_NATIVE_CHILD_FOUNDATION=/path/to/prepared/prx-foundation \
       LLVM_CONFIG=/usr/bin/llvm-config-18 tools/build_native.sh
 
+The `hello` mode is the default probe. For the separate synthetic descriptor
+mode, add `PW_NATIVE_CHILD_MODE=fd` and use `PW_OUTPUT_SUFFIX=-native-fd`.
+Its title says **NATIVE FD CAPABILITY PROBE**. The mode and every linked source
+are part of the worker build ID and manifest; a HELLO worker cannot satisfy an
+FD-mode run. The hosted workflow accepts a manual `hello`/`fd` choice, or the
+same-repository opt-in label `build-native-child-probe`/`build-native-fd-probe`.
+The two modes produce separately named artifacts. The successful earlier
+HELLO-only checkpoint remains a distinct first test.
+
 The normal native title remains the default. A probe build requires an
 isolated output suffix and rejects unattended launcher scripting. It shows
 only the probe tile and never selects a library game. The native title still
@@ -118,6 +127,49 @@ work before entry. If the title closes, channel loss is a stop request to an
 already running worker; no independent supervisor currently proves its death.
 The inspected loader also leaves its own `/user/temp/payload_<pid>.self` file.
 This probe does not claim or implement complete loader-resource cleanup.
+
+## Optional synthetic descriptor capability mode
+
+After the three control echoes and before STOP, FD mode tests ordinary native
+AF_UNIX/SCM_RIGHTS in the title and original worker contexts. The title creates
+one fresh directory below `/data/prospero-win`, derived from its PID and the
+non-secret session correlation, with mode 0700. It opens the listener before
+uploading the fixed worker. A collision or permission failure stops the run.
+There is no stale-path deletion, alternate namespace, chmod or credential
+change to force access. The worker derives the same bounded path and never
+owns its removal. Namespace visibility and ordinary access are console gates.
+
+The exchange sends a synthetic socket endpoint with an already queued writer
+FD, verifies known bytes and forward EOF, then transfers a worker-created
+writer in reverse. It uses checked one-way socketpairs, not native `pipe()`.
+All descriptors are disposable test objects; no Wine server endpoint, file,
+section or application handle is transferred. The original Linux reference
+can establish its own host behavior only.
+
+Both roles close their owned descriptors before recording completion. The
+parent removes only its owned socket path and directory. Close, unlink or
+rmdir failure prevents a successful final result and is retained in the log;
+there is no retry after an uncertain close or directory cleanup. A process
+crash can still leave a directory, and loader-owned files are outside this
+cleanup contract. Do not delete an existing path merely to repeat the test.
+
+The descriptor phase reserves 750 ms of its existing five-second stage for a
+fixed 80-byte worker result. It does not extend the stage or fifteen-second
+whole-session deadline. The parent reads this correlated report before sending
+STOP. During the descriptor exchange the worker treats unexpected control
+readability, EOF or poll failure as cancellation. This is channel observation,
+not proof that the parent died. All clock checks share each process's existing
+monotonic history. A missing, partial, duplicated or malformed report fails.
+
+Require `PW_NATIVE_CHILD capability_complete=1`, then STOP_ACK, EOF and launcher
+progress, together with both role results in `PW_NATIVE_FD`. Parent-local
+observations and peer-reported reverse EOF are separate fields. Both independent
+roles must report their exact completed operations, matching PIDs and successful
+cleanup. A peer bit alone is insufficient. `peer_identity_verified=0` remains
+explicit even on success: these PIDs and correlations do not authenticate a
+peer. The title and worker use different startup/security contexts, so this
+finite capability test is necessary before designing an authenticated channel.
+No Windows-child or cross-process-section support is enabled by this mode.
 
 ## Remaining Windows-child gates
 
