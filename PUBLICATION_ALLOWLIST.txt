@@ -553,6 +553,7 @@ tests/test_pw_native_peer_probe.c
 tests/native_peer_fixture/peer_abi.h
 tests/native_peer_fixture/sys/socket.h
 tests/native_peer_fixture/sys/un.h
+tests/native_peer_fixture/sys/ioctl.h
 
 wine/ps5/pw_vk_spsc.c
 wine/ps5/pw_vk_spsc.h

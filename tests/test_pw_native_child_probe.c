@@ -519,7 +519,7 @@ static void test_peer_results_and_order(void)
     assert(!mock.peer_open_calls && !mock.socket_calls && !mock.rmdir_calls);
     reset(); mock.peer_open_error = 1; run(); expect_failed(EIO);
     assert(!mock.socket_calls && mock.rmdir_calls == 1);
-    for (unsigned api = 20; api <= 23; ++api) {
+    for (unsigned api = 20; api <= 25; ++api) {
         reset(); mock.peer_open_error = 1; mock.peer_open_api = api;
         run(); expect_failed(EIO);
         assert(probe.peer_result.status == PW_NP_OS && probe.peer_result.phase == PW_NP_SETUP);
