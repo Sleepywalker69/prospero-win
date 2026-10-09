@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Compile exact composed Wine consumer bodies with pure boundary mocks.
+"""Check real Wine dependency generation and compile composed consumer mocks.
 
 Requires an already composed Wine source tree. Does not download, execute Wine,
 or implement a replacement process provider. Generated excerpts are retained.
@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 
 
@@ -30,6 +31,47 @@ def function(text, signature):
     raise AssertionError(signature)
 
 
+def check_dependency_inventory(wine, out, compiler):
+    """Run the pinned real host makedep against feature-conditional includes.
+
+    Its global-header lookup uses include/Makefile.in, even when the C feature
+    macro is off. The small input tree derives membership and bytes from the
+    fully composed source; it never substitutes a model of that lookup.
+    """
+    headers = ('wine/pw_wine_fixture_provider.h', 'wine/pw_wine_fixture_socket.h')
+    work = out / 'makedep-check'; work.mkdir()
+    source = work / 'source'
+    (source / 'include/wine').mkdir(parents=True)
+    (source / 'dlls/probe').mkdir(parents=True)
+    inventory = set((wine / 'include/Makefile.in').read_text().replace('\\\n', ' ').split())
+    for name in headers:
+        shutil.copyfile(wine / 'include' / name, source / 'include' / name)
+    (source / 'include/Makefile.in').write_text('SOURCES = ' + ' '.join(n for n in headers if n in inventory) + '\n')
+    (source / 'dlls/probe/Makefile.in').write_text('UNIXLIB = probe.so\nSOURCES = probe.c\n')
+    (source / 'dlls/probe/probe.c').write_text('#ifdef PW_WINE_SERVICE_FIXTURE\n' +
+        ''.join('#include "' + n + '"\n' for n in headers) + '#endif\nint original_probe;\n')
+    (work / 'config.h').write_text('#define __WINE_CONFIG_H\n#define HAVE_SIGPROCMASK 1\n')
+    (work / 'Makefile').write_text('srcdir = ' + str(source) + '\nHOST_ARCH = x86_64\n' +
+                                  'SUBDIRS = include dlls/probe\nLN_S = ln -s\nCC = cc\n')
+    executable = work / 'makedep'
+    commands = [shlex.split(compiler) + ['-std=gnu11', '-O2', '-I' + str(work),
+                '-I' + str(wine / 'include'), str(wine / 'tools/makedep.c'), '-o', str(executable)],
+                [str(executable)]]
+    results = []
+    for command in commands:
+        result = subprocess.run(command, cwd=work, capture_output=True, text=True)
+        results.append({'command': command, 'exit': result.returncode, 'output': result.stdout + result.stderr})
+        if result.returncode: break
+    inputs = ('tools/makedep.c', 'tools/tools.h', 'include/wine/list.h', 'include/Makefile.in') + tuple('include/' + n for n in headers)
+    (out / 'makedep-source-hashes.json').write_text(json.dumps({
+        n: hashlib.sha256((wine / n).read_bytes()).hexdigest() for n in inputs
+    }, indent=2) + '\n')
+    (out / 'makedep-result.json').write_text(json.dumps(results, indent=2) + '\n')
+    assert len(results) == 2 and results[-1]['exit'] == 0, results[-1]['output']
+    generated = (work / 'Makefile').read_text()
+    assert all(str(source / 'include' / n) in generated for n in headers), 'missing emitted header dependency'
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--wine-source", required=True, type=Path)
@@ -40,6 +82,8 @@ def main():
     args = p.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
+    args.wine_source = args.wine_source.resolve(strict=True)
+    check_dependency_inventory(args.wine_source, out, args.cc)
     paths = ["dlls/ntdll/unix/process.c", "dlls/ntdll/unix/server.c", "server/process.c", "server/ptrace.c", "dlls/ntdll/unix/thread.c", "include/wine/pw_wine_fixture_provider.h"]
     source = {n: (args.wine_source/n).read_text() for n in paths}
     (out/"source-hashes.json").write_text(json.dumps({n: hashlib.sha256((args.wine_source/n).read_bytes()).hexdigest() for n in paths}, indent=2)+"\n")
@@ -57,6 +101,8 @@ def main():
     done = proc.index("done:\n", end)
     footer_end = proc.index("    if (file_handle)", done)
     (out/"startup-result.inc").write_text(proc[done:footer_end])
+    tail_end = proc.index("    return status;\n}", footer_end) + len("    return status;\n")
+    (out/"startup-tail.inc").write_text(proc[done:tail_end])
     server = source[paths[1]]
     local = function(server, "int pw_wine_fixture_local_threads( int (*add)(long,pthread_t), void (*remove)(long) )")
     local += function(server, "static void register_inprocess_thread( int tid )")

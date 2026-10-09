@@ -1,0 +1,446 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Matched original Windows child fixture
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+concurrency:
+  group: windows-child-fixture-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+jobs:
+  original-x64-reference:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build the original AMD64 fixture with installed MSVC
+        shell: pwsh
+        run: ./tools/build_windows_child_fixture.ps1 -Arch x64 -Out "$env:RUNNER_TEMP/fixture-x64"
+      - name: Test and bind those exact Windows images
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'fixture-x64'
+          $p = Start-Process -FilePath (Join-Path $out 'parent.exe') -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $out 'reference.stdout.log') -RedirectStandardError (Join-Path $out 'reference.stderr.log')
+          if (!$p.WaitForExit(45000)) {
+            $p.Kill($true)
+            $p.WaitForExit()
+            throw 'Original Windows reference exceeded45 seconds.'
+          }
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "Original Windows reference exit $($p.ExitCode)" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'Cannot bind selected MSVC installation.' }
+          $version = (Get-Content (Join-Path $vs 'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt')).Trim()
+          $cl = Join-Path $vs "VC/Tools/MSVC/$version/bin/Hostx64/x64/cl.exe"
+          $files = @{}
+          foreach ($name in 'parent.exe', 'child.exe') {
+            $file = Join-Path $out $name
+            $files[$name] = @{bytes = (Get-Item $file).Length; sha256 = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant()}
+          }
+          $metadata = @{
+            schema = 'pw-original-windows-child-msvc/1'
+            project = @{commit = (git rev-parse HEAD).Trim(); tree = (git rev-parse 'HEAD^{tree}').Trim()}
+            architecture = 'x64'
+            compiler = @{name = 'MSVC cl.exe'; file_version = (Get-Item $cl).VersionInfo.FileVersion; sha256 = (Get-FileHash -Algorithm SHA256 $cl).Hash.ToLowerInvariant()}
+            source_sha256 = (Get-FileHash -Algorithm SHA256 tests/fixtures/windows_child_process.c).Hash.ToLowerInvariant()
+            recipe_sha256 = (Get-FileHash -Algorithm SHA256 tools/build_windows_child_fixture.ps1).Hash.ToLowerInvariant()
+            reference = @{exit = 0; deadline_seconds = 45}
+            run_id = "$env:GITHUB_RUN_ID"; run_attempt = "$env:GITHUB_RUN_ATTEMPT"; files = $files
+          }
+          $metadata | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM (Join-Path $out 'fixture-source.json')
+          Get-Content (Join-Path $out 'reference.stdout.log')
+      - name: Preserve exact original PE and reference evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: original-fixture-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-x64/
+          retention-days: 7
+          if-no-files-found: error
+  matched-runtime:
+    needs: original-x64-reference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_JOBS: "2"
+    steps:
+      - name: Initialize paths on the allocated runner
+        id: runtime-paths
+        run: |
+          printf '%s\n' \
+            "XDG_CACHE_HOME=$RUNNER_TEMP/fixture-cache" \
+            "WINE_SOURCE=$RUNNER_TEMP/wine-source" \
+            "HOST_WORK=$RUNNER_TEMP/wine-host" \
+            "WINE_WORK=$RUNNER_TEMP/wine-ps5" \
+            "TLS_WORK=$RUNNER_TEMP/wine-tls" \
+            "FOUNDATION=$RUNNER_TEMP/prx-foundation" \
+            "TITLE_FOUNDATION=$RUNNER_TEMP/title-foundation" \
+            "COHORT=$RUNNER_TEMP/source-cohort.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: original-fixture-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-x64
+      - name: Verify downloaded fixture inputs before compilation
+        id: fixture-preflight
+        run: |
+          python3 - "$RUNNER_TEMP/fixture-x64" <<'PY'
+          import hashlib, json, os, pathlib, subprocess, sys
+          root = pathlib.Path.cwd()
+          sys.path.insert(0, str(root / 'tools'))
+          from prepare_windows_child_prefix import validate_pair
+          project = {name: subprocess.check_output(['git', 'rev-parse', value], text=True).strip()
+                     for name, value in [('commit', 'HEAD'), ('tree', 'HEAD^{tree}')]}
+          pair = validate_pair(pathlib.Path(sys.argv[1]), project)
+          for field, name in [('source_sha256', 'tests/fixtures/windows_child_process.c'),
+                              ('recipe_sha256', 'tools/build_windows_child_fixture.ps1')]:
+              expected = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if pair.get(field) != expected:
+                  raise SystemExit('fixture input bytes differ: ' + name)
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-evidence'
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / 'fixture-preflight.json').write_text(json.dumps(pair, indent=2) + '\n')
+          print('Original Windows fixture bytes and producer inputs verified before compilation')
+          PY
+      - name: Select bounded build concurrency from available resources
+        id: build-resources
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          def choose_jobs(cpus, available, limits):
+              headroom = available
+              for limit, current in limits:
+                  if limit is not None:
+                      headroom = min(headroom, max(0, limit - current) if limit >= 0 and current >= 0 else 0)
+              return min(cpus, 4 if cpus >= 4 and headroom >= 12 * 1024**3 else 2)
+          cpus = max(1, int(subprocess.check_output(['nproc'], text=True)))
+          available = 0
+          for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+              if line.startswith('MemAvailable:'):
+                  available = int(line.split()[1]) * 1024
+          limits = []
+          for maximum, current in [('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+                                   ('/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes')]:
+              try:
+                  raw = pathlib.Path(maximum).read_text().strip()
+              except FileNotFoundError:
+                  continue
+              except OSError:
+                  limits.append((0, 0))
+                  continue
+              if raw == 'max':
+                  continue
+              try:
+                  limits.append((int(raw), int(pathlib.Path(current).read_text())))
+              except (OSError, ValueError):
+                  limits.append((0, 0))
+          jobs = choose_jobs(cpus, available, limits)
+          record = {'cpus': cpus, 'memory_available_bytes': available,
+                    'cgroup_limits_and_usage': limits, 'build_jobs': jobs}
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-evidence'
+          evidence.mkdir(exist_ok=True)
+          (evidence / 'build-resources.json').write_text(json.dumps(record, indent=2) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('BUILD_JOBS=' + str(jobs) + '\n')
+          print(json.dumps(record))
+          PY
+      - name: Prepare ordinary hosted prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 llvm-18-dev bison flex gcc-mingw-w64 g++-mingw-w64 pkg-config m4 patch curl wget unzip zip xvfb xauth libx11-dev libxext-dev libfreetype-dev libfontconfig-dev libvulkan-dev libgnutls28-dev libasound2-dev libpulse-dev zlib1g-dev
+          python3 -m pip install pyyaml==6.0.1
+          mkdir -p "$RUNNER_TEMP/fixture-evidence" "$XDG_CACHE_HOME"
+          printf 'PATH=/usr/lib/llvm-18/bin:%s\n' "$PATH" >> "$GITHUB_ENV"
+      - name: Fetch exact public Wine and foundation source
+        id: sources
+        run: |
+          {
+            pin=$(sed -n 's/^WINE_COMMIT=//p' tools/build_wine_ps5.sh)
+            [[ $pin == 490f6d5dcbb2a5047345b8af88d114bbcaad69a8 ]]
+            git init --quiet "$WINE_SOURCE"
+            git -C "$WINE_SOURCE" remote add origin https://github.com/wine-mirror/wine.git
+            git -C "$WINE_SOURCE" fetch --depth=1 origin "$pin"
+            git -C "$WINE_SOURCE" checkout --detach FETCH_HEAD
+            [[ $(git -C "$WINE_SOURCE" rev-parse HEAD) == "$pin" ]]
+            for selection in title prx; do
+              if [[ $selection == title ]]; then
+                destination=$TITLE_FOUNDATION
+                pin=9c0b994a048521af6fb84c73ded364504fe250e9
+              else
+                destination=$FOUNDATION
+                pin=30597512539e7edfde079cbcaf4a626bc0a948c5
+              fi
+              git init --quiet "$destination"
+              git -C "$destination" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+              git -C "$destination" fetch --depth=1 origin "$pin"
+              git -C "$destination" checkout --detach FETCH_HEAD
+              [[ $(git -C "$destination" rev-parse HEAD) == "$pin" ]]
+            done
+            sdk_source="$RUNNER_TEMP/sdk-source"
+            git init --quiet "$sdk_source"
+            git -C "$sdk_source" remote add origin https://github.com/ps5-payload-dev/sdk.git
+            git -C "$sdk_source" fetch --depth=1 origin 4eb701204fc3f8d31e84cf8ca272974e2be9c867
+            git -C "$sdk_source" checkout --detach FETCH_HEAD
+            [[ $(git -C "$sdk_source" rev-parse HEAD) == 4eb701204fc3f8d31e84cf8ca272974e2be9c867 ]]
+            git -C "$sdk_source" archive HEAD | gzip -n > "$RUNNER_TEMP/sdk-source.tar.gz"
+            git -C "$WINE_SOURCE" archive HEAD | gzip -n > "$RUNNER_TEMP/wine-source.tar.gz"
+          } 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/source-fetch.log"
+      - name: Run unchanged host aggregate
+        env:
+          PROSPERO_WINE_SOURCE: ${{ runner.temp }}/wine-source
+          PW_DISPATCH_CLANG: /usr/bin/clang-18
+        run: |
+          make -j2 all 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-all.log"
+      - name: Run unchanged sanitizer aggregate
+        if: ${{ !cancelled() && steps.sources.outcome == 'success' }}
+        env:
+          PROSPERO_WINE_SOURCE: ${{ runner.temp }}/wine-source
+          PW_DISPATCH_CLANG: /usr/bin/clang-18
+        run: |
+          make sanitize 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-sanitize.log"
+      - name: Check all private-dispatch source controls and stage the reference cohort
+        if: ${{ !cancelled() && steps.sources.outcome == 'success' }}
+        env:
+          PROSPERO_WINE_SOURCE: ${{ runner.temp }}/wine-source
+          PW_DISPATCH_CLANG: /usr/bin/clang-18
+        run: |
+          python3 tests/test_private_dispatch_contract.py 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/private-source-contract.log"
+          python3 tools/prepare_windows_child_prefix.py stage-reference --repo "$GITHUB_WORKSPACE" \
+            --wine-source "$WINE_SOURCE" --out "$RUNNER_TEMP/cohort-reference" --report "$COHORT" \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/cohort-source.log"
+      - name: Build only matching host tools for early target checks
+        run: |
+          timeout 20m env CC=clang-18 CXX=clang++-18 sh tools/build_host_wine.sh \
+            --source "$WINE_SOURCE" --work "$HOST_WORK" --jobs "$BUILD_JOBS" --tools-only \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-tools.log"
+      - name: Build public SDK converter and real TLS prerequisites
+        run: |
+          {
+            make -C "$TITLE_FOUNDATION" deps libc
+            bash "$FOUNDATION/tools/setup-native-dependencies.sh"
+            sdk="$TITLE_FOUNDATION/.deps/native/ps5-payload-sdk"
+            python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
+            printf 'PS5_PAYLOAD_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+            native="$FOUNDATION/tooling/native"
+            zroot="$FOUNDATION/.deps/native/zlib/root"
+            zarchive=$(find "$zroot" -type f -name libz.a -print -quit)
+            test -n "$zarchive"
+            mkdir -p "$FOUNDATION/build/host"
+            clang++-18 -std=c++20 -O2 -Wall -Wextra -Werror -I "$zroot/usr/include" \
+              "$native/native_app_builder.cpp" "$native/self_container.cpp" "$native/elf_object.cpp" \
+              "$native/sce_module_writer.cpp" "$zarchive" -o "$FOUNDATION/build/host/ps5-native-tool"
+            sh tools/build_tls_ps5.sh --sdk "$sdk" --work "$TLS_WORK" --jobs "$BUILD_JOBS"
+          } 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/dependencies.log"
+      - name: Compile complete experimental target units before the host runtime
+        run: |
+          env -u PS5VK_SDK -u PROSPERO_RADV -u PS5_OPENGL_SDK -u PROSPERO_CA_BUNDLE \
+            PW_WINE_PRIVATE_DISPATCH=1 PW_WINE_SERVICE_FIXTURE=1 PROSPERO_TLS_ROOT="$TLS_WORK/root" CFLAGS='-O2 -g' \
+            timeout 30m sh tools/build_wine_ps5.sh --source "$WINE_SOURCE" --host-tools "$HOST_WORK/build" \
+            --foundation "$TITLE_FOUNDATION" --prx-foundation "$FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" \
+            --work "$WINE_WORK" --jobs "$BUILD_JOBS" --compile-check \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/early-target-compile.log"
+      - name: Build complete matching host Wine
+        run: |
+          timeout 180m env CC=clang-18 CXX=clang++-18 sh tools/build_host_wine.sh \
+            --source "$WINE_SOURCE" --work "$HOST_WORK" --jobs "$BUILD_JOBS" \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-wine.log"
+      - name: Retain early full host runtime and corresponding source
+        run: |
+          checkpoint="$RUNNER_TEMP/host-checkpoint"
+          mkdir -p "$checkpoint/sources" "$checkpoint/LICENSES/wine"
+          cp -a "$HOST_WORK/install/usr" "$checkpoint/host-wine"
+          cp LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md "$checkpoint/"
+          cp -a LICENSES/. "$checkpoint/LICENSES/"
+          cp "$WINE_SOURCE"/{LICENSE,COPYING.LIB,AUTHORS,NOTICES.md} "$checkpoint/LICENSES/wine/"
+          cp "$RUNNER_TEMP/wine-source.tar.gz" "$checkpoint/sources/wine.tar.gz"
+          git archive HEAD | gzip -n > "$checkpoint/sources/prospero-win.tar.gz"
+          cp "$COHORT" "$checkpoint/source-cohort.json"
+          tar -C "$checkpoint" -czf "$RUNNER_TEMP/windows-child-host-checkpoint.tar.gz" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-child-host-checkpoint-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-child-host-checkpoint.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+      - name: Build and check the complete private-dispatch Wine cohort
+        run: |
+          env -u PS5VK_SDK -u PROSPERO_RADV -u PS5_OPENGL_SDK -u PROSPERO_CA_BUNDLE \
+            PW_WINE_PRIVATE_DISPATCH=1 PW_WINE_SERVICE_FIXTURE=1 PROSPERO_TLS_ROOT="$TLS_WORK/root" CFLAGS='-O2 -g' \
+            timeout 90m sh tools/build_wine_ps5.sh --source "$WINE_SOURCE" --host-tools "$HOST_WORK/build" \
+            --foundation "$TITLE_FOUNDATION" --prx-foundation "$FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" \
+            --work "$WINE_WORK" --jobs "$BUILD_JOBS" 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/wine-prx.log"
+          python3 tools/check_wine_prx_build.py --work "$WINE_WORK" --sdk "$PS5_PAYLOAD_SDK" \
+            --foundation "$FOUNDATION" --llvm-bindir "$("$LLVM_CONFIG" --bindir)" \
+            --output "$RUNNER_TEMP/fixture-evidence/prx-inspection" 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/prx-check.log"
+          python3 tools/check_private_dispatch_abi.py --mode 1 --require-wow64 --build-work "$WINE_WORK" \
+            --llvm-readelf /usr/bin/llvm-readelf-18 --output "$RUNNER_TEMP/fixture-evidence/private-dispatch-abi.json"
+      - name: Build same-source CPU conversion input and initialize only a fresh prefix
+        run: |
+          python3 tools/prepare_windows_child_prefix.py build-cpu --repo "$GITHUB_WORKSPACE" \
+            --host-work "$HOST_WORK" --cohort "$COHORT" --out "$RUNNER_TEMP/fixture-cpu" \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/cpu-build.log"
+          timeout --kill-after=15s 5m xvfb-run -a python3 tools/prepare_windows_child_prefix.py initialize --repo "$GITHUB_WORKSPACE" \
+            --host-work "$HOST_WORK" --cohort "$COHORT" --work "$RUNNER_TEMP/fixture-prefix-work" \
+            > "$RUNNER_TEMP/fixture-initialization.log" 2>&1
+          python3 tools/prepare_windows_child_prefix.py export --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" \
+            --cohort "$COHORT" --work "$RUNNER_TEMP/fixture-prefix-work" --wine-work "$WINE_WORK" \
+            --wine-source "$WINE_SOURCE" --wine-archive "$RUNNER_TEMP/wine-source.tar.gz" \
+            --fixture "$RUNNER_TEMP/fixture-x64" --cpu-output "$RUNNER_TEMP/fixture-cpu" \
+            --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --out "$RUNNER_TEMP/fixture-console" \
+            --report "$RUNNER_TEMP/fixture-prefix.json" > "$RUNNER_TEMP/fixture-prefix-export.log" 2>&1
+      - name: Prepare a separate fresh experimental installer prefix
+        run: |
+          timeout --kill-after=15s 5m xvfb-run -a python3 tools/prepare_windows_child_prefix.py initialize-battlenet \
+            --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" --cohort "$COHORT" \
+            --work "$RUNNER_TEMP/battlenet-prefix-work" > "$RUNNER_TEMP/battlenet-initialization.log" 2>&1
+          python3 tools/prepare_windows_child_prefix.py export-battlenet --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" \
+            --cohort "$COHORT" --work "$RUNNER_TEMP/battlenet-prefix-work" --wine-work "$WINE_WORK" \
+            --wine-source "$WINE_SOURCE" --wine-archive "$RUNNER_TEMP/wine-source.tar.gz" \
+            --cpu-output "$RUNNER_TEMP/fixture-cpu" --llvm-bindir "$("$LLVM_CONFIG" --bindir)" \
+            --out "$RUNNER_TEMP/battlenet-console" --report "$RUNNER_TEMP/battlenet-prefix.json" \
+            > "$RUNNER_TEMP/battlenet-prefix-export.log" 2>&1
+      - name: Build the full-CRT child once and the matched title
+        env:
+          PW_WINE_CHILD_FIXTURE_MODE: "1"
+          PW_WINDOWS_CHILD_FIXTURE_DIR: ${{ runner.temp }}/fixture-x64
+          PW_OUTPUT_SUFFIX: -windows-child-fixture
+          PW_FOUNDATION_READY: "1"
+          PW_WINE64_SCRIPT: "0"
+          PS5_NATIVE_FOUNDATION: ${{ runner.temp }}/title-foundation
+          PW_WINE_CHILD_FOUNDATION: ${{ runner.temp }}/prx-foundation
+          PW_WINE_CHILD_RUNTIME: ${{ runner.temp }}/wine-ps5
+          PW_NATIVE_SDK_SOURCE_ARCHIVE: ${{ runner.temp }}/sdk-source.tar.gz
+          PS5LOG_DEV_CONF: ${{ runner.temp }}/no-private-dev-conf
+        run: |
+          timeout 30m bash tools/build_native.sh 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/title-build.log"
+          python3 tools/build_wine_service_child.py --check-title --work "$GITHUB_WORKSPACE" \
+            --sdk "$PS5_PAYLOAD_SDK" --foundation "$FOUNDATION" --runtime "$WINE_WORK" \
+            --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --build "$GITHUB_WORKSPACE/build/native-windows-child-fixture" \
+            --app "$GITHUB_WORKSPACE/dist/PPSA99995-windows-child-fixture" \
+            --service-work "$GITHUB_WORKSPACE/build/native-windows-child-fixture/wine-child" --fixture "$RUNNER_TEMP/fixture-x64" \
+            --sdk-source-archive "$RUNNER_TEMP/sdk-source.tar.gz" --out "$RUNNER_TEMP/fixture-evidence/title-inspection" \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/title-check.log"
+      - name: Retain corresponding sources and assemble the exact matched package
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          temp, repo = Path(os.environ['RUNNER_TEMP']), Path(os.environ['GITHUB_WORKSPACE'])
+          wine, foundation = Path(os.environ['WINE_WORK']), Path(os.environ['FOUNDATION'])
+          zlib = sorted((foundation / '.deps/native/zlib').glob('zlib-*.tar.gz'))
+          freetype = sorted((wine / 'freetype').glob('freetype-*.tar.xz'))
+          assert len(zlib) == len(freetype) == 1, 'ambiguous dependency source archives'
+          source_paths = {
+              'repo': repo, 'wine_source': Path(os.environ['WINE_SOURCE']), 'wine_archive': temp / 'wine-source.tar.gz',
+              'title_foundation': Path(os.environ['TITLE_FOUNDATION']), 'foundation': foundation,
+              'sdk_source_archive': temp / 'sdk-source.tar.gz', 'tls_work': Path(os.environ['TLS_WORK']),
+              'wine_work': wine, 'title_build': repo / 'build/native-windows-child-fixture',
+              'freetype_archive': freetype[0], 'zlib_archive': zlib[0]}
+          (temp / 'source-inputs.json').write_text(json.dumps({'schema': 'pw-windows-child-source-inputs/1',
+              'paths': {k: str(v) for k, v in source_paths.items()}}, indent=2) + '\n')
+          package_paths = {
+              'repo': repo, 'host_work': Path(os.environ['HOST_WORK']), 'wine_work': wine,
+              'cohort': Path(os.environ['COHORT']), 'prefix': temp / 'fixture-console',
+              'prefix_report': temp / 'fixture-prefix.json', 'fixture': temp / 'fixture-x64',
+              'battlenet_prefix': temp / 'battlenet-console', 'battlenet_prefix_report': temp / 'battlenet-prefix.json',
+              'cpu_output': temp / 'fixture-cpu',
+              'service_work': repo / 'build/native-windows-child-fixture/wine-child',
+              'title': repo / 'dist/PPSA99995-windows-child-fixture',
+              'title_build': repo / 'build/native-windows-child-fixture',
+              'title_report': temp / 'fixture-evidence/title-inspection/native-wine-child-title.json',
+              'sdk_source_archive': temp / 'sdk-source.tar.gz',
+              'sources_root': temp / 'retained-sources', 'sources_manifest': temp / 'retained-sources.json',
+              'wine_archive': temp / 'wine-source.tar.gz', 'sdk': Path(os.environ['PS5_PAYLOAD_SDK']),
+              'foundation': foundation, 'llvm_bindir': Path('/usr/lib/llvm-18/bin')}
+          (temp / 'package-inputs.json').write_text(json.dumps({'schema': 'pw-windows-child-package-inputs/1', 'battlenet_enabled': True,
+              'run_url': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+              'paths': {k: str(v) for k, v in package_paths.items()}}, indent=2) + '\n')
+          PY
+          python3 tools/package_windows_child_fixture.py retain-sources --inputs "$RUNNER_TEMP/source-inputs.json" \
+            --out "$RUNNER_TEMP/retained-sources" --report "$RUNNER_TEMP/retained-sources.json" \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/source-retention.log"
+          python3 tools/package_windows_child_fixture.py assemble --inputs "$RUNNER_TEMP/package-inputs.json" \
+            --out "$RUNNER_TEMP/windows-child-fixture" 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/assembly.log"
+          python3 tools/package_windows_child_fixture.py verify --package "$RUNNER_TEMP/windows-child-fixture/windows-child-fixture"
+          python3 tools/package_windows_child_fixture.py verify --archive "$RUNNER_TEMP/windows-child-fixture/windows-child-fixture.tar.gz"
+          cp "$RUNNER_TEMP/windows-child-fixture/ARCHIVE-CHECK.json" "$RUNNER_TEMP/fixture-evidence/"
+          sha256sum "$RUNNER_TEMP/windows-child-fixture/windows-child-fixture.tar.gz" | tee "$RUNNER_TEMP/fixture-evidence/final-archive.sha256"
+      - name: Upload the complete checked original-fixture archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-child-fixture-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-child-fixture/windows-child-fixture.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+      - name: Preserve bounded build evidence without raw prefix contents
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'fixture-evidence'
+          evidence.mkdir(exist_ok=True)
+          for variable in ('HOST_WORK', 'WINE_WORK', 'TLS_WORK'):
+              root = Path(os.environ[variable])
+              for path in sorted(root.rglob('*')) if root.is_dir() else []:
+                  if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 << 20:
+                      continue
+                  if path.name not in ('config.log', 'config.status', 'configure.log', 'make.log', 'install.log', 'report.json') and path.suffix != '.log':
+                      continue
+                  destination = evidence / 'build-logs' / variable / path.relative_to(root)
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(path, destination)
+          # The prefix auditor emits only bounded path/hash/classification metadata.
+          # Raw initialization/export logs and raw registry/prefix files stay local.
+          for kind in ('fixture', 'battlenet'):
+              prefix = Path(os.environ['RUNNER_TEMP']) / (kind + '-prefix-work')
+              for name in ('UNAPPROVED-FILES.json', 'TEXT-AUDIT.json'):
+                  path = prefix / name
+                  if path.is_file() and not path.is_symlink() and path.stat().st_size <= 32 << 20:
+                      shutil.copyfile(path, evidence / (kind + '-' + name))
+              initialization = Path(os.environ['RUNNER_TEMP']) / (kind + '-initialization.log')
+              if initialization.is_file():
+                  (evidence / (kind + '-initialization-metadata.json')).write_text(json.dumps({
+                      'bytes': initialization.stat().st_size,
+                      'sha256': hashlib.sha256(initialization.read_bytes()).hexdigest(),
+                      'raw_log_or_registry_retained': False}, indent=2) + '\n')
+          PY
+      - name: Retain unaccepted target bytes and matching public source on failure
+        if: ${{ always() }}
+        run: |
+          if [[ -f tools/retain_windows_child_failure.py ]]; then
+            python3 tools/retain_windows_child_failure.py --repo "$GITHUB_WORKSPACE" \
+              --title-foundation "$TITLE_FOUNDATION" --foundation "$FOUNDATION" --wine-work "$WINE_WORK" \
+              --tls-work "$TLS_WORK" --title-build "$GITHUB_WORKSPACE/build/native-windows-child-fixture" \
+              --wine-archive "$RUNNER_TEMP/wine-source.tar.gz" --sdk-source-archive "$RUNNER_TEMP/sdk-source.tar.gz" \
+              --out "$RUNNER_TEMP/fixture-evidence/unaccepted-build-inputs"
+          fi
+      - name: Keep exact build and inspection evidence on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-child-fixture-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-evidence/
+          retention-days: 7
+          if-no-files-found: warn

@@ -147,7 +147,12 @@ class Elf:
 
 def extract_self(data, *, module=False):
     """Recover and verify plaintext segments using the pinned signer's digest."""
-    require(32 <= len(data) <= 32 * 1024 * 1024 and data[:4] == b"\x4f\x15\x3d\x1d",
+    # The pinned converter signs modules with its default magic; workers use
+    # its alternate magic explicitly. Both carry the same bounded plaintext
+    # segment records and reconstructed digest verified below.
+    magic = data[:4]
+    require(32 <= len(data) <= 32 * 1024 * 1024 and
+            (magic == b"\x4f\x15\x3d\x1d" or (module and magic == b"\x54\x14\xf5\xee")),
             "not a bounded original native SELF")
     count = unpack("<H", data, 24)[0]
     require(0 < count <= 256, "invalid native SELF segment count")

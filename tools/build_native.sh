@@ -44,8 +44,14 @@ wine64_seconds=${PW_WINE64_SECONDS:-0}
 wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
+wine_child_fixture=${PW_WINE_CHILD_FIXTURE_MODE:-0}
 native_child_mode=${PW_NATIVE_CHILD_MODE:-hello}
 title_id=PPSA99995
+
+[[ $wine_child_fixture == 0 || $wine_child_fixture == 1 ]] || {
+    echo "PW_WINE_CHILD_FIXTURE_MODE must be 0 or 1" >&2; exit 2; }
+[[ $wine_child_fixture == 0 || ( $native_child_probe == 0 && $output_suffix == -windows-child-fixture ) ]] || {
+    echo "Wine child experiment needs its isolated output and cannot combine native probe mode" >&2; exit 2; }
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
@@ -147,6 +153,9 @@ fi
 build="$root/build/native$output_suffix"
 dist="$root/dist/$title_id$output_suffix"
 rm -rf -- "$build" "$dist"
+if [[ $wine_child_fixture == 1 ]]; then
+    rm -rf -- "$build-wine-child-title-inspection"
+fi
 mkdir -p "$build/obj" "$build/import-stubs" "$dist/sce_sys" "$dist/sce_module"
 cp "$helper_download/release.json" "$build/lapy-helper-release.json"
 cp "$helper_download/lapy-manifest.json" "$build/lapy-helper-manifest.json"
@@ -193,6 +202,35 @@ PYCOMPARE
     fi
 fi
 
+if [[ $wine_child_fixture == 1 ]]; then
+    llvm_config=${LLVM_CONFIG:-llvm-config-18}
+    llvm_bindir=$("$llvm_config" --bindir)
+    python3 "$root/tools/build_wine_service_child.py" --work "$root" --sdk "$sdk" \
+        --foundation "${PW_WINE_CHILD_FOUNDATION:?Wine child needs the pinned PRX foundation}" \
+        --runtime "${PW_WINE_CHILD_RUNTIME:?Wine child needs the matched runtime work directory}" \
+        --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
+    python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" <<'PYWINEINPUT'
+import hashlib, json, pathlib, sys
+root, build, fixture = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'tools'))
+from prepare_windows_child_prefix import validate_pair
+manifest_path = build / 'wine-child/native-wine-child-build.json'
+manifest = json.loads(manifest_path.read_text())
+pair = validate_pair(fixture.resolve(strict=True), manifest['project'])
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+if pair['source_sha256'] != sha(root / 'tests/fixtures/windows_child_process.c') or pair['recipe_sha256'] != sha(root / 'tools/build_windows_child_fixture.ps1'):
+    raise SystemExit('original fixture source or recipe differs')
+child_sha = pair['files']['child.exe']['sha256']
+record = {'schema':'pw-windows-child-title-inputs/1','project':manifest['project'],
+          'mode':1,'define':'PW_WINE_CHILD_FIXTURE_MODE=1','fixture_child_sha256':child_sha,
+          'build_script_sha256':sha(root / 'tools/build_native.sh'),
+          'service_manifest_sha256':sha(manifest_path)}
+(build / 'wine-child-title-inputs.json').write_text(json.dumps(record, indent=2) + '\n')
+(build / 'wine-child-title-config.h').write_text('#define PW_WINE_FIXTURE_CHILD_SHA256 "' + child_sha + '"\n')
+PYWINEINPUT
+    common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -I"$build" -I"$build/wine-child")
+fi
+
 sources=(
     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
     native/pw_agc_submit_lifecycle.c native/pw_videoout_ps5.c native/pw_data_mount.c
@@ -215,6 +253,11 @@ if [[ $native_child_probe == 1 ]]; then
                   native/pw_native_service_child.c native/pw_native_service_packet.c)
     fi
 fi
+if [[ $wine_child_fixture == 1 ]]; then
+    sources+=(native/pw_wine_child_title.c native/pw_wine_fixture_owner.c
+              native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c
+              native/pw_native_child_protocol.c wine/ps5/pw_wine_fixture_socket.c)
+fi
 objects=()
 for source in "${sources[@]}"; do
     object="$build/obj/${source//\//_}.o"
@@ -228,6 +271,10 @@ if [[ $native_child_probe == 1 ]]; then
         "${cc[@]}" -std=c11 "${common[@]}" -c "$build/service/native-service-image.c" -o "$build/obj/native-service-image.o"
         objects+=("$build/obj/native-service-image.o")
     fi
+fi
+if [[ $wine_child_fixture == 1 ]]; then
+    "${cc[@]}" -std=c11 "${common[@]}" -c "$build/wine-child/native-wine-child-image.c" -o "$build/obj/native-wine-child-image.o"
+    objects+=("$build/obj/native-wine-child-image.o")
 fi
 "${cc[@]}" -std=c11 "${common[@]}" \
     -include "$root/native/ps5log/ps5log_ps5_net.h" \
@@ -273,6 +320,9 @@ if [[ $native_child_probe == 1 ]]; then
         cp "$build/service/native-service.self" "$build/service/native-service-build.json" "$dist/"
     fi
 fi
+if [[ $wine_child_fixture == 1 ]]; then
+    cp "$build/wine-child/native-wine-child.self" "$build/wine-child/native-wine-child-build.json" "$dist/"
+fi
 # The console refuses to start a title whose eboot lacks execute permission
 # (exec fails with EACCES) and its loader refuses a PRX without it ("mount
 # flag / attribute error"), so mark both here. An FTP upload may still reset
@@ -304,6 +354,15 @@ if [[ $native_child_mode == suite ]]; then
     python3 "$root/tools/check_native_suite.py" --build "$build" --app "$dist" \
         --sdk "$sdk" --llvm-bindir "$llvm_bindir" --out "$build/suite-inspection" \
         --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?suite needs the pinned SDK source archive}"
+fi
+
+if [[ $wine_child_fixture == 1 ]]; then
+    python3 "$root/tools/build_wine_service_child.py" --check-title --work "$root" --sdk "$sdk" \
+        --foundation "$PW_WINE_CHILD_FOUNDATION" --runtime "$PW_WINE_CHILD_RUNTIME" \
+        --build "$build" --app "$dist" --service-work "$build/wine-child" \
+        --fixture "$PW_WINDOWS_CHILD_FIXTURE_DIR" --llvm-bindir "$llvm_bindir" \
+        --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?Wine child needs the pinned SDK source archive}" \
+        --out "$build-wine-child-title-inspection"
 fi
 
 sha256sum "$build/eboot.elf" "$dist/eboot.bin"

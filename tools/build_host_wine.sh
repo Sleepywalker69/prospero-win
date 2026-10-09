@@ -15,7 +15,7 @@
 # about 300 MB stripped against 1.5 GB with debug information.
 #
 # Usage:
-#   tools/build_host_wine.sh [--source DIR] [--work DIR] [--jobs N]
+#   tools/build_host_wine.sh [--source DIR] [--work DIR] [--jobs N] [--tools-only]
 # prints the installed wine's path last. --source is a checkout of Wine that
 # has WINE_COMMIT (default .deps/wine/source, as build_wine_ps5.sh).
 set -eu
@@ -24,6 +24,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source_dir=${PROSPERO_WINE_SOURCE:-$root/.deps/wine/source}
 work=${PROSPERO_HOST_WINE_WORK:-$root/.deps/wine-host}
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+tools_only=0
 
 fail() { echo "build_host_wine: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
@@ -31,6 +32,7 @@ while [ $# -gt 0 ]; do
     --source) source_dir=$2; shift ;;
     --work) work=$2; shift ;;
     --jobs) jobs=$2; shift ;;
+    --tools-only) tools_only=1 ;;
     *) fail "unknown argument $1" ;;
     esac
     shift
@@ -66,9 +68,17 @@ cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
 cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
     fail "cannot stage shared-input ABI"
 
+# Keep the native bridge includes available to Wine makedep in desktop mode.
+for unit in pw_d3d9_window.c pw_d3d9_window.h pw_d3d9_window_driver.c pw_d3d9_window_driver.h; do
+    cp "$root/wine/ps5/$unit" "$tree/dlls/win32u/$unit" || fail "cannot stage bridge window adapter"
+done
+
 configure_args="--prefix=/usr --enable-archs=i386,x86_64 --disable-tests"
 stamp=$({ printf '%s\n' "$commit" "$configure_args"
-          for patch in $ordered; do cat "$patches/$patch"; done; } | sha256sum | cut -c1-64)
+          for patch in $ordered; do cat "$patches/$patch"; done
+          for unit in pw_d3d9_window.c pw_d3d9_window.h pw_d3d9_window_driver.c pw_d3d9_window_driver.h; do
+              cat "$root/wine/ps5/$unit"
+          done; } | sha256sum | cut -c1-64)
 build=$work/build
 if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$build"
@@ -81,6 +91,14 @@ fi
 # What the PC's Wine could not find is worth knowing: an installer without
 # X11 or FreeType shows nothing, and without Vulkan DXVK cannot be tried.
 grep -E "^configure: (WARNING|OpenGL|Vulkan)|won't be supported" "$work/configure.log" || true
+# Configure once, then build Wine's own tools for early target compilation.
+if [ "$tools_only" = 1 ]; then
+    make -C "$build" -j"$jobs" __tooldeps__ > "$work/tools.log" 2>&1 ||
+        fail "host build tools failed; see $work/tools.log"
+    printf '%s\n' '{"schema":"pw-wine-build-stage/1","stage":"host-tools","complete_runtime":false}' > "$work/tools-only.json"
+    echo "host tools compiled; full runtime build and installation pending"
+    exit 0
+fi
 make -C "$build" -j"$jobs" > "$work/make.log" 2>&1 || fail "the build failed; see $work/make.log"
 
 install=$work/install

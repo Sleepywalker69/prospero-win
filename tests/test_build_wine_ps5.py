@@ -85,6 +85,7 @@ make() {
 def main() -> int:
     check_tls_reporting()
     check_vk_runtime_staging()
+    check_vk_runtime_staging(ROOT / "tools/build_host_wine.sh")
     check_patched_pe_staging()
     # The committed series itself.
     result = subprocess.run(["sh", str(SCRIPT), "--check-patches"], capture_output=True, text=True)
@@ -189,9 +190,12 @@ def check_tls_reporting() -> None:
         assert result.returncode == 0, result.stderr
 
 
-def check_vk_runtime_staging() -> None:
-    text = SCRIPT.read_text()
-    block = text.split('# Stage Vulkan batching', 1)[1].split('# The PS5 OpenGL SDK', 1)[0]
+def check_vk_runtime_staging(script=SCRIPT) -> None:
+    text = script.read_text()
+    if script.name == "build_host_wine.sh":
+        block = text.split("# The series includes sources", 1)[1].split("configure_args=", 1)[0]
+    else:
+        block = text.split('# Stage Vulkan batching', 1)[1].split('# The PS5 OpenGL SDK', 1)[0]
     block = block[block.index('python3'):]
     with tempfile.TemporaryDirectory() as directory:
         base = Path(directory)
@@ -237,6 +241,8 @@ def check_vk_runtime_staging() -> None:
         helper.write_text('raise SystemExit(9)\n')
         result = subprocess.run(['sh'], input=setup + block, env=env, capture_output=True, text=True)
         assert result.returncode == 29, result.stderr
+    if script != SCRIPT:
+        return
     # The fingerprint covers both producer and replay sources and the staging
     # recipe; otherwise an old generated Makefile can omit a newly added unit.
     stamp = text.split('stamp=$(\n', 1)[1].split('build=$work/build', 1)[0]

@@ -134,15 +134,22 @@ diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
      if (file_handle) NtClose( file_handle );
      if (process_info) NtClose( process_info );
      if (process_handle) NtClose( process_handle );
-@@ -965,6 +1026,12 @@
+@@ -965,6 +1026,19 @@
      free( winedebug );
      free( unix_name );
      free( nt_name.Buffer );
 +#ifdef PW_WINE_SERVICE_FIXTURE
 +    /* SIGQUIT must not strand native leases or skip the terminal callback.
 +     * Restore only after the admission/result and owned local cleanup. */
-+    if (fixture_masked && pthread_sigmask( SIG_SETMASK, &fixture_old_mask, NULL ))
-+        fatal_error( "cannot restore fixture process-creation signal mask\n" );
++    if (fixture_masked)
++    {
++        int mask_error = pthread_sigmask( SIG_SETMASK, &fixture_old_mask, NULL );
++        if (mask_error)
++        {
++            ERR( "cannot restore fixture process-creation signal mask: %d\n", mask_error );
++            abort_thread( 1 );
++        }
++    }
 +#endif
      return status;
  }
@@ -450,6 +457,17 @@ diff --git a/server/ptrace.c b/server/ptrace.c
      if (thread->unix_tid != -1)
      {
          ret = tkill( thread->unix_pid, thread->unix_tid, sig );
+diff --git a/include/Makefile.in b/include/Makefile.in
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1145,6 +1145,7 @@
+ 	wine/ps5_mutex_word.h \
+ 	wine/ps5_sync_backend.h \
+ 	wine/ps5_sync_word.h \
++	wine/pw_wine_fixture_provider.h \
+ 	wine/rbtree.h \
+ 	wine/schrpc.idl \
+ 	wine/server.h \
 diff --git a/include/wine/pw_wine_fixture_provider.h b/include/wine/pw_wine_fixture_provider.h
 new file mode 100644
 --- /dev/null

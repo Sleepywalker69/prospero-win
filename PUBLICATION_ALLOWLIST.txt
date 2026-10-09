@@ -920,3 +920,18 @@ native/pw_wine_child_title.c
 native/pw_wine_child_title.h
 tests/test_pw_wine_child_title.c
 tests/wine_child_title_fixture/native-wine-child-build.h
+.github/workflows/windows-child-fixture.yml
+docs/WINDOWS_CHILD_FIXTURE_BUILD.md
+tests/test_battlenet_prefix.py
+tests/test_package_windows_child_fixture.py
+tests/test_windows_child_failure_retention.py
+tests/test_windows_child_package.py
+tests/test_wine_child_integration.py
+tests/test_wine_service_child_build.py
+tools/build_wine_service_child.py
+tools/package_windows_child_fixture.py
+tools/portable_prefix_audit.py
+tools/prepare_windows_child_prefix.py
+tools/retain_windows_child_failure.py
+# Exact checkout policy for the two original Windows fixture inputs.
+.gitattributes
