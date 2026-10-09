@@ -3,7 +3,9 @@
 """Archive identity, malformed inputs, and bounded opt-in producer contracts."""
 from pathlib import Path
 import json
+import os
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -86,6 +88,48 @@ class ArchiveTests(unittest.TestCase):
             notice.unlink(); notice.symlink_to(outside)
             with self.assertRaisesRegex(ValueError, 'symlink leaves'):
                 radv.licence_path(source, notice)
+
+    def test_readable_upstream_scripts_run_through_bash_and_keep_guards(self):
+        workflow = yaml.load((ROOT / '.github/workflows/radv-archive.yml').read_text(), Loader=yaml.BaseLoader)
+        step = next(s for s in workflow['jobs']['radv-archive']['steps']
+                    if s.get('name', '').startswith('Build the pinned'))
+        lines = [line.strip() for line in step['run'].splitlines()
+                 if line.strip().startswith(('PS5_PAYLOAD_SDK_FORK=', 'PS5_MESA_FORK='))]
+        self.assertEqual(len(lines), 2)
+        self.assertIn('bash tools/setup-native-dependencies.sh', lines[0])
+        self.assertIn('bash tools/build-radv.sh release', lines[1])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'upstream source'; tools = source / 'tools'; tools.mkdir(parents=True)
+            setup = tools / 'setup-native-dependencies.sh'; build = tools / 'build-radv.sh'
+            setup.write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
+                             '[[ $PS5_PAYLOAD_SDK_FORK == "$INPUTS/payload" && $BUILD_JOBS == 4 ]]\n'
+                             'if [[ ${FIXTURE_FAIL:-0} == 1 ]]; then echo "fixture guard failure" >&2; exit 37; fi\n'
+                             'printf "setup\\n" >> "$TRACE"\n')
+            build.write_text('#!/usr/bin/env bash\nset -euo pipefail\n'
+                             '[[ $1 == release && $PS5_MESA_FORK == "$INPUTS/mesa" ]]\n'
+                             '[[ $MESON == "$VENV/bin/meson" && $NINJA == "$RUNNER_TEMP/ninja-bounded" ]]\n'
+                             'printf "build\\n" >> "$TRACE"\n')
+            setup.chmod(0o644); build.chmod(0o644)
+            trace = root / 'trace'
+            env = dict(os.environ, INPUTS=str(root), VENV=str(root / 'venv'), RUNNER_TEMP=str(root), TRACE=str(trace))
+            def run(commands, fail=False):
+                return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', '\n'.join(commands)],
+                                      cwd=source, env=dict(env, FIXTURE_FAIL='1' if fail else '0'),
+                                      capture_output=True, text=True)
+            before = run([line.replace(' bash tools/', ' tools/') for line in lines])
+            self.assertEqual(before.returncode, 126)
+            self.assertIn('Permission denied', before.stderr)
+            self.assertFalse(trace.exists())
+            result = run(lines)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(trace.read_text(), 'setup\nbuild\n')
+            trace.unlink()
+            guarded = run(lines, fail=True)
+            self.assertEqual(guarded.returncode, 37)
+            self.assertIn('fixture guard failure', guarded.stderr)
+            self.assertFalse(trace.exists())
+            self.assertEqual(setup.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(build.stat().st_mode & 0o777, 0o644)
 
     def test_workflow_keeps_explicit_boundaries(self):
         workflow = yaml.load((ROOT / '.github/workflows/radv-archive.yml').read_text(), Loader=yaml.BaseLoader)

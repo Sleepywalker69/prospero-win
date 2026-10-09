@@ -119,8 +119,8 @@ jobs:
         chmod +x "$RUNNER_TEMP/ninja-bounded"
         {
           cd "$vulkan"
-          PS5_PAYLOAD_SDK_FORK="$INPUTS/payload" BUILD_JOBS=4 tools/setup-native-dependencies.sh
-          PS5_MESA_FORK="$INPUTS/mesa" MESON="$VENV/bin/meson" NINJA="$RUNNER_TEMP/ninja-bounded" tools/build-radv.sh release
+          PS5_PAYLOAD_SDK_FORK="$INPUTS/payload" BUILD_JOBS=4 bash tools/setup-native-dependencies.sh
+          PS5_MESA_FORK="$INPUTS/mesa" MESON="$VENV/bin/meson" NINJA="$RUNNER_TEMP/ninja-bounded" bash tools/build-radv.sh release
         } 2>&1 | tee "$RUNNER_TEMP/radv-evidence/build.log"
     - name: Require actual archive members symbols and provenance before publication
       timeout-minutes: 10
