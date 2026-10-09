@@ -96,7 +96,7 @@ static int prepare(int fd, PwNativePeerResult *r)
     int on=0;socklen_t length=sizeof(on);api(r,PW_NP_API_GETSOCKOPT_NBIO);
     rc=getsockopt(fd,SOL_SOCKET,PW_NATIVE_PEER_SO_NBIO,&on,&length);
     if(rc)return fail(r,PW_NP_OS,rc);
-    if(length!=sizeof(on) || on!=1)return fail(r,PW_NP_PROTOCOL,rc);
+    if(length!=sizeof(on) || on==0)return fail(r,PW_NP_PROTOCOL,rc);
 #if defined(__FreeBSD__) || defined(__PROSPERO__) || defined(PW_NATIVE_PEER_TEST_ABI)
     api(r,PW_NP_API_SETSOCKOPT);
     rc=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));

@@ -360,6 +360,29 @@ static int role_begin(int role)
 { if(role==1)return open_parent();if(role==2)m.worker=1;return 0; }
 static int role_run(int role)
 { return role==0?open_parent():role==1?exchange_parent():pw_native_peer_worker_exchange(&m.io,&m.session,&m.result); }
+/* Ordinary SO_NBIO callers interpret a successful integer getter as boolean.
+ * Source: ProsperoEden bf3ee7d8/headless/update_check/console_curl.c:121-127.
+ * Nonzero masks are valid true values; this does not prove firmware support. */
+static int test_nbio_true(int role,int value)
+{
+ reset();CHECK(!role_begin(role));m.nbio_value=value;
+ int rc=role_run(role),fd=role==1?30:20;
+ fprintf(stderr,"nbio boolean role=%d value=0x%08x rc=%d status=%d\n",role,(unsigned)value,rc,m.result.status);
+ CHECK(!rc&&!m.result.status&&!m.result.native_error);
+ CHECK(m.nbio_set_calls[fd]==1&&m.nbio_get_calls[fd]==1&&m.sigpipe_calls[fd]==1);
+ CHECK(!m.fcntl_calls&&!m.forbidden_fionbio_calls);
+ if(role!=2)pw_native_peer_parent_cleanup(&m.probe,&m.result);
+ CHECK(m.close_count[20]==1);if(role==1)CHECK(m.close_count[30]==1);
+ if(role==2)CHECK(m.worker_reports==1&&pw_native_peer_worker_success(&m.sent_worker_report));
+ return 0;
+}
+static int test_nbio_boolean_values(void)
+{
+ const int values[]={1,2,4,0x1200,INT32_MIN,-1};
+ for(int role=0;role<3;role++)for(unsigned i=0;i<sizeof(values)/sizeof(values[0]);i++)
+  if(test_nbio_true(role,values[i]))return 1;
+ return 0;
+}
 static int test_socket_flag_contract(void)
 {
  _Static_assert(sizeof(int)==4&&SO_NBIO==0x1200&&SOL_SOCKET==0xffff,"target socket option ABI");
@@ -405,7 +428,11 @@ static int test_socket_flag_contract(void)
  for(int role=0;role<3;role++)for(int malformed=0;malformed<7;malformed++)for(int close_error=0;close_error<2;close_error++){
   reset();CHECK(!role_begin(role));int fd=role==1?30:20;m.close_errno=EBADF;if(close_error)m.close_fail=fd;
   switch(malformed){case 0:m.nbio_length=3;break;case 1:m.nbio_length=5;break;
-   case 2:m.nbio_value=0;break;case 3:m.nbio_value=2;break;case 4:m.nbio_value=-1;break;
+   case 2:m.nbio_value=0;break;
+   /* Previously-rejected 2/-1 are exercised as true above. Even true values
+    * still fail with zero/oversized returned lengths. */
+   case 3:m.nbio_value=2;m.nbio_length=0;break;
+   case 4:m.nbio_value=-1;m.nbio_length=-1;break;
    case 5:m.nbio_unwritten=1;break;case 6:m.nbio_no_effect=1;break;}
   CHECK(role_run(role)<0&&m.result.status==PW_NP_PROTOCOL);
   CHECK(m.result.api==PW_NP_API_GETSOCKOPT_NBIO&&m.result.raw_result==0&&!m.result.native_error);
@@ -458,6 +485,12 @@ int main(int argc,char **argv)
 {
  (void)mock_ioctl;(void)mock_fcntl;(void)mock_getsockopt;
  if(argc>1){
+  for(int role=0;role<3;role++){
+   char name[48];snprintf(name,sizeof(name),"nbio-mask-role-%d",role);
+   if(!strcmp(argv[1],name))return test_nbio_true(role,0x1200);
+   snprintf(name,sizeof(name),"nbio-highbit-role-%d",role);
+   if(!strcmp(argv[1],name))return test_nbio_true(role,INT32_MIN);
+  }
   if(!strcmp(argv[1],"prepare-parent-expiry"))return test_prepare_boundary(0,0);
   if(!strcmp(argv[1],"prepare-parent-cancel"))return test_prepare_boundary(0,1);
   if(!strcmp(argv[1],"prepare-worker-expiry"))return test_prepare_boundary(1,0);
@@ -470,6 +503,6 @@ int main(int argc,char **argv)
   return 2;
  }
  if(test_prepare_boundary(0,0)||test_prepare_boundary(0,1)||test_prepare_boundary(1,0)||test_prepare_boundary(1,1)||
-    test_socket_flag_contract()||test_socket_flag_boundaries()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
+    test_nbio_boolean_values()||test_socket_flag_contract()||test_socket_flag_boundaries()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
  printf("native peer target-ABI pure mocks: %u checks passed; no native capabilities verified\n",checks);return 0;
 }
