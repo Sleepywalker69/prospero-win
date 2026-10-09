@@ -43,11 +43,13 @@ already verified RADV SDK remains the target SDK. Matched LLVM 18 tools and
 upstream link recipe. Package versions, compiler versions and builtins digest
 are retained in TOOLCHAIN.txt.
 
-The unchanged `tools/link_radv_prx.sh` from the accepted source archive compiles
-the owned wrapper, export descriptor and AGC import-stub sources, links the
-verified Mesa/platform/C++ archives, then converts/signs the homebrew container.
-The consumer first proves that the recipe, descriptor generator/header,
-wrapper and unwind linker script match its current checkout. It does not
+The reviewed consumer's `tools/link_radv_prx.sh` compiles the driver bridge,
+ordinary temporary-file helper, export descriptor and AGC import-stub sources,
+links the verified Mesa/platform/C++ archives, then converts/signs the homebrew
+container. Preparation retains the original producer sources separately and
+records a fresh consumer source snapshot. The descriptor, bridge and unwind
+inputs still match the producer; the explicit link/helper repair is bound to
+the current clean consumer commit and its recorded file hashes. It does not
 invent replacement stubs or rename providers to make the gate pass.
 
 ## Independent single-module gate
@@ -63,7 +65,7 @@ invent replacement stubs or rename providers to make the gate pass.
   runtime; forbidden kernel-system/WebKit aliases always fail
 - every function import bound to a FUNC in the first selected provider;
   unresolved or private exports and unsupported TLS/data imports fail
-- the same four explicit SDK system-data globals and zero-addend R64/GLOB_DAT
+- the original four explicit SDK system-data globals and zero-addend R64/GLOB_DAT
   relocation rules, with writes inside writable LOAD memory; no extra data
   imports are automatically accepted
 - nonempty checked disassembly with no syscall, sysenter or int 0x80 instruction
@@ -110,3 +112,36 @@ controls, stability and shutdown before any compatibility claim. No console or
 vendor/account action is part of this workflow. See [hardware validation](HARDWARE_VALIDATION.md)
 and [third-party licensing](../THIRD_PARTY.md); the linked platform code carries
 GPL terms and its complete matching sources/notices remain bundled.
+
+## Ordinary temporary files
+
+The first actual driver link reached conversion but imported `mkstemp` from
+`libScePosixForWebKit.sprx`; that provider remains forbidden. The production
+RADV link now wraps `mkstemp` with an original helper using ordinary exclusive
+`open` and the pinned platform's `ps5_arc4random_uniform(uint32_t)` ABI. It
+requires the final six template characters to be X, bounds paths by `PATH_MAX`,
+creates a real read/write file with mode0600, retries only collisions up to1000
+attempts, and returns other errno values unchanged. Prefix characters before
+the final six Xs remain intact. The caller owns a returned descriptor, including
+zero; no post-open operation can introduce a cleanup failure. No process-wide
+umask change, chmod window, fake descriptor or temporary-file disabling is used.
+
+Host controls use owned files and deterministic entropy to cover malformed and
+truncated templates,0600 creation under permissive umask, read/write/close
+ownership, existing files and symlinks, collision exhaustion, noncollision
+errors and simultaneous exclusive creation. The actual post-repair driver must
+still pass the independent provider/import/container gate; a host control does
+not establish console path access or GPU presentation.
+
+The separate graphics checker still rejects the four newly observed locale data
+imports. This runtime repair alone does not make the complete driver gate pass;
+their ABI contract requires separate review.
+
+The accepted archive keeps its original producer source identity. The driver
+link now executes this reviewed consumer checkout's recipe and helper; it no
+longer claims byte-identical runtime link inputs from the original producer.
+Preparation archives and records the consumer repository, commit, tree and all
+six link-input hashes. Before linking and before packaging, those bytes, the
+clean Git identity and the early source archive are rechecked. Successful and
+failed artifacts retain this matching source snapshot alongside the unchanged
+RADV producer sources and notices.

@@ -170,6 +170,33 @@ class RadvPrxTests(unittest.TestCase):
             self.assertIn('not an accepted driver',record['scope'])
             self.assertEqual(len(record['omitted']),2)
 
+    def test_repaired_link_is_bound_to_clean_consumer_source_and_archived_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); consumer=root/'consumer'; work=root/'work'; work.mkdir()
+            for name in prepare.LINK_INPUTS:
+                path=consumer/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(name)
+            status=''; commit='a'*40; tree='b'*40
+            def git(root,*args):
+                if args[0]=='status':return status
+                return tree if args[-1]=='HEAD^{tree}' else commit
+            def archive(root,path):path.write_bytes(b'exact consumer source archive')
+            with patch.object(prepare,'ROOT',consumer),patch.object(prepare,'git',git),patch.object(prepare,'archive',archive):
+                value=prepare.snapshot_consumer(work,'https://github.com/Sleepywalker69/prospero-win')
+                (work/'INPUTS-VERIFIED.json').write_text(json.dumps({'link_consumer':value}))
+                self.assertEqual(prepare.verify_consumer(work)['commit'],commit)
+                for name in prepare.LINK_INPUTS:
+                    path=consumer/name;old=path.read_bytes();path.write_bytes(old+b'changed')
+                    with self.subTest(file=name),self.assertRaises(ValueError):prepare.verify_consumer(work)
+                    path.write_bytes(old)
+                status=' M tools/link_radv_prx.sh'
+                with self.assertRaises(ValueError):prepare.verify_consumer(work)
+                status='';commit='c'*40
+                with self.assertRaises(ValueError):prepare.verify_consumer(work)
+                commit='a'*40;tree='d'*40
+                with self.assertRaises(ValueError):prepare.verify_consumer(work)
+                tree='b'*40;(work/'consumer-source.tar.gz').write_bytes(b'changed')
+                with self.assertRaises(ValueError):prepare.verify_consumer(work)
+
     def test_real_system_provider_identity_is_required(self):
         with tempfile.TemporaryDirectory() as tmp:
             f=Fixture(Path(tmp))
@@ -193,8 +220,9 @@ class RadvPrxTests(unittest.TestCase):
         self.assertEqual(job['timeout-minutes'],'35');self.assertEqual(job['runs-on'],'ubuntu-24.04')
         self.assertIn('head.repo.full_name == github.repository',job['if'])
         runs='\n'.join(s.get('run','') for s in job['steps'])
-        for required in ('libclang-rt-18-dev','bash "$work/link-project/tools/link_radv_prx.sh"',
-                         'tools/check_radv_prx.py','--skip-sdk',str(prepare.ARTIFACT)):
+        for required in ('libclang-rt-18-dev','bash tools/link_radv_prx.sh',
+                         'tools/check_radv_prx.py','--skip-sdk','verify-consumer',
+                         'build/host/test_pw_radv_mkstemp',str(prepare.ARTIFACT)):
             self.assertIn(required,runs)
         for forbidden in ('build_wine_ps5.sh','build-radv.sh release','--force','continue-on-error'):
             self.assertNotIn(forbidden,runs)

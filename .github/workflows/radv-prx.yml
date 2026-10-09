@@ -52,6 +52,8 @@ jobs:
             sha256sum "$builtins"
           } > "$RUNNER_TEMP/radv-prx-inputs/TOOLCHAIN.txt"
           python3 tests/test_radv_prx.py
+          make build/host/test_pw_radv_mkstemp
+          build/host/test_pw_radv_mkstemp
           make audit check-whitespace
       - name: Verify and restore the exact accepted RADV prerequisite
         env:
@@ -66,7 +68,8 @@ jobs:
           python3 tools/prepare_radv_prx.py prepare --work "$RUNNER_TEMP/radv-prx" \
             --zip "$RUNNER_TEMP/radv-prx-inputs/prerequisite.zip" \
             --run-json "$RUNNER_TEMP/radv-prx-inputs/run.json" \
-            --artifact-json "$RUNNER_TEMP/radv-prx-inputs/artifact.json"
+            --artifact-json "$RUNNER_TEMP/radv-prx-inputs/artifact.json" \
+            --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           cp "$RUNNER_TEMP/radv-prx-inputs/TOOLCHAIN.txt" "$RUNNER_TEMP/radv-prx/"
       - name: Build the exact public converter using its pinned zlib source
         timeout-minutes: 10
@@ -91,12 +94,13 @@ jobs:
               -o "$foundation/build/host/ps5-native-tool"
             sha256sum "$foundation/build/host/ps5-native-tool"
           } 2>&1 | tee "$RUNNER_TEMP/radv-prx-evidence/converter.log"
-      - name: Run the unchanged production driver link and independent gate
+      - name: Run the source-bound repaired driver link and independent gate
         timeout-minutes: 12
         run: |
           {
             work="$RUNNER_TEMP/radv-prx"
-            bash "$work/link-project/tools/link_radv_prx.sh" "$work/radv" "$work/prx" \
+            python3 tools/prepare_radv_prx.py verify-consumer --work "$work"
+            bash tools/link_radv_prx.sh "$work/radv" "$work/prx" \
               "$work/foundation/build/host/ps5-native-tool" "$work/foundation/tooling/native/ps5-pie.ld"
             python3 tools/check_radv_prx.py --work "$work/prx" \
               --sdk "$work/radv/.deps/native/ps5-payload-sdk" --foundation "$work/foundation" \

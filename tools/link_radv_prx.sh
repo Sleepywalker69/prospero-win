@@ -48,6 +48,8 @@ for name in libSceAgc libSceAgcDriver; do
 done
 "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$install/include" \
     -c "$root/wine/ps5/pw_vulkan_radv.c" -o "$work/obj/pw_vulkan_radv.o"
+"$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
+    -c "$root/wine/ps5/pw_radv_mkstemp.c" -o "$work/obj/pw_radv_mkstemp.o"
 python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
     vkGetInstanceProcAddr vkGetDeviceProcAddr pw_videoout_idle pw_videoout_show_tiled pw_videoout_cursor
 "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
@@ -55,9 +57,9 @@ python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
 
 "$sdk/bin/prospero-lld" --shared -Bsymbolic -T "$pie" -T "$root/wine/ps5/prx_eh_frame.ld" \
     --eh-frame-hdr -T "$work/build/mesa_optional_zero.ld" -soname libvulkan.prx -z defs \
-    --wrap=sceVideoOutOpen \
+    --wrap=sceVideoOutOpen --wrap=mkstemp \
     --warn-unresolved-symbols -o "$prx/libvulkan.shared.elf" \
-    "$work/obj/pw_vulkan_radv.o" "$work/obj/libvulkan_desc.o" \
+    "$work/obj/pw_vulkan_radv.o" "$work/obj/pw_radv_mkstemp.o" "$work/obj/libvulkan_desc.o" \
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" \
     "${radv_link_flags[@]}" "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so > "$log" 2>&1

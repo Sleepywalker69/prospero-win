@@ -27,6 +27,32 @@ PAYLOAD = '95c08f27386fc698f6bbe21dde3030140a41d10b'
 FOUNDATION = '30597512539e7edfde079cbcaf4a626bc0a948c5'
 ZLIB_SHA = 'bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16'
 MEMBER = 'radv-archive-prerequisite.tar.gz'
+LINK_INPUTS = ('tools/link_radv_prx.sh', 'tools/gen_prx_descriptor.py',
+               'wine/ps5/pw_vulkan_radv.c', 'wine/ps5/prx_eh_frame.ld',
+               'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_radv_mkstemp.c')
+
+
+def snapshot_consumer(work, repo):
+    require(not git(ROOT, 'status', '--porcelain'), 'consumer source checkout is dirty')
+    value = {'repository': repository(repo), 'commit': git(ROOT, 'rev-parse', 'HEAD'),
+             'tree': git(ROOT, 'rev-parse', 'HEAD^{tree}'),
+             'link_inputs': {name: sha(ROOT / name) for name in LINK_INPUTS}}
+    archive(ROOT, work / 'consumer-source.tar.gz')
+    value['source_archive_sha256'] = sha(work / 'consumer-source.tar.gz')
+    return value
+
+
+def verify_consumer(work):
+    value = json.loads((work / 'INPUTS-VERIFIED.json').read_text())['link_consumer']
+    require(not git(ROOT, 'status', '--porcelain') and
+            git(ROOT, 'rev-parse', 'HEAD') == value['commit'] and
+            git(ROOT, 'rev-parse', 'HEAD^{tree}') == value['tree'], 'link consumer identity changed')
+    require(set(value['link_inputs']) == set(LINK_INPUTS) and
+            all(sha(ROOT / name) == value['link_inputs'][name] for name in LINK_INPUTS),
+            'link consumer source bytes changed')
+    require(sha(work / 'consumer-source.tar.gz') == value['source_archive_sha256'],
+            'link consumer source archive changed')
+    return value
 
 
 def relative(name):
@@ -114,13 +140,16 @@ def prepare(args):
     copy_owned_tree(inputs / 'producer/radv-release', radv / '.deps/native/radv-release')
     require((radv / '.deps/native/ps5-payload-sdk/.ps5-sdk-revision').read_text().strip() == PAYLOAD,
             'restored SDK identity differs')
-    # Current consumer changes must not alter the existing runtime link recipe.
-    for name in ('tools/link_radv_prx.sh', 'tools/gen_prx_descriptor.py',
-                 'wine/ps5/pw_vulkan_radv.c', 'wine/ps5/prx_eh_frame.ld', 'wine/ps5/pw_wine_prx.h'):
-        require(sha(ROOT / name) == sha(args.work / 'link-project' / name), 'runtime link input changed: ' + name)
+    # The immutable archive remains the baseline. The reviewed local link
+    # repair executes from this checkout, with its own exact source identity.
+    for name in LINK_INPUTS[1:-1]:
+        require(sha(ROOT / name) == sha(args.work / 'link-project' / name),
+                'unrelated runtime link input changed: ' + name)
+    consumer = snapshot_consumer(args.work, args.repository)
     (args.work / 'INPUTS-VERIFIED.json').write_text(json.dumps({
         'run': RUN, 'head': HEAD, 'artifact': ARTIFACT, 'zip_sha256': ZIP_SHA,
         'archive_sha256': ARCHIVE_SHA, 'producer_project': manifest['project'],
+        'link_consumer': consumer, 'link_recipe_scope': 'reviewed consumer mkstemp repair over immutable producer inputs',
         'layout_restored_from': {'radv_source': 'producer/vulkan-source.tar',
                                  'sdk': 'producer/ps5-payload-sdk', 'archive': 'producer/radv-release'},
         'old_absolute_paths_are_descriptive_only': True}, indent=2) + '\n')
@@ -176,7 +205,10 @@ def collect_failure(args):
                             'reason': 'binary SDK is bound in the accepted input artifact; matching SDK source archives retained'})
                         continue
                     retain(path, str(path.relative_to(args.work / 'inputs')))
-    archive(ROOT, args.out / 'sources/driver-consumer.tar.gz')
+    if (args.work / 'consumer-source.tar.gz').is_file():
+        retain(args.work / 'consumer-source.tar.gz', 'sources/driver-consumer.tar.gz')
+    else:
+        archive(ROOT, args.out / 'sources/driver-consumer.tar.gz')
     for name in ('LICENSE', 'NOTICE.md', 'THIRD_PARTY.md'):
         shutil.copy2(ROOT / name, args.out / name)
     if args.foundation and (args.foundation / '.git').exists():
@@ -188,6 +220,7 @@ def collect_failure(args):
 
 def package(args):
     require(not args.out.exists(), 'package output already exists')
+    consumer = verify_consumer(args.work)
     checks = json.loads((args.work / 'inspection/CHECKS.json').read_text())
     verify_checked_graph(args.work, checks)
     require(git(args.foundation, 'rev-parse', 'HEAD') == FOUNDATION, 'converter source pin differs')
@@ -199,7 +232,7 @@ def package(args):
     copy_owned_tree(args.work / 'inputs/sources', out / 'sources')
     copy_owned_tree(args.work / 'inputs/LICENSES', out / 'LICENSES')
     archive(args.foundation, out / 'sources/prx-foundation.tar.gz')
-    archive(ROOT, out / 'sources/driver-consumer.tar.gz')
+    shutil.copy2(args.work / 'consumer-source.tar.gz', out / 'sources/driver-consumer.tar.gz')
     for name in ('LICENSE', 'NOTICE.md', 'THIRD_PARTY.md'):
         shutil.copy2(ROOT / name, out / name)
     shutil.copy2(ROOT / 'docs/RADV_PRX_CI.md', out / 'README.md')
@@ -207,8 +240,8 @@ def package(args):
     shutil.copy2(args.work / 'TOOLCHAIN.txt', out / 'TOOLCHAIN.txt')
     checks['packaged_prx_mode'] = '0o755'
     checks['converter_sha256'] = sha(args.foundation / 'build/host/ps5-native-tool')
-    checks['consumer'] = {'repository': repository(args.repository), 'commit': git(ROOT, 'rev-parse', 'HEAD'),
-                          'tree': git(ROOT, 'rev-parse', 'HEAD^{tree}')}
+    require(repository(args.repository) == consumer['repository'], 'consumer repository differs')
+    checks['consumer'] = consumer
     checks['source_archive_sha256'] = {p.name: sha(p) for p in (out / 'sources').iterdir() if p.is_file()}
     (out / 'MANIFEST.json').write_text(json.dumps(checks, indent=2, sort_keys=True) + '\n')
     (out / 'SHA256SUMS').write_text(''.join(f'{sha(p)}  {p.relative_to(out).as_posix()}\n'
@@ -217,14 +250,16 @@ def package(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('prepare', 'package', 'failure'))
+    parser.add_argument('mode', choices=('prepare', 'verify-consumer', 'package', 'failure'))
     parser.add_argument('--work', type=Path, required=True)
     for name in ('zip', 'run-json', 'artifact-json', 'foundation', 'out'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--repository')
     args = parser.parse_args(); args.work = args.work.resolve()
     if args.mode == 'prepare':
-        require(all((args.zip, args.run_json, args.artifact_json)), 'prepare inputs missing'); prepare(args)
+        require(all((args.zip, args.run_json, args.artifact_json, args.repository)), 'prepare inputs missing'); prepare(args)
+    elif args.mode == 'verify-consumer':
+        verify_consumer(args.work)
     elif args.mode == 'package':
         require(all((args.foundation, args.out, args.repository)), 'package inputs missing'); package(args)
     else:
