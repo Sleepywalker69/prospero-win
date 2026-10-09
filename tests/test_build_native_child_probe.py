@@ -28,6 +28,42 @@ def elf(kind):
 
 
 class WorkerBuildTests(unittest.TestCase):
+    def test_only_pinned_unmapped_sie_note_may_be_zeroed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); original = root / 'worker.elf'; recovered = root / 'extracted.elf'
+            value = bytearray(elf(0xFE10))
+            struct.pack_into('<Q', value, 24, 240)
+            struct.pack_into('<H', value, 56, 3)
+            struct.pack_into('<IIQQQQQQ', value, 120, 0x6fffff01, 0, 256, 0, 0, 16, 16, 1)
+            struct.pack_into('<IIQQQQQQ', value, 176, 4, 0, 272, 0, 0, 24, 0, 4)
+            value += b'version-records!' + struct.pack('<III4s', 4, 8, 3, b'SIE\0') + b'build-id'
+            self.assertEqual(len(value), 296)
+            for abi in (0, 3, 9):
+                value[7] = abi; original.write_bytes(value)
+                expected = bytearray(value); expected[7] = 9; expected[-24:] = bytes(24)
+                recovered.write_bytes(expected)
+                result = build.verify_reconstruction(original, recovered)
+                self.assertEqual(result['zeroed_unmapped_sie_note']['bytes'], 24)
+            # Byte/header/version corruption, an unzeroed tail, and truncation
+            # remain rejected; this is not a generic non-LOAD exemption.
+            for location in (7, 24, 128, 240, 256, 272, 295):
+                bad = bytearray(expected); bad[location] ^= 1; recovered.write_bytes(bad)
+                with self.subTest(offset=location), self.assertRaises(ValueError):
+                    build.verify_reconstruction(original, recovered)
+            recovered.write_bytes(expected[:-1])
+            with self.assertRaises(ValueError):
+                build.verify_reconstruction(original, recovered)
+            # A tail that overlaps a LOAD, has storage semantics, or names a
+            # different note cannot use the pinned omission rule.
+            for offset, fmt, replacement in ((96, '<Q', 296), (220, '<I', 1),
+                                              (224, '<Q', 8), (284, '<I', 0x00554e47)):
+                bad = bytearray(value); struct.pack_into(fmt, bad, offset, replacement)
+                if offset == 96:
+                    struct.pack_into('<Q', bad, 104, replacement)  # valid larger LOAD, overlapping the note
+                original.write_bytes(bad); recovered.write_bytes(expected)
+                with self.subTest(header_offset=offset), self.assertRaises(ValueError):
+                    build.verify_reconstruction(original, recovered)
+
     def test_real_ps5_target_emits_unwind_records(self):
         compiler = shutil.which('clang-18') or shutil.which('clang')
         readelf = shutil.which('readelf')

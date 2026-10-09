@@ -81,6 +81,39 @@ def streamable_self(source, target, tool, commands):
             "extracted_elf_sha256": after_digest}
 
 
+def verify_reconstruction(converted, recovered):
+    """Match the pinned sign/extract contract, including its exact SIE tail.
+
+    sce_module_writer emits a final 24-byte, unmapped SIE build-ID PT_NOTE.
+    self_container does not select that segment; extract retains its header
+    and reconstructs those bytes as zeros. No LOAD, version record, mapped
+    GNU note, other metadata or padding is excluded from the comparison.
+    """
+    original, _ = elf(converted, 0xFE10)
+    extracted, _ = elf(recovered, 0xFE10)
+    require(len(original) == len(extracted), "SELF reconstruction changed executable extent")
+    offset = struct.unpack_from("<Q", original, 32)[0]
+    size, count = struct.unpack_from("<HH", original, 54)
+    headers = [struct.unpack_from("<IIQQQQQQ", original, offset + size * i) for i in range(count)]
+    tails = [(index, start) for index, (kind, flags, start, address, physical, length, memory, align)
+             in enumerate(headers) if kind == 4 and flags == 0 and address == physical == memory == 0 and
+             length == 24 and align == 4 and start + length == len(original) and
+             original[start:start + 16] == struct.pack("<III4s", 4, 8, 3, b"SIE\0")]
+    require(len(tails) == 1, "converted worker lacks the unique pinned SIE tail note")
+    index, start = tails[0]
+    require(start >= offset + size * count and all(
+        other == index or not header[5] or header[2] + header[5] <= start or header[2] >= start + 24
+        for other, header in enumerate(headers)), "SIE tail overlaps another program segment")
+    expected = bytearray(original)
+    if expected[7] in (0, 3):
+        expected[7] = 9  # The pinned signer's documented OSABI normalization.
+    expected[start:start + 24] = bytes(24)
+    require(extracted == expected, "SELF reconstruction changed bytes outside the pinned SIE note normalization")
+    return {"osabi_before": original[7], "osabi_after": extracted[7],
+            "zeroed_unmapped_sie_note": {"offset": start, "bytes": 24,
+                                          "original_sha256": hashlib.sha256(original[start:]).hexdigest()}}
+
+
 def validate_link(path, sdk, bindir, commands):
     value, _ = elf(path, 3)
     require(entry_mapped(value), "worker entry is not executable file-backed memory")
@@ -180,17 +213,15 @@ def build(args):
             "conversion changed the original worker entry")
     commands.run(tool, "self", "--sign", "--in", converted, "--out", original, "--magic", "0x1D3D154F")
     framing = streamable_self(original, final, tool, commands)
-    # The signer reconstructs the native ELF; require the complete actual
-    # conversion output rather than silently dropping its version records.
-    require(final.with_suffix(".after.elf").read_bytes() == converted.read_bytes(),
-            "SELF reconstruction differs from the complete converted executable")
+    reconstruction = verify_reconstruction(converted, final.with_suffix(".after.elf"))
     manifest = {"schema": "pw-native-child-build/1", "build_id": build_id, "sources": sources,
                 "foundation_commit": FOUNDATION, "converter_sha256": digest(tool), "host_llvm": llvm,
                 "converter_sources": {path.name: digest(path) for path in sorted(native.iterdir()) if path.is_file()},
                 "layout_sha256": digest(native / "ps5-pie.ld"), "zlib_archive_sha256": digest(archives[0]),
                 "zlib_headers": tree_files(zroot / "usr/include"),
                 "sdk_wrappers": tree_files(sdk / "bin"), "sdk_headers": tree_files(sdk / "target/include"),
-                "linkage": graph, "worker": framing, "console_execution_verified": False,
+                "linkage": graph, "worker": framing, "reconstruction": reconstruction,
+                "console_execution_verified": False,
                 "windows_process_support": False, "platform_authentication_verified": False}
     (output / "native-child-build.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
     (output / "native-child-build.h").write_text('#define PW_NATIVE_CHILD_BUILD_ID "' + build_id + '"\n' +
