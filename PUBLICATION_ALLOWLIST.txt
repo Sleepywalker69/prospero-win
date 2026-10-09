@@ -549,3 +549,8 @@ tests/fixtures/d3d12_query_contract.h
 tests/fixtures/d3d12_query_contract_test.c
 tests/test_d3d12_query.py
 docs/D3D12_QUERY.md
+tools/build_d3d12_frontend.py
+tools/check_d3d12_frontend.py
+tests/test_d3d12_frontend.py
+docs/D3D12_FRONTEND_CI.md
+.github/workflows/d3d12-frontend.yml
