@@ -521,3 +521,6 @@ tests/test_check_wine_prx_build.py
 native/pw_native_child_protocol.c
 native/pw_native_child_protocol.h
 tests/test_pw_native_child_protocol.c
+native/pw_native_child_worker.c
+tools/build_native_child_probe.py
+tests/test_build_native_child_probe.py
