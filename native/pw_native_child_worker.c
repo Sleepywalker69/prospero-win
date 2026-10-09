@@ -5,8 +5,16 @@
 #ifndef PW_NATIVE_CHILD_FD_MODE
 #define PW_NATIVE_CHILD_FD_MODE 0
 #endif
+#ifndef PW_NATIVE_CHILD_PEER_MODE
+#define PW_NATIVE_CHILD_PEER_MODE 0
+#endif
+#if PW_NATIVE_CHILD_FD_MODE && PW_NATIVE_CHILD_PEER_MODE
+#error Native capability modes are mutually exclusive
+#endif
 #if PW_NATIVE_CHILD_FD_MODE
 #include "pw_native_fd_report.h"
+#elif PW_NATIVE_CHILD_PEER_MODE
+#include "pw_native_peer_probe.h"
 #endif
 #include <fcntl.h>
 #include <poll.h>
@@ -121,6 +129,15 @@ static int worker_capabilities(void *unused, PwNativeChildIo *io, const PwNative
 }
 #endif
 
+#if PW_NATIVE_CHILD_PEER_MODE
+static int worker_peer_capabilities(void *unused, PwNativeChildIo *io, const PwNativeChildFrame *frame)
+{
+    PwNativePeerResult result;
+    (void)unused;
+    return pw_native_peer_worker_exchange(io, frame, &result);
+}
+#endif
+
 static int worker_main(void)
 {
     PwNativeChildIo io = {0};
@@ -130,6 +147,8 @@ static int worker_main(void)
     io.send = worker_send;
 #if PW_NATIVE_CHILD_FD_MODE
     io.capabilities = worker_capabilities;
+#elif PW_NATIVE_CHILD_PEER_MODE
+    io.capabilities = worker_peer_capabilities;
 #endif
     if (pw_native_child_begin(&io)) return 2;
     flags = fcntl(STDIN_FILENO, F_GETFL, 0);
@@ -137,7 +156,12 @@ static int worker_main(void)
         setsockopt(STDOUT_FILENO, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one))) return 3;
     /* selfldr duplicates the accepted TCP endpoint to descriptors 0, 1 and 2;
      * the shared open-file description now has O_NONBLOCK for both I/O paths. */
-    return pw_native_child_worker(&io, (uint32_t)getpid(), (uint32_t)getppid(), worker_build) ? 4 : 0;
+    if (pw_native_child_worker(&io, (uint32_t)getpid(), (uint32_t)getppid(), worker_build)) return 4;
+#if PW_NATIVE_CHILD_PEER_MODE
+    return PW_NP_SUCCESS_EXIT;
+#else
+    return 0;
+#endif
 }
 
 /* Native executable entry ABI matches the pinned foundation's documented

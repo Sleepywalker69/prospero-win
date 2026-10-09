@@ -25,16 +25,19 @@ SOURCES = ("native/pw_native_child_worker.c", "native/pw_native_child_protocol.c
            "native/pw_native_child_protocol.h", "tools/build_native_child_probe.py")
 FD_SOURCES = ("native/pw_native_fd_probe.c", "native/pw_native_fd_report.c",
               "native/pw_native_fd_probe.h", "native/pw_native_fd_report.h")
+PEER_SOURCES = ("native/pw_native_peer_probe.c", "native/pw_native_peer_protocol.c",
+                "native/pw_native_peer_probe.h", "native/pw_native_peer_protocol.h")
 WORKER_FLAGS = ("--no-default-config", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 "-ffreestanding", "-fno-builtin", "-fPIE", "-fasynchronous-unwind-tables")
 IMPORTS = {"_exit", "getpid", "getppid", "clock_gettime", "fcntl", "poll", "read", "write", "setsockopt"}
 FD_IMPORTS = IMPORTS | {"socket", "socketpair", "connect", "close", "sendmsg", "recvmsg", "shutdown"}
+PEER_IMPORTS = IMPORTS | {"socket", "connect", "close", "sendmsg", "recvmsg"}
 MAX_WORKER = 4 * 1024 * 1024
 
 
 def mode_inputs(mode):
-    require(mode in {"hello", "fd"}, "unknown native probe mode")
-    selected = SOURCES + (FD_SOURCES if mode == "fd" else ())
+    require(mode in {"hello", "fd", "peer-exit"}, "unknown native probe mode")
+    selected = SOURCES + (FD_SOURCES if mode == "fd" else PEER_SOURCES if mode == "peer-exit" else ())
     sources = {name: digest(ROOT / name) for name in selected}
     identity = {"mode": mode, "sources": sources}
     return sources, hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:40]
@@ -126,8 +129,8 @@ def verify_reconstruction(converted, recovered):
 
 
 def validate_link(path, sdk, bindir, commands, mode="hello"):
-    require(mode in {"hello", "fd"}, "unknown native probe mode")
-    expected_imports = FD_IMPORTS if mode == "fd" else IMPORTS
+    require(mode in {"hello", "fd", "peer-exit"}, "unknown native probe mode")
+    expected_imports = FD_IMPORTS if mode == "fd" else PEER_IMPORTS if mode == "peer-exit" else IMPORTS
     value, _ = elf(path, 3)
     require(entry_mapped(value), "worker entry is not executable file-backed memory")
     sections = commands.run(bindir / "llvm-readelf", "--section-headers", "-W", path)
@@ -207,10 +210,11 @@ def build(args):
         require(re.search(r"^#define " + name + r" [1-9][0-9]*$", predefines, re.M),
                 f"worker compiler lacks genuine target macro {name}")
     objects = []
-    for source in SOURCES[:2] + (FD_SOURCES[:2] if args.mode == "fd" else ()):
+    for source in SOURCES[:2] + (FD_SOURCES[:2] if args.mode == "fd" else PEER_SOURCES[:2] if args.mode == "peer-exit" else ()):
         obj = output / (Path(source).stem + ".o")
         commands.run(*environment, sdk / "bin/prospero-clang", *WORKER_FLAGS,
                      "-DPW_NATIVE_CHILD_FREESTANDING", "-DPW_NATIVE_FD_WORKER_ONLY",
+                     "-DPW_NATIVE_PEER_WORKER_ONLY", "-DPW_NATIVE_CHILD_PEER_MODE=" + str(int(args.mode == "peer-exit")),
                      "-DPW_NATIVE_CHILD_FD_MODE=" + str(int(args.mode == "fd")), '-DPW_NATIVE_CHILD_BUILD_ID="' + build_id + '"',
                      "-c", ROOT / source, "-o", obj)
         objects.append(obj)
@@ -238,6 +242,7 @@ def build(args):
                 "windows_process_support": False, "platform_authentication_verified": False}
     (output / "native-child-build.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
     (output / "native-child-build.h").write_text('#define PW_NATIVE_CHILD_FD_MODE ' + str(int(args.mode == "fd")) + '\n' +
+                                               '#define PW_NATIVE_CHILD_PEER_MODE ' + str(int(args.mode == "peer-exit")) + '\n' +
                                                '#define PW_NATIVE_CHILD_BUILD_ID "' + build_id + '"\n' +
                                                 '#define PW_NATIVE_CHILD_SELF_SHA256 "' + framing["sha256"] + '"\n' +
                                                 '#define PW_NATIVE_CHILD_SELF_BYTES ' + str(framing["stream_extent"]) + '\n')
@@ -255,7 +260,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("sdk", "foundation", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--mode", choices=("hello", "fd"), default="hello")
+    parser.add_argument("--mode", choices=("hello", "fd", "peer-exit"), default="hello")
     try:
         build(parser.parse_args())
     except (ValueError, OSError) as error:
