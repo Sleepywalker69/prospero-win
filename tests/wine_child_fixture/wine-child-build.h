@@ -1,0 +1,5 @@
+/* Original test identity only; never package as a production manifest. */
+#define PW_WINE_CHILD_BUILD_ID "0123456789012345678901234567890123456789"
+#define PW_WINE_CHILD_NTDLL_SHA256 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+#define PW_WINE_CHILD_PRIVATE_DISPATCH_ABI 1
+#define PW_WINE_CHILD_WOW64_ABI 1
