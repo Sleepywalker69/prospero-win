@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: RADV archive prerequisite
+'on':
+  pull_request:
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - labeled
+    - unlabeled
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: radv-archive-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  radv-archive:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name
+      == github.repository && contains(github.event.pull_request.labels.*.name, 'build-radv-archive')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      INPUTS: ${{ github.workspace }}/.deps/radv-archive/inputs
+      VENV: ${{ github.workspace }}/.deps/radv-archive/venv
+      CC: clang-18
+      CXX: clang++-18
+      LLVM_CONFIG: /usr/bin/llvm-config-18
+      PS5_CLANG: clang-18
+      LC_ALL: C
+      TZ: UTC
+      SOURCE_DATE_EPOCH: '1000000000'
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      with:
+        python-version: '3.12'
+    - name: Install matched host prerequisites and require producer contracts
+      timeout-minutes: 15
+      run: |
+        mkdir -p "$RUNNER_TEMP/radv-evidence"
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 llvm-18-dev \
+          libclang-18-dev libclang-cpp18-dev libllvmspirvlib-18-dev spirv-tools zlib1g-dev \
+          cmake ninja-build pkg-config rsync curl wget unzip git python3-venv bison flex
+        python3 -m venv "$VENV"
+        "$VENV/bin/pip" install meson==1.7.2 Mako==1.3.10 MarkupSafe==3.0.2 packaging==24.2 PyYAML==6.0.1
+        printf '%s\n' "$VENV/bin" /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+        {
+          dpkg-query -W
+          "$VENV/bin/pip" freeze
+          /usr/lib/llvm-18/bin/clang --version
+          /usr/lib/llvm-18/bin/llvm-config --version
+          pkg-config --modversion LLVMSPIRVLib SPIRV-Tools
+          pkg-config --atleast-version=18.1 LLVMSPIRVLib
+          pkg-config --max-version=18.1.999 LLVMSPIRVLib
+          pkg-config --atleast-version=2024.1 SPIRV-Tools
+        } 2>&1 | tee "$RUNNER_TEMP/radv-evidence/toolchain.log"
+        "$VENV/bin/python" tests/test_radv_archive_ci.py
+        make audit check-whitespace
+    - name: Fetch exact public source and checked original downloads
+      timeout-minutes: 20
+      run: |
+        python3 - "$INPUTS" <<'PYCODE'
+        from pathlib import Path
+        import subprocess, sys, urllib.request
+        sys.path.insert(0, 'tools')
+        from package_radv_archive import PINS, DOWNLOADS, sha, require
+        root = Path(sys.argv[1]); root.mkdir(parents=True)
+        for name, (url, commit) in PINS.items():
+            path = root / name
+            subprocess.run(['git', 'init', '--quiet', str(path)], check=True)
+            subprocess.run(['git', '-C', str(path), 'remote', 'add', 'origin', url + '.git'], check=True)
+            subprocess.run(['git', '-C', str(path), 'fetch', '--depth=1', 'origin', commit], check=True)
+            subprocess.run(['git', '-C', str(path), 'checkout', '--detach', 'FETCH_HEAD'], check=True)
+            actual = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
+            require(actual == commit, 'source pin mismatch: ' + name)
+        (root / 'downloads').mkdir()
+        for name, (url, digest) in DOWNLOADS.items():
+            path = root / 'downloads' / name
+            with urllib.request.urlopen(url, timeout=90) as response, path.open('wb') as output:
+                total = 0
+                while chunk := response.read(1024 * 1024):
+                    total += len(chunk)
+                    require(total <= 512 * 1024 * 1024, 'oversized download: ' + name)
+                    output.write(chunk)
+            require(sha(path) == digest, 'download hash mismatch: ' + name)
+        PYCODE
+        python3 tools/package_radv_archive.py sources --inputs "$INPUTS" \
+          --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/radv-sources"
+        tar -czf "$RUNNER_TEMP/radv-sources.tar.gz" -C "$RUNNER_TEMP/radv-sources" .
+    - name: Retain verified source and licence checkpoint before compilation
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: radv-sources-${{ github.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/radv-sources.tar.gz
+        if-no-files-found: error
+        retention-days: 3
+    - name: Build the pinned platform SDK and RADV release archive
+      timeout-minutes: 140
+      run: |
+        vulkan="$INPUTS/vulkan"
+        mkdir -p "$vulkan/.deps/native/zlib" "$vulkan/.deps/work/radv-src/subprojects/packagecache"
+        cp "$INPUTS/downloads/ps5-payload-sdk.zip" "$vulkan/.deps/native/"
+        cp "$INPUTS/downloads/zlib-1.3.2.tar.gz" "$vulkan/.deps/native/zlib/"
+        cp "$INPUTS/downloads/zlib-1.3.1.tar.gz" "$INPUTS/downloads/zlib_1.3.1-1_patch.zip" \
+          "$vulkan/.deps/work/radv-src/subprojects/packagecache/"
+        cat > "$RUNNER_TEMP/ninja-bounded" <<'SCRIPT'
+        #!/usr/bin/env bash
+        exec /usr/bin/ninja -j4 "$@"
+        SCRIPT
+        chmod +x "$RUNNER_TEMP/ninja-bounded"
+        {
+          cd "$vulkan"
+          PS5_PAYLOAD_SDK_FORK="$INPUTS/payload" BUILD_JOBS=4 tools/setup-native-dependencies.sh
+          PS5_MESA_FORK="$INPUTS/mesa" MESON="$VENV/bin/meson" NINJA="$RUNNER_TEMP/ninja-bounded" tools/build-radv.sh release
+        } 2>&1 | tee "$RUNNER_TEMP/radv-evidence/build.log"
+    - name: Require actual archive members symbols and provenance before publication
+      timeout-minutes: 10
+      run: |
+        python3 tools/package_radv_archive.py archive --inputs "$INPUTS" \
+          --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --llvm-bindir /usr/lib/llvm-18/bin \
+          --out "$RUNNER_TEMP/radv-prerequisite" 2>&1 | tee "$RUNNER_TEMP/radv-evidence/package.log"
+        (cd "$RUNNER_TEMP/radv-prerequisite" && sha256sum --check SHA256SUMS)
+        tar -czf "$RUNNER_TEMP/radv-archive-prerequisite.tar.gz" -C "$RUNNER_TEMP/radv-prerequisite" .
+    - name: Upload checked archive prerequisite only after all build checks
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: radv-archive-prerequisite-${{ github.sha }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/radv-archive-prerequisite.tar.gz
+        if-no-files-found: error
+        retention-days: 7
+    - name: Preserve configuration and compiler logs after any outcome
+      if: ${{ always() }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/radv-evidence/configuration"
+        python3 - "$INPUTS/vulkan/.deps" "$RUNNER_TEMP/radv-evidence/configuration" <<'PYCODE'
+        from pathlib import Path
+        import shutil, sys
+        root, out = map(Path, sys.argv[1:])
+        if root.exists():
+            for pattern in ('**/*.log', '**/PROVENANCE.txt', '**/.ps5-sdk-revision'):
+                for path in root.glob(pattern):
+                    if path.is_file() and path.stat().st_size <= 32 * 1024 * 1024:
+                        target = out / path.relative_to(root)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(path, target)
+        PYCODE
+    - name: Retain raw diagnostic and analyzer logs
+      if: ${{ always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: radv-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |-
+          ${{ runner.temp }}/radv-evidence/
+          ${{ runner.temp }}/radv-prerequisite/inspection/
+        if-no-files-found: warn
+        retention-days: 7
