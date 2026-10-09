@@ -65,7 +65,8 @@ invent replacement stubs or rename providers to make the gate pass.
   runtime; forbidden kernel-system/WebKit aliases always fail
 - every function import bound to a FUNC in the first selected provider;
   unresolved or private exports and unsupported TLS/data imports fail
-- the original four explicit SDK system-data globals and zero-addend R64/GLOB_DAT
+- the original four SDK system-data globals plus the four specifically reviewed
+  ordinary-libc locale objects below, and zero-addend R64/GLOB_DAT
   relocation rules, with writes inside writable LOAD memory; no extra data
   imports are automatically accepted
 - nonempty checked disassembly with no syscall, sysenter or int 0x80 instruction
@@ -113,7 +114,7 @@ vendor/account action is part of this workflow. See [hardware validation](HARDWA
 and [third-party licensing](../THIRD_PARTY.md); the linked platform code carries
 GPL terms and its complete matching sources/notices remain bundled.
 
-## Ordinary temporary files
+## Ordinary temporary files and locale data
 
 The first actual driver link reached conversion but imported `mkstemp` from
 `libScePosixForWebKit.sprx`; that provider remains forbidden. The production
@@ -133,9 +134,15 @@ errors and simultaneous exclusive creation. The actual post-repair driver must
 still pass the independent provider/import/container gate; a host control does
 not establish console path access or GPU presentation.
 
-The separate graphics checker still rejects the four newly observed locale data
-imports. This runtime repair alone does not make the complete driver gate pass;
-their ABI contract requires separate review.
+The separate graphics checker recognizes four additional libc OBJECT address
+imports: `_CurrentRuneLocale`, `_DefaultRuneLocale`, `__mb_cur_max` and
+`__mb_sb_limit`. Exact SDK declarations imply an8-byte pointer, a4224-byte
+locale object and two4-byte ints. Provider st_size0 is not firmware storage
+proof. The first actual provider must be the checked ordinary libc, and each
+actual address relocation must have supported type, zero addend and an8-byte
+write wholly within writable LOAD storage. Wrong type/provider, TLS/COPY,
+nonzero addends, absent relocations and out-of-range writes remain rejected.
+The original14-module Wine checker is unchanged.
 
 The accepted archive keeps its original producer source identity. The driver
 link now executes this reviewed consumer checkout's recipe and helper; it no

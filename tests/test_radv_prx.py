@@ -32,6 +32,9 @@ def binary(kind=3):
 class Fixture:
     def __init__(self, root):
         self.work, self.sdk, self.foundation, self.llvm, self.output = [root/x for x in ('work','sdk','foundation','llvm','evidence')]
+        self.locale_name = None; self.locale_kind = 'OBJECT'; self.locale_provider_kind = 'OBJECT'
+        self.locale_shadow = False; self.locale_addend = '0'; self.locale_reloc = 'R_X86_64_GLOB_DAT'
+        self.locale_address = '0000000000001000'; self.locale_no_reloc = False
         self.mode = ''; self.bad_export = 'module_start'; self.export_kind = 'FUNC'; self.needed = ['libkernel.sprx', 'libSceLibcInternal.sprx', 'libSceAgc.prx', 'libSceAgcDriver.prx']
         for name in ('libkernel','libSceLibcInternal'):
             p=self.sdk/'target/lib'/(name+'.so');p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(binary()+name.encode())
@@ -59,14 +62,20 @@ class Fixture:
                     if self.mode in ('data','bad-reloc','bad-range'):text+='22: 0 0 OBJECT GLOBAL DEFAULT UND environ\n'
                     if self.mode=='unknown-data':text+='22: 0 0 OBJECT GLOBAL DEFAULT UND unknown_data\n'
                     if self.mode=='tls':text+='22: 0 0 TLS GLOBAL DEFAULT UND thread_data\n'
+                    if self.locale_name:text+=f'23: 0 0 {self.locale_kind} GLOBAL DEFAULT UND {self.locale_name}\n'
                     return text
                 visibility='HIDDEN' if self.mode=='hidden-provider' else 'DEFAULT'
                 kind='OBJECT' if self.mode=='wrong-function-provider' else 'FUNC'
                 text=f'1: 0 1 {kind} GLOBAL {visibility} 1 malloc\n'
                 if name=='libkernel' and self.mode in ('data','bad-reloc','bad-range'):
                     text+='2: 0 0 OBJECT GLOBAL DEFAULT 1 environ\n'
+                if self.locale_name and (name=='libSceLibcInternal' or self.locale_shadow and name=='libkernel'):
+                    text+=f'3: 0 0 {self.locale_provider_kind} GLOBAL DEFAULT 1 {self.locale_name}\n'
                 return text
             if '-r' in argv:
+                if self.locale_name:
+                    if self.locale_no_reloc:return ''
+                    return f'{self.locale_address} 0000001700000006 {self.locale_reloc} 0 {self.locale_name} + {self.locale_addend}\n'
                 kind='R_X86_64_64' if self.mode=='bad-reloc' else 'R_X86_64_GLOB_DAT'
                 address='0000000000000000' if self.mode=='bad-range' else '0000000000001000'
                 return f'{address} 0000001600000006 {kind} 0 environ + 0\n'
@@ -113,6 +122,25 @@ class RadvPrxTests(unittest.TestCase):
                 with self.subTest(mode=mode),self.assertRaises(ValueError):f.mode=mode;f.validate()
             f.mode='';f.write('libvulkan.link.log',b'warning: undefined symbol: missing\n')
             with self.assertRaisesRegex(ValueError,'unresolved'):f.validate()
+
+    def test_exact_locale_objects_require_ordinary_first_provider_and_pointer_relocations(self):
+        import check_wine_prx_build as wine
+        names=('_CurrentRuneLocale','_DefaultRuneLocale','__mb_cur_max','__mb_sb_limit')
+        self.assertTrue(set(names).isdisjoint(wine.SYSTEM_DATA))
+        with tempfile.TemporaryDirectory() as tmp:
+            f=Fixture(Path(tmp))
+            for name in names:
+                f.locale_name=name
+                value=f.validate()['module']['system_data_imports'][name]
+                self.assertEqual(value['provider'],'libSceLibcInternal.sprx')
+                self.assertEqual(value['relocations'][0]['type'],'R_X86_64_GLOB_DAT')
+                for attr,bad in (('locale_kind','TLS'),('locale_kind','FUNC'),
+                                 ('locale_provider_kind','FUNC'),('locale_shadow',True),
+                                 ('locale_addend','8'),('locale_reloc','R_X86_64_COPY'),
+                                 ('locale_address','0000000000000000'),('locale_no_reloc',True)):
+                    old=getattr(f,attr);setattr(f,attr,bad)
+                    with self.subTest(name=name,attribute=attr),self.assertRaises(ValueError):f.validate()
+                    setattr(f,attr,old)
 
     def test_required_export_names_cannot_hide_data_or_untyped_symbols(self):
         with tempfile.TemporaryDirectory() as tmp:
