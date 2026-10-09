@@ -9,6 +9,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -274,6 +275,40 @@ int main(void) {
                 (sources/'compiler-runtime/gcc-mingw-w64-base-copyright').write_text((docs/'gcc-mingw-w64-base/copyright').read_text())
                 (sources/'compiler-runtime/GPL-3').write_text('truncated licence')
                 with self.assertRaisesRegex(ValueError,'licence text changed'):package.verify_runtime_notices(sources,docs,licenses)
+
+    def test_world_writable_installed_licences_round_trip_as_portable_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);sources=root/'sources';sources.mkdir();docs=root/'docs';libraries=root/'libraries';libraries.mkdir();licenses=root/'licenses';licenses.mkdir()
+            for name in package.COMMON_LICENSES:
+                path=licenses/name;path.write_text('original full licence '+name);path.chmod(0o777)
+            for name in package.RUNTIME_PACKAGES:
+                path=docs/name/'copyright';path.parent.mkdir(parents=True);path.write_text('runtime notice '+name)
+            for name in package.RUNTIME_LIBRARIES:(libraries/name).write_bytes(name.encode())
+            def command(argv,**kwargs):
+                if argv[0]=='dpkg-query':return argv[-1]+'\t1\tsource-package\t1\n'
+                return str(libraries/argv[1].split('=',1)[1])+'\n'
+            with patch.object(package.subprocess,'check_output',command):
+                package.collect_runtime_notices(sources,docs,licenses)
+                package.verify_runtime_notices(sources,docs,licenses)
+                for name in package.COMMON_LICENSES:
+                    copied=sources/'compiler-runtime'/name
+                    self.assertEqual(copied.read_bytes(),(licenses/name).read_bytes())
+                    self.assertEqual(stat.S_IMODE(copied.stat().st_mode),0o644)
+                    self.assertEqual(stat.S_IMODE((licenses/name).stat().st_mode),0o777)
+                # Exercise the same two packaging destinations and the standard
+                # data filter that exposed the real artifact's0777 mismatch.
+                artifact=root/'artifact'
+                package.copy_owned_tree(sources,artifact/'sources/dxvk')
+                package.copy_owned_tree(sources/'compiler-runtime',artifact/'LICENSES/compiler-runtime')
+                before=files.inventory(artifact)
+                archive=root/'artifact.tar.gz'
+                with tarfile.open(archive,'w:gz') as tar:tar.add(artifact,arcname='.')
+                restored=root/'restored'
+                package.unpack_tar(archive,restored)
+                self.assertEqual(files.inventory(restored),before)
+                bad=sources/'compiler-runtime/GPL-3';bad.chmod(0o777)
+                with self.assertRaisesRegex(ValueError,'mode changed'):
+                    package.verify_runtime_notices(sources,docs,licenses)
 
     def test_recipe_uses_only_local_hash_bound_files_and_prefix_copy_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
