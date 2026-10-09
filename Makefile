@@ -257,6 +257,8 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_native_suite.py
 	python3 tests/test_fetch_lapy_helper.py
 	python3 tests/test_package_release.py
+	python3 tests/test_private_dispatch_contract.py
+	python3 tests/test_private_dispatch_build.py
 	python3 tests/test_publish_release.py
 	python3 tests/test_x86_differential.py
 	$(BUILD)/dbt_differential < tests/fixtures/dbt_differential_forms.txt
@@ -271,6 +273,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_seh_fp_state.py
 	python3 tests/test_wine_narrow_syscall_args.py
 	python3 tests/test_wine_sched_probe.py
+	python3 tests/test_wine_watchdog_process_guard.py
 	python3 tests/test_wine_fixed_reserve.py
 	python3 tests/test_wine_process_counters.py
 	python3 tests/test_wine_processor_times.py
@@ -337,6 +340,7 @@ wine-check: test
 	python3 tests/test_wine_seh_fp_state.py
 	python3 tests/test_wine_narrow_syscall_args.py
 	python3 tests/test_wine_sched_probe.py
+	python3 tests/test_wine_watchdog_process_guard.py
 	python3 tests/test_wine_fixed_reserve.py
 	python3 tests/test_wine_process_counters.py
 	python3 tests/test_wine_processor_times.py

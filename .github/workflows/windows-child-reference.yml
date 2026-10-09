@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Windows child process reference
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - tests/fixtures/windows_child_process.c
+      - tools/build_windows_child_fixture.ps1
+      - .github/workflows/windows-child-reference.yml
+permissions:
+  contents: read
+concurrency:
+  group: windows-child-reference-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows-reference:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build original ${{ matrix.arch }} diagnostic with installed MSVC
+        shell: pwsh
+        run: ./tools/build_windows_child_fixture.ps1 -Arch "${{ matrix.arch }}" -Out "$env:RUNNER_TEMP/child-reference-${{ matrix.arch }}"
+      - name: Run actual Windows API reference with an outer deadline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'child-reference-${{ matrix.arch }}'
+          $p = Start-Process -FilePath (Join-Path $out 'parent.exe') -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $out 'reference.stdout.log') -RedirectStandardError (Join-Path $out 'reference.stderr.log')
+          if (!$p.WaitForExit(45000)) {
+            $p.Kill($true)
+            $p.WaitForExit()
+            throw 'Reference exceeded 45 seconds; no successful result is inferred.'
+          }
+          $p.WaitForExit()
+          $code = $p.ExitCode
+          Get-Content (Join-Path $out 'reference.stdout.log')
+          "reference_exit=$code" | Set-Content (Join-Path $out 'reference.exit')
+          if ($code -ne 0) { throw "Windows reference failed or remained inconclusive: $code" }
+      - name: Preserve original diagnostic artifacts and reference logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-child-reference-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/child-reference-${{ matrix.arch }}/
+          retention-days: 7
+          if-no-files-found: warn

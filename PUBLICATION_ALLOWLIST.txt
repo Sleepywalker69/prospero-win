@@ -873,3 +873,13 @@ wine/ps5/d3d9/pw_d3d9_native_gamma.h
 tests/lab/d3d9_native_gamma.c
 tests/lab/d3d9_native_gamma.py
 docs/d3d9-native-gamma.md
+tools/check_private_dispatch_abi.py
+tests/test_private_dispatch_build.py
+tests/test_private_dispatch_contract.py
+wine/patches/0910-ntdll-private-dispatcher-abi-proposal.patch
+tests/test_wine_watchdog_process_guard.py
+wine/patches/0911-server-watchdog-local-address-space.patch
+.github/workflows/windows-child-reference.yml
+tools/build_windows_child_fixture.ps1
+tests/fixtures/windows_child_process.c
+tests/fixtures/windows_child_process.md
