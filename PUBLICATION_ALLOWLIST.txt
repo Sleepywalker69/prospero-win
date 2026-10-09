@@ -527,3 +527,6 @@ tools/export_notepad_seed.py
 tests/test_notepad_seed.py
 .github/workflows/notepad-seed.yml
 docs/NOTEPAD_SEED.md
+tools/check_packaged_host_wine.py
+tests/test_packaged_host_checks.py
+.github/workflows/packaged-host-checks.yml
