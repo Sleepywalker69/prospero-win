@@ -916,3 +916,7 @@ tests/wine_child_fixture/wine-child-build.h
 native/pw_wine_fixture_owner.c
 native/pw_wine_fixture_owner.h
 tests/test_pw_wine_fixture_owner.c
+native/pw_wine_child_title.c
+native/pw_wine_child_title.h
+tests/test_pw_wine_child_title.c
+tests/wine_child_title_fixture/native-wine-child-build.h
