@@ -312,3 +312,26 @@ launch remain unverified.
 Public source contracts: [loader SELF route](https://github.com/ps5-payload-dev/elfldr/blob/02cfe91eb3f9697787460ad77d73ff951f801f50/selfldr.c),
 [native entry ABI](https://github.com/mpereiraesaa/ps5-native-app-boilerplate/blob/30597512539e7edfde079cbcaf4a626bc0a948c5/tooling/native/app_crt.cpp),
 [container conversion](https://github.com/mpereiraesaa/ps5-native-app-boilerplate/blob/30597512539e7edfde079cbcaf4a626bc0a948c5/tooling/native/self_container.cpp).
+
+## Building the separate service helper
+
+`tools/build_native_child_probe.py --mode service` builds the original finite
+fd3 SOCK_SEQPACKET helper. It does not launch a process. Its outputs are
+`native-service.self`, `native-service-build.json`, `native-service-build.h`
+and `native-service-image.c`; existing modes retain their own filenames and
+exact import sets. The service manifest uses `pw-native-service-build/1` and
+records its nine ordinary libkernel imports, source/build identity, and the
+separate converter source selection.
+
+Only this mode copies the exact pinned converter writer and adds the headless
+preload mask through an ELF relative pointer. The unchanged foundation source
+is retained. The builder checks that pointer and mask before signing and after
+SELF extraction; putting the mask directly in the pointer slot is rejected.
+The copied source, original foundation notices, intermediate ELF/SELF files and
+inspection logs must accompany build evidence. Existing-mode source selection
+is compared byte for byte; that check alone is not a compiled artifact comparison.
+
+The helper expects the service-owned fd3 mapping. Its independent entry deadline,
+packet exchange and requested exit are capability tests; build success does not
+prove service startup, descriptor inheritance, observed native exit or reaping.
+The title controller and selectable diagnostic suite are separate consumers.
