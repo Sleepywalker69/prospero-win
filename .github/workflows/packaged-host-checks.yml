@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Requires the independently reviewed export_notepad_seed.py input-verification
+# helper. This job never invokes its seed preparation/export commands.
+name: Packaged host Wine controls
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: packaged-host-controls-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  packaged-host-controls:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'check-packaged-host-wine')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install host fixture and display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-mingw-w64 g++-mingw-w64 \
+            pkg-config patch git xvfb xauth libx11-dev libxext-dev libfreetype-dev libfontconfig-dev \
+            libvulkan-dev libgnutls28-dev libasound2-dev libpulse-dev zlib1g-dev
+          mkdir -p "$RUNNER_TEMP/host-control-inputs"
+          dpkg-query -W > "$RUNNER_TEMP/host-control-inputs/packages.txt"
+          python3 tests/test_packaged_host_checks.py
+      - name: Read and verify the exact successful producer artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/Sleepywalker69/prospero-win/actions/runs/37861508535 \
+            > "$RUNNER_TEMP/host-control-inputs/run.json"
+          gh api 'repos/Sleepywalker69/prospero-win/actions/runs/37861508535/artifacts?per_page=100' \
+            > "$RUNNER_TEMP/host-control-inputs/artifacts.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11588549010/zip \
+            > "$RUNNER_TEMP/host-control-inputs/kit.zip"
+          python3 tools/check_packaged_host_wine.py prepare \
+            --kit-zip "$RUNNER_TEMP/host-control-inputs/kit.zip" \
+            --run-json "$RUNNER_TEMP/host-control-inputs/run.json" \
+            --artifacts-json "$RUNNER_TEMP/host-control-inputs/artifacts.json" \
+            --work "$RUNNER_TEMP/host-controls"
+      - name: Execute eleven original host and source controls
+        timeout-minutes: 28
+        run: |
+          python3 tools/check_packaged_host_wine.py run --work "$RUNNER_TEMP/host-controls"
+      - name: Retain every result and explicit remaining gap
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: packaged-host-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/host-controls/logs/
+            ${{ runner.temp }}/host-controls/INPUTS-VERIFIED.json
+            ${{ runner.temp }}/host-control-inputs/packages.txt
+            ${{ runner.temp }}/host-control-inputs/run.json
+            ${{ runner.temp }}/host-control-inputs/artifacts.json
+          if-no-files-found: warn
+          retention-days: 7
