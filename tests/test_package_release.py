@@ -95,6 +95,17 @@ def main() -> int:
                   "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native),
                   "--lapy-release", str(lapy))
 
+        # Experimental ABI declarations are refused before any output change.
+        refused = root / "refused"; write(refused / "preserve.txt", "existing operator data")
+        for declaration in ({"abi": 1}, {"abi": 2}, None, "malformed"):
+            altered = dict(report, private_dispatcher=declaration)
+            write(ps5 / "report.json", json.dumps(altered))
+            rejected = run(*inputs, "--out", str(refused))
+            assert rejected.returncode != 0 and "private-dispatch" in rejected.stderr
+            assert list(refused.iterdir()) == [refused / "preserve.txt"]
+            assert (refused / "preserve.txt").read_text() == "existing operator data"
+        write(ps5 / "report.json", json.dumps(report))
+
         result = run(*inputs, "--out", str(out))
         assert result.returncode == 0, result.stderr
         app = out / "PPSA99995"

@@ -71,6 +71,11 @@ ls "$wine_ps5"/prx/sce_module/ntdll.prx >/dev/null 2>&1 || fail "--wine-ps5: no 
     fail "--native-cpu: no x86_64-windows/wow64native.dll and ps5/wow64native.prx in '$native_cpu'"
 [ -f "$lapy_release" ] || fail "--lapy-release: no file '$lapy_release'"
 [ -f "$wine_ps5/report.json" ] || fail "--wine-ps5: no report.json in '$wine_ps5'"
+# Experimental native-AMD64 dispatcher runtimes need a separately reviewed
+# producer which checks the actual selected PE/native identities. This
+# general WoW64 release path refuses them before creating/replacing output.
+python3 "$root/tools/check_private_dispatch_abi.py" --refuse-release-report "$wine_ps5/report.json" ||
+    fail "--wine-ps5: experimental private-dispatch runtime is not a general release input"
 for file in LICENSE COPYING.LIB AUTHORS NOTICES.md; do
     [ -f "$wine_ps5/source/$file" ] || fail "--wine-ps5: no Wine source/$file in '$wine_ps5'"
 done
