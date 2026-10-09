@@ -289,6 +289,11 @@ cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
 cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
     fail "cannot stage shared-input ABI"
 
+# Shared bridge registry and checked native driver boundary.
+for unit in pw_d3d9_window.c pw_d3d9_window.h pw_d3d9_window_driver.c pw_d3d9_window_driver.h; do
+    cp "$root/wine/ps5/$unit" "$tree/dlls/win32u/$unit" || fail "cannot stage bridge window adapter"
+done
+
 # The PS5 OpenGL SDK is optional. When supplied, Wine's generic EGL/WGL
 # frontend binds directly to its static EGL symbols and the win32u PRX links
 # the SDK into the runtime.
@@ -301,7 +306,7 @@ stamp=$(
         "$ps5opengl_sdk" "$opengl_cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" "$tls_stamp"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
-          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h"; } | sha256sum | cut -c1-64)
+          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" "$root"/wine/ps5/pw_d3d9_window*.[ch]; } | sha256sum | cut -c1-64)
 build=$work/build
 if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$build"
@@ -364,7 +369,7 @@ rm -rf "$work/pe"
 for arch in i386 x86_64; do
     mkdir -p "$work/pe/$arch-windows"
     modules="$PE_MODULES"
-    [ "$arch" != x86_64 ] || modules="$modules wow64"
+    [ "$arch" != x86_64 ] || modules="$modules wow64 wow64win"
     for module in $modules; do
         target=dlls/$module/$arch-windows/$module.dll
         make -C "$build" -k -j"$jobs" "$target" >> "$work/make.log" 2>&1 || status=$?
