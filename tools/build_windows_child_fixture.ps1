@@ -16,7 +16,7 @@ $object = Join-Path $Out 'fixture.obj'
 # Only this original test image opts out of ASLR, making equal virtual
 # addresses observable. No operating-system security setting is changed.
 # Relocations remain available: differing load addresses are inconclusive.
-$command = 'call "{0}" > nul && cl.exe /nologo /std:c11 /W4 /WX /O2 /MT /D_CRT_SECURE_NO_WARNINGS "{1}" /Fe:"{2}" /Fo:"{3}" /link /DYNAMICBASE:NO /NXCOMPAT /INCREMENTAL:NO' -f $vcvars, $source, $parent, $object
+$command = 'call "{0}" > nul && cl.exe /nologo /std:c11 /W4 /WX /O2 /MT /D_CRT_SECURE_NO_WARNINGS "{1}" /Fe:"{2}" /Fo:"{3}" /link /DYNAMICBASE:NO /FIXED:NO /NXCOMPAT /INCREMENTAL:NO' -f $vcvars, $source, $parent, $object
 & $env:ComSpec /d /s /c $command 2>&1 | Tee-Object -FilePath (Join-Path $Out 'build.log')
 $code = $LASTEXITCODE
 if ($code -ne 0) { throw "MSVC fixture build failed: $code" }
@@ -25,6 +25,17 @@ $pe = [BitConverter]::ToInt32($image, 60)
 $machine = [BitConverter]::ToUInt16($image, $pe + 4)
 $expectedMachine = if ($Arch -eq 'x64') { 0x8664 } else { 0x014c }
 if ($image[0] -ne 0x4d -or $image[1] -ne 0x5a -or [BitConverter]::ToUInt32($image, $pe) -ne 0x4550 -or $machine -ne $expectedMachine) { throw "Incorrect PE machine for $Arch" }
+$characteristics = [BitConverter]::ToUInt16($image, $pe + 22)
+$optional = $pe + 24
+$magic = [BitConverter]::ToUInt16($image, $optional)
+$expectedMagic = if ($Arch -eq 'x64') { 0x20b } else { 0x10b }
+if ($magic -ne $expectedMagic) { throw 'PE optional header does not match selected architecture.' }
+$directories = $optional + $(if ($Arch -eq 'x64') { 112 } else { 96 })
+$relocRva = [BitConverter]::ToUInt32($image, $directories + 40)
+$relocSize = [BitConverter]::ToUInt32($image, $directories + 44)
+if (($characteristics -band 1) -ne 0 -or !$relocRva -or !$relocSize) {
+    throw 'Fixture must retain base relocations; verify /FIXED:NO reached the linker.'
+}
 Copy-Item $parent (Join-Path $Out 'child.exe') -Force
 $hashes = 'parent.exe', 'child.exe' | ForEach-Object { Get-FileHash -Algorithm SHA256 (Join-Path $Out $_) }
 if ($hashes[0].Hash -ne $hashes[1].Hash) { throw 'Parent and child must be exact copies of the same original image.' }
