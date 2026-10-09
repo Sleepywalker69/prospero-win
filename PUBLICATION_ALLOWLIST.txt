@@ -523,3 +523,8 @@ tests/test_check_wine_prx_build.py
 tools/package_diagnostic_kit.py
 tests/test_diagnostic_kit.py
 docs/DIAGNOSTIC_KIT.md
+
+.github/workflows/radv-archive.yml
+tools/package_radv_archive.py
+tests/test_radv_archive_ci.py
+docs/RADV_ARCHIVE_CI.md
