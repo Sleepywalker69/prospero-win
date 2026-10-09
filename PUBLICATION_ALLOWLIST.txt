@@ -541,3 +541,6 @@ native/pw_native_fd_report.h
 tests/test_pw_native_fd_report.c
 tests/test_pw_native_child_capabilities.c
 tests/test_pw_native_fd_worker.c
+native/pw_native_peer_protocol.c
+native/pw_native_peer_protocol.h
+tests/test_pw_native_peer_protocol.c
