@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import re
 import stat
 import subprocess
 
@@ -83,6 +84,15 @@ def archive_git(collector,root,name):
             'tracked_source_clean':not run('diff','HEAD','--name-only').strip()}
 
 
+def collect_title_inspection(collector,title_build):
+    sibling=title_build.with_name(title_build.name+'-wine-child-title-inspection')
+    inspection=sibling/'inspection'
+    if not sibling.is_dir() or sibling.is_symlink() or not inspection.is_dir() or inspection.is_symlink():return
+    for path in sorted(inspection.glob('*-tool.log')):
+        if re.fullmatch(r'[0-9]{3,}-tool\.log',path.name):
+            collector.copy(path,sibling,'target/title-inspection')
+
+
 def collect(args):
     c=Collector(args.out);identities={}
     # Preserve source first, even if later large diagnostics hit their bound.
@@ -110,6 +120,7 @@ def collect(args):
         path=args.wine_work/'build/dlls'/name/(name+'.so')
         c.copy(path,args.wine_work,'target/wine')
     c.tree(args.title_build/'wine-child','target/child')
+    collect_title_inspection(c,args.title_build)
     for path in sorted(args.title_build.glob('*')):
         if path.is_file() and (path.suffix in ('.elf','.o','.json','.h','.c') or path.name=='eboot.bin'):
             c.copy(path,args.title_build,'target/title')

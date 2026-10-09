@@ -37,6 +37,65 @@ def preprocess(mode, include):
 
 
 class WineChildIntegration(unittest.TestCase):
+    def test_internal_title_inspection_uses_disjoint_output(self):
+        source = (ROOT / 'tools/build_native.sh').read_text()
+        command = source.index('    python3 "$root/tools/build_wine_service_child.py" --check-title')
+        start = source.rfind('if [[ $wine_child_fixture == 1 ]]; then', 0, command)
+        end = source.index('\nfi', command) + len('\nfi')
+        block = source[start:end]
+        with tempfile.TemporaryDirectory(prefix='title inspection routing ') as directory:
+            temp = Path(directory)
+            paths = {name: temp / name for name in ('build', 'dist', 'sdk', 'runtime', 'fixture', 'foundation')}
+            for path in paths.values(): path.mkdir()
+            (paths['build'] / 'wine-child').mkdir()
+            capture = temp / 'capture.py'
+            capture.write_text('import sys,json\nfrom pathlib import Path\n'
+                'sys.dont_write_bytecode=True\nsys.path.insert(0,sys.argv[1]+"/tools")\n'
+                'from build_wine_service_child import output_directory\n'
+                'args=sys.argv[3:]\n'
+                'values={name:Path(args[args.index("--"+name)+1]) for name in '
+                '("out","app","build","service-work","sdk","runtime","fixture")}\n'
+                'Path(sys.argv[2]).write_text(json.dumps({k:str(v) for k,v in values.items()}))\n'
+                'output_directory(values.pop("out"),tuple(values.values()))\n')
+            env = dict(os.environ, root=str(ROOT), build=str(paths['build']), dist=str(paths['dist']),
+                sdk=str(paths['sdk']), llvm_bindir=str(temp / 'llvm'), PW_WINE_CHILD_RUNTIME=str(paths['runtime']),
+                PW_WINE_CHILD_FOUNDATION=str(paths['foundation']), PW_WINDOWS_CHILD_FIXTURE_DIR=str(paths['fixture']),
+                PW_NATIVE_SDK_SOURCE_ARCHIVE=str(temp / 'sdk.tar.gz'), CAPTURE=str(capture),
+                CAPTURED=str(temp / 'arguments.json'), PYTHONDONTWRITEBYTECODE='1')
+            shell = 'python3() { command python3 "$CAPTURE" "$root" "$CAPTURED" "${@:2}"; }\n' + block
+            result = subprocess.run(['bash', '-euc', shell], env=dict(env, wine_child_fixture='1'),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads((temp / 'arguments.json').read_text())
+            output = Path(args.pop('out'))
+            self.assertTrue(output.is_dir())
+            for name, value in args.items():
+                original = Path(value)
+                self.assertFalse(output.is_relative_to(original) or original.is_relative_to(output), name)
+            self.assertEqual(args['service-work'], str(paths['build'] / 'wine-child'))
+            (temp / 'arguments.json').unlink()
+            result = subprocess.run(['bash', '-euc', shell], env=dict(env, wine_child_fixture='0'),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((temp / 'arguments.json').exists())
+
+    def test_title_inspection_reset_is_scoped_to_fixture_mode(self):
+        source = (ROOT / 'tools/build_native.sh').read_text()
+        start = source.index('rm -rf -- "$build" "$dist"')
+        end = source.index('\nmkdir -p', start)
+        reset = source[start:end]
+        for mode in ('0', '1'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix='title report reset ') as directory:
+                temp = Path(directory); build = temp / 'native-fixture'; dist = temp / 'app'
+                report = Path(str(build) + '-wine-child-title-inspection')
+                unrelated = temp / 'other-build'; unrelated.mkdir(); (unrelated / 'keep').write_bytes(b'keep')
+                for path in (build, dist, report): path.mkdir(); (path / 'old').write_bytes(b'old')
+                subprocess.run(['bash', '-euc', reset], check=True, timeout=10,
+                    env=dict(os.environ, build=str(build), dist=str(dist), wine_child_fixture=mode))
+                self.assertFalse(build.exists()); self.assertFalse(dist.exists())
+                self.assertEqual(report.exists(), mode == '0')
+                self.assertEqual((unrelated / 'keep').read_bytes(), b'keep')
+
     def test_resource_probe_caps_jobs_and_preserves_environment(self):
         workflow = yaml.load((ROOT/'.github/workflows/windows-child-fixture.yml').read_text(), Loader=yaml.BaseLoader)
         steps = workflow['jobs']['matched-runtime']['steps']

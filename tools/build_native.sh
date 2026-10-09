@@ -153,6 +153,9 @@ fi
 build="$root/build/native$output_suffix"
 dist="$root/dist/$title_id$output_suffix"
 rm -rf -- "$build" "$dist"
+if [[ $wine_child_fixture == 1 ]]; then
+    rm -rf -- "$build-wine-child-title-inspection"
+fi
 mkdir -p "$build/obj" "$build/import-stubs" "$dist/sce_sys" "$dist/sce_module"
 cp "$helper_download/release.json" "$build/lapy-helper-release.json"
 cp "$helper_download/lapy-manifest.json" "$build/lapy-helper-manifest.json"
@@ -359,7 +362,7 @@ if [[ $wine_child_fixture == 1 ]]; then
         --build "$build" --app "$dist" --service-work "$build/wine-child" \
         --fixture "$PW_WINDOWS_CHILD_FIXTURE_DIR" --llvm-bindir "$llvm_bindir" \
         --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?Wine child needs the pinned SDK source archive}" \
-        --out "$build/wine-child-title-inspection"
+        --out "$build-wine-child-title-inspection"
 fi
 
 sha256sum "$build/eboot.elf" "$dist/eboot.bin"

@@ -45,10 +45,33 @@ class FailureRetention(unittest.TestCase):
         for name in names:getattr(args,name).mkdir()
         (args.wine_work/'prx').mkdir();(args.wine_work/'prx/ntdll.shared.elf').write_bytes(b'linked')
         (args.title_build/'wine-child').mkdir();(args.title_build/'wine-child/native-wine-child.self').write_bytes(b'child')
+        inspection=args.title_build.with_name(args.title_build.name+'-wine-child-title-inspection')/'inspection'
+        inspection.mkdir(parents=True);(inspection/'001-tool.log').write_bytes(b'analyzer output')
         for name in ('prefix/system.reg','home/secret'):
             path=self.root/name;path.parent.mkdir();path.write_bytes(b'do not retain')
         result=retention.collect(args)
-        self.assertEqual(set(result['files']),{'target/wine/prx/ntdll.shared.elf','target/child/native-wine-child.self'})
+        self.assertEqual(set(result['files']),{'target/wine/prx/ntdll.shared.elf','target/child/native-wine-child.self',
+                                             'target/title-inspection/inspection/001-tool.log'})
         self.assertFalse(result['raw_prefix_or_registry_retained'])
+
+    def test_inspection_log_selection_links_and_bounds(self):
+        build=self.root/'title';build.mkdir()
+        sibling=self.root/'title-wine-child-title-inspection';inspection=sibling/'inspection'
+        inspection.mkdir(parents=True)
+        (inspection/'001-tool.log').write_bytes(b'ok')
+        (inspection/'1000-tool.log').write_bytes(b'ok')
+        (inspection/'002-tool.log').write_bytes(b'oversize')
+        private=self.root/'private';private.write_bytes(b'not a tool log')
+        (inspection/'003-tool.log').symlink_to(private)
+        for name in ('system.reg','other.log','private-tool.log'):(inspection/name).write_bytes(b'not retained')
+        (sibling/'prefix').mkdir();(sibling/'prefix/004-tool.log').write_bytes(b'not retained')
+        c=retention.Collector(self.root/'logs')
+        with mock.patch.object(retention,'MAX_FILE',2):retention.collect_title_inspection(c,build)
+        self.assertEqual(set(c.files),{'target/title-inspection/inspection/001-tool.log',
+                                      'target/title-inspection/inspection/1000-tool.log'})
+        self.assertEqual({row['reason'] for row in c.omissions},{'file retention limit','symlink input'})
+        alias=self.root/'alias-wine-child-title-inspection';alias.symlink_to(sibling,target_is_directory=True)
+        c=retention.Collector(self.root/'alias-logs');retention.collect_title_inspection(c,self.root/'alias')
+        self.assertFalse(c.files)
 
 if __name__=='__main__':unittest.main(verbosity=2)
