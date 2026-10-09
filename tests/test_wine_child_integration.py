@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -29,6 +31,45 @@ def preprocess(mode, include):
 
 
 class WineChildIntegration(unittest.TestCase):
+    def test_workflow_job_environment_contexts(self):
+        workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
+                             Loader=yaml.BaseLoader)
+        # runner is available to steps, not workflow/job env declarations.
+        # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
+        environments = [workflow.get('env', {})]
+        environments.extend(job.get('env', {}) for job in workflow['jobs'].values())
+        for environment in environments:
+            for value in environment.values():
+                self.assertNotRegex(value, r'\$\{\{[^}]*\brunner\b')
+
+    def test_runner_paths_execute_before_consumers(self):
+        workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
+                             Loader=yaml.BaseLoader)
+        job = workflow['jobs']['matched-runtime']
+        self.assertEqual(job['env'], {'BUILD_JOBS': '2'})
+        step = job['steps'][0]
+        self.assertEqual(step.get('id'), 'runtime-paths')
+        self.assertNotIn('if', step)
+        expected = {
+            'XDG_CACHE_HOME': 'fixture-cache', 'WINE_SOURCE': 'wine-source',
+            'HOST_WORK': 'wine-host', 'WINE_WORK': 'wine-ps5',
+            'TLS_WORK': 'wine-tls', 'FOUNDATION': 'prx-foundation',
+            'TITLE_FOUNDATION': 'title-foundation', 'COHORT': 'source-cohort.json',
+        }
+        with tempfile.TemporaryDirectory(prefix='workflow paths ') as directory:
+            root = Path(directory)
+            environment_file = root / 'github env'
+            environment_file.write_text('EXISTING=value\n')
+            environment = dict(os.environ, RUNNER_TEMP=str(root), GITHUB_ENV=str(environment_file))
+            subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', step['run']],
+                           env=environment, check=True, timeout=10)
+            lines = environment_file.read_text().splitlines()
+            self.assertEqual(lines[0], 'EXISTING=value')
+            self.assertEqual(len(lines), 1 + len(expected))
+            values = dict(line.split('=', 1) for line in lines[1:])
+            self.assertEqual(values, {key: str(root / suffix) for key, suffix in expected.items()})
+            self.assertTrue(all(Path(value).is_absolute() for value in values.values()))
+
     def test_preprocessed_profile_and_every_exit_route(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)

@@ -79,15 +79,19 @@ jobs:
         shell: bash
     env:
       BUILD_JOBS: "2"
-      XDG_CACHE_HOME: ${{ runner.temp }}/fixture-cache
-      WINE_SOURCE: ${{ runner.temp }}/wine-source
-      HOST_WORK: ${{ runner.temp }}/wine-host
-      WINE_WORK: ${{ runner.temp }}/wine-ps5
-      TLS_WORK: ${{ runner.temp }}/wine-tls
-      FOUNDATION: ${{ runner.temp }}/prx-foundation
-      TITLE_FOUNDATION: ${{ runner.temp }}/title-foundation
-      COHORT: ${{ runner.temp }}/source-cohort.json
     steps:
+      - name: Initialize paths on the allocated runner
+        id: runtime-paths
+        run: |
+          printf '%s\n' \
+            "XDG_CACHE_HOME=$RUNNER_TEMP/fixture-cache" \
+            "WINE_SOURCE=$RUNNER_TEMP/wine-source" \
+            "HOST_WORK=$RUNNER_TEMP/wine-host" \
+            "WINE_WORK=$RUNNER_TEMP/wine-ps5" \
+            "TLS_WORK=$RUNNER_TEMP/wine-tls" \
+            "FOUNDATION=$RUNNER_TEMP/prx-foundation" \
+            "TITLE_FOUNDATION=$RUNNER_TEMP/title-foundation" \
+            "COHORT=$RUNNER_TEMP/source-cohort.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
