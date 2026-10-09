@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #define COBJMACROS
 #include "pw_d3d9_session.h"
+#ifdef PW_D3D9_ENABLE_STATEBLOCK
+#include "pw_d3d9_service_stateblock.h"
+#endif
 #ifdef PW_D3D9_ENABLE_PROGRAM
 #include "pw_d3d9_service_program.h"
 #endif
@@ -196,7 +199,7 @@ static void drain_deferred(struct pw_d3d9_session *s)
 static HRESULT transact(struct pw_d3d9_session *s,struct pw_d3d9_message *m,const void *payload,
                         unsigned char *output,size_t capacity,struct pw_d3d9_message *reply)
 {
-    HRESULT result=E_FAIL;unsigned char scratch[RING_BYTES];
+    HRESULT result=E_FAIL;unsigned char scratch[RING_BYTES];const char *phase="send";
     memset(reply,0,sizeof(*reply));
     if(callback_depth())return RPC_E_CANTCALLOUT_ININPUTSYNCCALL;
     while(!TryEnterCriticalSection(&s->lock)){
@@ -217,11 +220,14 @@ static HRESULT transact(struct pw_d3d9_session *s,struct pw_d3d9_message *m,cons
     pw_d3d9_session_test_callback();
 #endif
     client_pump();
+    phase="receive";
     if(receive_wait(&s->ipc,reply,scratch,sizeof(scratch),s->broker)!=PW_D3D9_OK)goto done;
+    phase="reply_capacity";
     if(reply->payload_bytes>capacity){cancel_ipc(&s->ipc);goto done;}
     if(reply->payload_bytes)memcpy(output,scratch+64,reply->payload_bytes);
-    result=(HRESULT)reply->result;
+    phase="backend_result";result=(HRESULT)reply->result;
  done:
+    if(FAILED(result))fprintf(stderr,"PW_D3D9 transaction opcode=%u phase=%s hr=%08lx reply_bytes=%u\n",m->opcode,phase,(DWORD)result,reply->payload_bytes);
     s->active_thread=0;LeaveCriticalSection(&s->lock);SetEvent(s->serial_event);
     restore_quit();drain_deferred(s);return result;
 }
@@ -388,6 +394,19 @@ HRESULT pw_d3d9_session_program(struct pw_d3d9_session *s,struct pw_d3d9_object_
     *reply=decoded;return hr;
 }
 #endif
+#ifdef PW_D3D9_ENABLE_STATEBLOCK
+HRESULT pw_d3d9_session_stateblock(struct pw_d3d9_session *s,struct pw_d3d9_object_ref ref,const struct pw_d3d9_stateblock_request *request,struct pw_d3d9_stateblock_reply *reply)
+{
+    unsigned char in[16],out[16];struct pw_d3d9_stateblock_reply decoded;
+    struct pw_d3d9_message m={.opcode=PW_D3D9_STATEBLOCK_CALL,.device=1,.object=ref.id,.generation=ref.generation,.payload_bytes=16},r;
+    if(!s||!request||!reply)return E_POINTER;
+    if(pw_d3d9_stateblock_encode(in,sizeof(in),request)!=PW_D3D9_SB_OK)return D3DERR_INVALIDCALL;
+    HRESULT hr=transact(s,&m,in,out,sizeof(out),&r);
+    if(FAILED(hr)&&!r.payload_bytes)return hr;
+    if(pw_d3d9_stateblock_reply_decode(&decoded,request,out,r.payload_bytes)!=PW_D3D9_SB_OK||decoded.hresult!=(uint32_t)hr){cancel_ipc(&s->ipc);return E_FAIL;}
+    *reply=decoded;return hr;
+}
+#endif
 HRESULT pw_d3d9_session_release(struct pw_d3d9_session *s,struct pw_d3d9_object_ref ref)
 {
     struct pw_d3d9_message m={.opcode=PW_D3D9_RELEASE,.device=1,.object=ref.id,.generation=ref.generation},r;
@@ -447,6 +466,9 @@ static int destroy_objects(struct pw_d3d9_objects *objects)
 #endif
 #ifdef PW_D3D9_ENABLE_PROGRAM
             else if(objects->slots[n].kind>=7&&objects->slots[n].kind<=9){if(FAILED(pw_d3d9_service_program_destroy(objects,context)))okay=0;}
+#endif
+#ifdef PW_D3D9_ENABLE_STATEBLOCK
+            else if(objects->slots[n].kind==10){if(FAILED(pw_d3d9_service_stateblock_destroy(objects,context)))okay=0;}
 #endif
 #ifdef PW_D3D9_ENABLE_DEVICE
             else if(objects->slots[n].kind==2){
@@ -519,6 +541,7 @@ static void factory_call(IDirect3D9 *d3d,const struct pw_d3d9_factory_request *q
 __declspec(dllexport) DWORD WINAPI PwD3D9ServiceMain(uint64_t *result)
 {
     struct ipc ipc={0};struct descriptor desc;WCHAR object_name[96];DWORD error=1,pid=GetCurrentProcessId();
+    uint32_t last_opcode=0;const char *phase="startup";
     HMODULE backend=NULL;IDirect3D9 *(WINAPI *factory)(UINT)=NULL;
     struct pw_d3d9_object_slot *slots=NULL;struct pw_d3d9_objects objects;BOOL objects_ready=FALSE;
     unsigned char scratch[RING_BYTES],output[RING_BYTES],hello[32];
@@ -548,7 +571,9 @@ __declspec(dllexport) DWORD WINAPI PwD3D9ServiceMain(uint64_t *result)
     hello_payload(hello,desc.epoch);
     for(;;){
         struct pw_d3d9_message m;size_t bytes=0;BOOL stop=FALSE;
+        phase="receive";
         if(receive_wait(&ipc,&m,scratch,sizeof(scratch),NULL)!=PW_D3D9_OK)goto done;
+        last_opcode=m.opcode;phase="dispatch_or_encode";
         const unsigned char *payload=scratch+64;HRESULT hr=S_OK;
         struct pw_d3d9_object_ref ref={m.object,m.generation};
         if(m.opcode==PW_D3D9_HELLO){
@@ -635,14 +660,22 @@ __declspec(dllexport) DWORD WINAPI PwD3D9ServiceMain(uint64_t *result)
             pw_d3d9_service_program_call(&objects,ref,&request,&reply);hr=(HRESULT)reply.hresult;
             if(pw_d3d9_program_reply_encode(output,sizeof(output),&bytes,&reply)!=PW_D3D9_PROGRAM_OK)goto done;
 #endif
+#ifdef PW_D3D9_ENABLE_STATEBLOCK
+        }else if(m.opcode==PW_D3D9_STATEBLOCK_CALL){
+            struct pw_d3d9_stateblock_request request;struct pw_d3d9_stateblock_reply reply;
+            if(m.device!=objects.device||pw_d3d9_stateblock_decode(&request,payload,m.payload_bytes)!=PW_D3D9_SB_OK)goto done;
+            pw_d3d9_service_stateblock_call(&objects,ref,&request,&reply);hr=(HRESULT)reply.hresult;
+            if(pw_d3d9_service_stateblock_reply(output,sizeof(output),&bytes,&request,&reply)!=PW_D3D9_SB_OK)goto done;
+#endif
         }else goto done;
         m.sequence=0;m.result=hr;m.payload_bytes=(uint32_t)bytes;
+        phase="send_reply";
         if(send_wake(&ipc,&m,output)!=PW_D3D9_OK)goto done;
         result[0]++;
         if(stop){if(pw_d3d9_channel_stopped(&ipc.channel)!=PW_D3D9_OK)goto done;error=0;break;}
     }
  done:
-    if(error)cancel_ipc(&ipc);
+    if(error){fprintf(stderr,"PW_D3D9 service opcode=%u phase=%s error=%lu\n",last_opcode,phase,error);cancel_ipc(&ipc);}
     if(objects_ready){
 #ifdef PW_D3D9_ENABLE_PROGRAM
         pw_d3d9_service_program_shutdown(&objects);
