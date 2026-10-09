@@ -308,7 +308,8 @@ opengl_cflags=${CFLAGS:--g -O2}
 if [ "$private_dispatch" = 1 ]; then
     opengl_cflags="$opengl_cflags -DWINE_PS5_PRIVATE_DISPATCH=1"
     x86_64_CFLAGS="${x86_64_CFLAGS:-${CROSSCFLAGS:--g -O2}} -DWINE_PS5_PRIVATE_DISPATCH=1"
-    export x86_64_CFLAGS
+    i386_CFLAGS="${i386_CFLAGS:-${CROSSCFLAGS:--g -O2}} -DWINE_PS5_PRIVATE_DISPATCH=1"
+    export x86_64_CFLAGS i386_CFLAGS
 fi
 if [ -n "$ps5opengl_sdk" ]; then opengl_cflags="$opengl_cflags -DWINE_PS5_OPENGL"; fi
 
@@ -316,7 +317,7 @@ if [ -n "$ps5opengl_sdk" ]; then opengl_cflags="$opengl_cflags -DWINE_PS5_OPENGL
 stamp=$(
     { printf '%s\n' "$WINE_COMMIT" "$CONFIGURE_ARGS" "$sdk" "$FREETYPE_SHA256" \
         "$ps5opengl_sdk" "$opengl_cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" "$tls_stamp"
-      [ "$private_dispatch" = 0 ] || printf '%s\n' "private-dispatch-abi=1" "$x86_64_CFLAGS"
+      [ "$private_dispatch" = 0 ] || printf '%s\n' "private-dispatch-abi=1" "private-dispatch-wow64-abi=1" "$x86_64_CFLAGS" "$i386_CFLAGS"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" "$root"/wine/ps5/pw_d3d9_window*.[ch]; } | sha256sum | cut -c1-64)
@@ -529,10 +530,13 @@ if [ "$prx_status" = 0 ]; then
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
         --optional-from "$build/dlls/ntdll/ntdll.so" --nm "$sdk/bin/prospero-nm" \
         --optional-export __wine_prospero_native_wow64_caps \
-        --optional-export __wine_ps5_private_dispatch_abi
+        --optional-export __wine_ps5_private_dispatch_abi \
+        --optional-export __wine_ps5_private_dispatch_wow64_abi
     if [ "$private_dispatch" = 1 ]; then
         grep -q '"__wine_ps5_private_dispatch_abi"' "$prx/obj/ntdll_desc.c" ||
             fail "native ntdll lacks the private dispatcher ABI export"
+        grep -q '"__wine_ps5_private_dispatch_wow64_abi"' "$prx/obj/ntdll_desc.c" ||
+            fail "native ntdll lacks the private dispatcher WoW64 ABI export"
     fi
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/win32u_desc.c" __wine_unix_lib_init
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/wineserver_desc.c" \
@@ -848,10 +852,11 @@ result["sources"] = {key: os.environ.get(f"PW_SOURCE_{key.upper()}") or None
 result["tls_configured"] = os.environ.get("PW_TLS_ENABLED") == "1"
 if os.environ.get("PW_PRIVATE_DISPATCH") == "1":
     result["private_dispatcher"] = {
-        "abi": 1, "scope": "per-runtime native AMD64 only; no child provider",
+        "abi": 1, "wow64_abi": 1, "scope": "matched native AMD64 and translated I386; no child provider",
         "pe_identity": json.loads((Path(build).parent / "private-dispatch-pe.json").read_text()),
         "native_elf_sha256": hashlib.sha256((Path(build) / "dlls/ntdll/ntdll.so").read_bytes()).hexdigest(),
         "native_abi_export": "__wine_ps5_private_dispatch_abi",
+        "native_wow64_abi_export": "__wine_ps5_private_dispatch_wow64_abi",
         "runtime_validated": False,
     }
 if (result["tls_configured"] and not prx_status.startswith("skipped")) or any(

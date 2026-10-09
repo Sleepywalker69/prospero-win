@@ -8,6 +8,10 @@ from pathlib import Path
 import struct
 import subprocess
 import re
+import os
+import shutil
+import sys
+sys.dont_write_bytecode = True
 
 PREFIX = bytes.fromhex('4c8bd1b8')
 MIDDLE = bytes.fromhex('f604250803fe7f0175030f05c3eb01c3ff1425')
@@ -93,7 +97,7 @@ def check_image(data, anchor, mode):
 
 
 
-def check_build(work, mode, readelf):
+def check_build(work, mode, readelf, *, require_wow64=False):
     """Supplement the unchanged complete PRX checker with ABI evidence."""
     def need(condition, message):
         if not condition:
@@ -138,9 +142,16 @@ def check_build(work, mode, readelf):
              'staged PE identity disagrees with actual module bytes')
     else:
         need('private_dispatcher' not in report, 'OFF report contains an experimental ABI declaration')
-    return {'mode': mode, 'executed': False, 'pe_identity': pe_identity, 'native_sha256': checked,
-            'report_sha256': sha(work/'report.json'),
-            'scope': 'compile/link identity only; no mapping, protection, cleanup or child execution'}
+    result = {'mode': mode, 'executed': False, 'pe_identity': pe_identity, 'native_sha256': checked,
+              'report_sha256': sha(work/'report.json'),
+              'scope': 'compile/link identity only; no mapping, protection, cleanup or child execution'}
+    if require_wow64 or (mode and 'wow64_abi' in report.get('private_dispatcher', {})):
+        need(mode == 1, 'translated-I386 capability requires private dispatcher ON')
+        from private_dispatch_wow64 import check_runtime
+        compiler = os.environ.get('PW_DISPATCH_CLANG') or shutil.which('clang-18') or shutil.which('cc')
+        need(compiler, 'host C compiler is required for the inert I386 byte validator')
+        result['wow64'] = check_runtime(work, report, compiler)
+    return result
 
 
 def main():
@@ -153,9 +164,10 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--build-work', type=Path)
     parser.add_argument('--llvm-readelf', type=Path)
+    parser.add_argument('--require-wow64', action='store_true')
     args = parser.parse_args()
     if args.refuse_release_report:
-        if args.ntdll or args.win32u or args.output or args.build_work or args.llvm_readelf:
+        if args.ntdll or args.win32u or args.output or args.build_work or args.llvm_readelf or args.require_wow64:
             parser.error('release refusal check does not accept module/output arguments')
         report = json.loads(args.refuse_release_report.read_text())
         if not general_release_admissible(report):
@@ -164,10 +176,12 @@ def main():
     if args.build_work:
         if args.ntdll or args.win32u or not args.output or not args.llvm_readelf:
             parser.error('build validation requires --llvm-readelf and --output, without explicit PE inputs')
-        result = check_build(args.build_work, args.mode, args.llvm_readelf)
+        result = check_build(args.build_work, args.mode, args.llvm_readelf, require_wow64=args.require_wow64)
         args.output.write_text(json.dumps(result, indent=2) + '\n')
         print('PASS: actual PE/native dispatcher build identities agree; no runtime execution.')
         return
+    if args.require_wow64:
+        parser.error('--require-wow64 requires --build-work')
     if args.llvm_readelf:
         parser.error('--llvm-readelf is used only with --build-work')
     if not args.ntdll or not args.win32u or not args.output:
