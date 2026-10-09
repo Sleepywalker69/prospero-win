@@ -544,3 +544,8 @@ tools/graphics_overlay_files.py
 tools/inspect_graphics_pe.py
 tools/package_graphics_overlay.py
 tools/d3d11_smoke_contract.h
+tests/fixtures/d3d12_capability_query.c
+tests/fixtures/d3d12_query_contract.h
+tests/fixtures/d3d12_query_contract_test.c
+tests/test_d3d12_query.py
+docs/D3D12_QUERY.md
