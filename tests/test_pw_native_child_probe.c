@@ -82,6 +82,7 @@ static struct Mock {
     int directory, mkdir_calls, rmdir_calls, mkdir_error, rmdir_error;
     int peer_open_calls, peer_exchange_calls, peer_pre_stop_calls, peer_observe_calls;
     int peer_open_error, peer_open_cancel, peer_open_expiry, peer_failure, peer_pending_failure;
+    unsigned peer_open_api;
     int peer_exit_failure, peer_cleanup_failure, peer_close_late, peer_cooperative;
 #endif
 } mock;
@@ -175,7 +176,11 @@ int pw_native_peer_parent_open(PwNativePeerProbe *p, const char *path, PwNativeC
 {
     assert(mock.directory && !mock.socket_calls && strstr(path, "/peer-test/s"));
     ++mock.peer_open_calls;
-    if (mock.peer_open_error) { r->status = PW_NP_OS; return -1; }
+    if (mock.peer_open_error) {
+        r->status = PW_NP_OS; r->phase = PW_NP_SETUP; r->api = mock.peer_open_api;
+        r->raw_result = -1; r->native_error = EINVAL;
+        return -1;
+    }
     p->listener = 79; p->bound = 1;
     if (mock.peer_open_cancel) pw_native_child_probe_cancel();
     if (mock.peer_open_expiry) mock.now = io->stage_end;
@@ -514,6 +519,16 @@ static void test_peer_results_and_order(void)
     assert(!mock.peer_open_calls && !mock.socket_calls && !mock.rmdir_calls);
     reset(); mock.peer_open_error = 1; run(); expect_failed(EIO);
     assert(!mock.socket_calls && mock.rmdir_calls == 1);
+    for (unsigned api = 20; api <= 23; ++api) {
+        reset(); mock.peer_open_error = 1; mock.peer_open_api = api;
+        run(); expect_failed(EIO);
+        assert(probe.peer_result.status == PW_NP_OS && probe.peer_result.phase == PW_NP_SETUP);
+        assert(probe.peer_result.api == api && probe.peer_result.raw_result == -1 && probe.peer_result.native_error == EINVAL);
+        assert(!mock.socket_calls && !mock.connect_calls && !mock.send_calls && !mock.receive_calls);
+        assert(!mock.peer_exchange_calls && !mock.peer_pre_stop_calls && !mock.peer_observe_calls);
+        assert(mock.mkdir_calls == 1 && mock.rmdir_calls == 1 && !mock.directory);
+        assert(!probe.result.stop_ack && !probe.result.stream_closed && !probe.peer_result.exit_observed);
+    }
     reset(); mock.peer_open_cancel = 1; run(); expect_failed(ECANCELED); assert(!mock.send_calls);
     reset(); mock.peer_open_expiry = 1; run(); expect_failed(ETIMEDOUT); assert(!mock.send_calls);
     reset(); mock.peer_failure = 1; run(); expect_failed(EIO);

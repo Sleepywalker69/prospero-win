@@ -84,11 +84,14 @@ static int ready(int fd, short events, int worker, int challenge_pending,
 }
 static int prepare(int fd, PwNativePeerResult *r)
 {
-    api(r,PW_NP_API_FCNTL);int flags=fcntl(fd,F_GETFD);
+    api(r,PW_NP_API_FCNTL_GETFD);int flags=fcntl(fd,F_GETFD);
     if(flags<0)return fail(r,PW_NP_OS,flags);
-    int rc=fcntl(fd,F_SETFD,flags|FD_CLOEXEC);if(rc<0)return fail(r,PW_NP_OS,rc);
-    flags=fcntl(fd,F_GETFL);if(flags<0)return fail(r,PW_NP_OS,flags);
-    rc=fcntl(fd,F_SETFL,flags|O_NONBLOCK);if(rc<0)return fail(r,PW_NP_OS,rc);
+    api(r,PW_NP_API_FCNTL_SETFD);int rc=fcntl(fd,F_SETFD,flags|FD_CLOEXEC);
+    if(rc<0)return fail(r,PW_NP_OS,rc);
+    api(r,PW_NP_API_FCNTL_GETFL);flags=fcntl(fd,F_GETFL);
+    if(flags<0)return fail(r,PW_NP_OS,flags);
+    api(r,PW_NP_API_FCNTL_SETFL);rc=fcntl(fd,F_SETFL,flags|O_NONBLOCK);
+    if(rc<0)return fail(r,PW_NP_OS,rc);
 #if defined(__FreeBSD__) || defined(__PROSPERO__) || defined(PW_NATIVE_PEER_TEST_ABI)
     int one=1;api(r,PW_NP_API_SETSOCKOPT);
     rc=setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));
