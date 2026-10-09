@@ -583,3 +583,9 @@ docs/d3d9-native-domain.md
 native/pw_native_socket_diagnostic.c
 native/pw_native_socket_diagnostic.h
 tests/test_pw_native_socket_diagnostic.c
+native/pw_native_service_packet.c
+native/pw_native_service_packet.h
+native/pw_native_service_worker.c
+tests/test_pw_native_service_packet.c
+tests/test_pw_native_service_worker.c
+tests/native_service_fixture/sys/socket.h
