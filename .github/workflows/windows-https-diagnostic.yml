@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Build original Windows HTTPS diagnostic
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - tests/fixtures/windows_https_probe.c
+      - tools/build_windows_https_probe.ps1
+      - tools/inspect_windows_https_probe.py
+      - tests/test_windows_https_probe.py
+      - .github/workflows/windows-https-diagnostic.yml
+permissions:
+  contents: read
+concurrency:
+  group: windows-https-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-only:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check inert PE validation controls
+        shell: pwsh
+        run: python tests/test_windows_https_probe.py -v
+      - name: Build original AMD64 diagnostic without running it
+        shell: pwsh
+        run: ./tools/build_windows_https_probe.ps1 -Out "$env:RUNNER_TEMP/https-diagnostic"
+      - name: Retain corresponding original source and notices
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'https-diagnostic'
+          New-Item -ItemType Directory -Force (Join-Path $out 'source') | Out-Null
+          Copy-Item tests/fixtures/windows_https_probe.c, tools/build_windows_https_probe.ps1, tools/inspect_windows_https_probe.py, tests/test_windows_https_probe.py, docs/HTTPS_DIAGNOSTIC.md, LICENSE, NOTICE.md, LICENSING.md (Join-Path $out 'source')
+          git rev-parse HEAD | Set-Content (Join-Path $out 'SOURCE-COMMIT.txt')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not retain source identity.' }
+      - name: Preserve original diagnostic and build-only evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-https-diagnostic-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/https-diagnostic/
+          retention-days: 7
+          if-no-files-found: error

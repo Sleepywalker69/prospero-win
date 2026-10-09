@@ -503,3 +503,9 @@ tests/lab/vk_batch_owned.c
 tools/build_windows_child_fixture.ps1
 tests/fixtures/windows_child_process.c
 tests/fixtures/windows_child_process.md
+.github/workflows/windows-https-diagnostic.yml
+docs/HTTPS_DIAGNOSTIC.md
+tests/fixtures/windows_https_probe.c
+tools/build_windows_https_probe.ps1
+tools/inspect_windows_https_probe.py
+tests/test_windows_https_probe.py
