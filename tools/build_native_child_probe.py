@@ -18,6 +18,7 @@ import sys
 sys.dont_write_bytecode = True
 from check_wine_prx_build import Commands, elf, require
 from tls_manifest import digest, llvm_identity, tree_files
+from native_service_converter import prepare_converter_source, inspect_service_preload
 
 ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION = "30597512539e7edfde079cbcaf4a626bc0a948c5"
@@ -27,17 +28,22 @@ FD_SOURCES = ("native/pw_native_fd_probe.c", "native/pw_native_fd_report.c",
               "native/pw_native_fd_probe.h", "native/pw_native_fd_report.h")
 PEER_SOURCES = ("native/pw_native_peer_probe.c", "native/pw_native_peer_protocol.c",
                 "native/pw_native_peer_probe.h", "native/pw_native_peer_protocol.h")
+SERVICE_SOURCES = ("native/pw_native_service_worker.c", "native/pw_native_child_protocol.c",
+                   "native/pw_native_child_protocol.h", "native/pw_native_service_packet.c",
+                   "native/pw_native_service_packet.h", "tools/build_native_child_probe.py",
+                   "tools/native_service_converter.py")
 WORKER_FLAGS = ("--no-default-config", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 "-ffreestanding", "-fno-builtin", "-fPIE", "-fasynchronous-unwind-tables")
 IMPORTS = {"_exit", "getpid", "getppid", "clock_gettime", "fcntl", "poll", "read", "write", "setsockopt"}
 FD_IMPORTS = IMPORTS | {"socket", "socketpair", "connect", "close", "sendmsg", "recvmsg", "shutdown"}
 PEER_IMPORTS = IMPORTS | {"socket", "connect", "close", "sendmsg", "recvmsg", "ioctl", "getsockopt"}
+SERVICE_IMPORTS = {"_exit", "getpid", "getppid", "clock_gettime", "close", "poll", "sendmsg", "recvmsg", "getsockopt"}
 MAX_WORKER = 4 * 1024 * 1024
 
 
 def mode_inputs(mode):
-    require(mode in {"hello", "fd", "peer-exit"}, "unknown native probe mode")
-    selected = SOURCES + (FD_SOURCES if mode == "fd" else PEER_SOURCES if mode == "peer-exit" else ())
+    require(mode in {"hello", "fd", "peer-exit", "service"}, "unknown native probe mode")
+    selected = SERVICE_SOURCES if mode == "service" else SOURCES + (FD_SOURCES if mode == "fd" else PEER_SOURCES if mode == "peer-exit" else ())
     sources = {name: digest(ROOT / name) for name in selected}
     identity = {"mode": mode, "sources": sources}
     return sources, hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:40]
@@ -129,8 +135,8 @@ def verify_reconstruction(converted, recovered):
 
 
 def validate_link(path, sdk, bindir, commands, mode="hello"):
-    require(mode in {"hello", "fd", "peer-exit"}, "unknown native probe mode")
-    expected_imports = FD_IMPORTS if mode == "fd" else PEER_IMPORTS if mode == "peer-exit" else IMPORTS
+    require(mode in {"hello", "fd", "peer-exit", "service"}, "unknown native probe mode")
+    expected_imports = SERVICE_IMPORTS if mode == "service" else FD_IMPORTS if mode == "fd" else PEER_IMPORTS if mode == "peer-exit" else IMPORTS
     value, _ = elf(path, 3)
     require(entry_mapped(value), "worker entry is not executable file-backed memory")
     sections = commands.run(bindir / "llvm-readelf", "--section-headers", "-W", path)
@@ -178,6 +184,14 @@ def validate_link(path, sdk, bindir, commands, mode="hello"):
             "unwind_bytes": {name: int(size, 16) for name, _, size in unwind}}
 
 
+def compare_service_preload(before, after):
+    # Whole-file identity is checked separately by verify_reconstruction: the
+    # pinned SELF round trip normalizes OSABI and its exact unmapped SIE note.
+    require({k: v for k, v in before.items() if k != "elf_sha256"} ==
+            {k: v for k, v in after.items() if k != "elf_sha256"},
+            "SELF reconstruction changed service preload metadata")
+
+
 def build(args):
     output = args.out.resolve()
     require(not output.exists() or not any(output.iterdir()), "worker output must be new or empty")
@@ -202,15 +216,27 @@ def build(args):
     tool = output / "ps5-native-tool"
     converter_sources = [native / name for name in
                          ("native_app_builder.cpp", "self_container.cpp", "elf_object.cpp", "sce_module_writer.cpp")]
+    service = args.mode == "service"
+    converter_provenance = None
+    if service:
+        unchanged_path, unchanged_record = prepare_converter_source(
+            converter_sources[-1], output / "unused-default-writer.cpp", service=False)
+        require(unchanged_path == converter_sources[-1] and
+                unchanged_record["original_sha256"] == unchanged_record["selected_sha256"] and
+                not (output / "unused-default-writer.cpp").exists(), "default converter source selection changed")
+        converter_sources[-1], converter_provenance = prepare_converter_source(
+            converter_sources[-1], output / "sce_module_writer.service.cpp", service=True)
     commands.run(*environment, bindir / "clang++", "--no-default-config", "-std=c++20", "-O2",
-                 "-Wall", "-Wextra", "-Werror", "-I", zroot / "usr/include", *converter_sources, archives[0], "-o", tool)
+                 "-Wall", "-Wextra", "-Werror", "-I", zroot / "usr/include",
+                 *(["-I", native] if service else []), *converter_sources, archives[0], "-o", tool)
     predefines = commands.run(*environment, sdk / "bin/prospero-clang", "--no-default-config",
                               "-c", "-dM", "-E", "-x", "c", "/dev/null")
     for name in ("__PROSPERO__", "__FreeBSD__", "__x86_64__"):
         require(re.search(r"^#define " + name + r" [1-9][0-9]*$", predefines, re.M),
                 f"worker compiler lacks genuine target macro {name}")
     objects = []
-    for source in SOURCES[:2] + (FD_SOURCES[:2] if args.mode == "fd" else PEER_SOURCES[:2] if args.mode == "peer-exit" else ()):
+    translation_units = (SERVICE_SOURCES[0], SERVICE_SOURCES[1], SERVICE_SOURCES[3]) if service else SOURCES[:2] + (FD_SOURCES[:2] if args.mode == "fd" else PEER_SOURCES[:2] if args.mode == "peer-exit" else ())
+    for source in translation_units:
         obj = output / (Path(source).stem + ".o")
         commands.run(*environment, sdk / "bin/prospero-clang", *WORKER_FLAGS,
                      "-DPW_NATIVE_CHILD_FREESTANDING", "-DPW_NATIVE_FD_WORKER_ONLY",
@@ -222,16 +248,22 @@ def build(args):
     commands.run(*environment, sdk / "bin/prospero-lld", "-T", native / "ps5-pie.ld", "--eh-frame-hdr",
                  "-e", "_start", "-z", "defs", "-o", linked, *objects, sdk / "target/lib/libkernel.so")
     graph = validate_link(linked, sdk, bindir, commands, args.mode)
-    converted, original, final = output / "worker.elf", output / "worker.original.self", output / "native-child.self"
+    prefix = "native-service" if service else "native-child"
+    converted, original, final = output / "worker.elf", output / "worker.original.self", output / (prefix + ".self")
     commands.run(tool, "link", "--in", linked, "--out", converted, "--stub", sdk / "target/lib/libkernel.so",
-                 "--module-sdk", "0x02000009", "--file-name", "native-child.elf", "--component", "pw_native_child_worker")
+                 "--module-sdk", "0x02000009", "--file-name", prefix + ".elf",
+                 "--component", "pw_native_service_worker" if service else "pw_native_child_worker")
     converted_bytes, _ = elf(converted, 0xFE10)
     require(entry_mapped(converted_bytes) and converted_bytes[24:32] == linked.read_bytes()[24:32],
             "conversion changed the original worker entry")
+    preload_before = inspect_service_preload(converted_bytes) if service else None
     commands.run(tool, "self", "--sign", "--in", converted, "--out", original, "--magic", "0x1D3D154F")
     framing = streamable_self(original, final, tool, commands)
     reconstruction = verify_reconstruction(converted, final.with_suffix(".after.elf"))
-    manifest = {"schema": "pw-native-child-build/1", "build_id": build_id, "sources": sources, "mode": args.mode,
+    preload_after = inspect_service_preload(final.with_suffix(".after.elf").read_bytes()) if service else None
+    if service:
+        compare_service_preload(preload_before, preload_after)
+    manifest = {"schema": "pw-native-service-build/1" if service else "pw-native-child-build/1", "build_id": build_id, "sources": sources, "mode": args.mode,
                 "foundation_commit": FOUNDATION, "converter_sha256": digest(tool), "host_llvm": llvm,
                 "converter_sources": {path.name: digest(path) for path in sorted(native.iterdir()) if path.is_file()},
                 "layout_sha256": digest(native / "ps5-pie.ld"), "zlib_archive_sha256": digest(archives[0]),
@@ -240,19 +272,30 @@ def build(args):
                 "linkage": graph, "worker": framing, "reconstruction": reconstruction,
                 "console_execution_verified": False,
                 "windows_process_support": False, "platform_authentication_verified": False}
-    (output / "native-child-build.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
-    (output / "native-child-build.h").write_text('#define PW_NATIVE_CHILD_FD_MODE ' + str(int(args.mode == "fd")) + '\n' +
+    if service:
+        manifest.update({"converter_specialization": converter_provenance, "preload": preload_after,
+                         "entry_descriptor": 3, "native_exit_code_observed": False,
+                         "default_converter_source_comparison": unchanged_record,
+                         "preload_before_signing": preload_before})
+    (output / (prefix + "-build.json")).write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+    if service:
+        (output / "native-service-build.h").write_text('#define PW_NATIVE_SERVICE_BUILD_ID "' + build_id + '"\n' +
+            '#define PW_NATIVE_SERVICE_SELF_SHA256 "' + framing["sha256"] + '"\n' +
+            '#define PW_NATIVE_SERVICE_SELF_BYTES ' + str(framing["stream_extent"]) + '\n')
+    else:
+        (output / "native-child-build.h").write_text('#define PW_NATIVE_CHILD_FD_MODE ' + str(int(args.mode == "fd")) + '\n' +
                                                '#define PW_NATIVE_CHILD_PEER_MODE ' + str(int(args.mode == "peer-exit")) + '\n' +
                                                '#define PW_NATIVE_CHILD_BUILD_ID "' + build_id + '"\n' +
                                                 '#define PW_NATIVE_CHILD_SELF_SHA256 "' + framing["sha256"] + '"\n' +
                                                 '#define PW_NATIVE_CHILD_SELF_BYTES ' + str(framing["stream_extent"]) + '\n')
     image = final.read_bytes()
-    with (output / "native-child-image.c").open("w") as stream:
+    symbol = "pw_native_service_image" if service else "pw_native_child_image"
+    with (output / (prefix + "-image.c")).open("w") as stream:
         stream.write('/* Generated from the verified original worker SELF. */\n#include <stddef.h>\n'
-                     'const unsigned char pw_native_child_image[] = {\n')
+                     'const unsigned char ' + symbol + '[] = {\n')
         for start in range(0, len(image), 16):
             stream.write(','.join(str(byte) for byte in image[start:start + 16]) + ',\n')
-        stream.write('};\nconst size_t pw_native_child_image_size = sizeof(pw_native_child_image);\n')
+        stream.write('};\nconst size_t ' + symbol + '_size = sizeof(' + symbol + ');\n')
     print(json.dumps({"build_id": build_id, "worker": framing}, sort_keys=True))
 
 
@@ -260,7 +303,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("sdk", "foundation", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--mode", choices=("hello", "fd", "peer-exit"), default="hello")
+    parser.add_argument("--mode", choices=("hello", "fd", "peer-exit", "service"), default="hello")
     try:
         build(parser.parse_args())
     except (ValueError, OSError) as error:

@@ -32,14 +32,21 @@ class WorkerBuildTests(unittest.TestCase):
     def test_mode_and_linked_sources_bind_the_worker_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name in build.SOURCES + build.FD_SOURCES + build.PEER_SOURCES:
+            for name in build.SOURCES + build.FD_SOURCES + build.PEER_SOURCES + build.SERVICE_SOURCES:
                 path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(name)
             with mock.patch.object(build, 'ROOT', root):
                 hello_sources, hello = build.mode_inputs('hello')
                 fd_sources, fd = build.mode_inputs('fd')
                 peer_sources, peer = build.mode_inputs('peer-exit')
-                self.assertEqual(len({hello, fd, peer}), 3)
+                service_sources, service = build.mode_inputs('service')
+                self.assertEqual(len({hello, fd, peer, service}), 4)
+                self.assertEqual(set(service_sources), set(build.SERVICE_SOURCES))
+                (root / build.SERVICE_SOURCES[0]).write_text('changed finite fd3 worker')
+                self.assertNotEqual(build.mode_inputs('service')[1], service)
+                self.assertEqual(build.mode_inputs('hello')[1], hello)
+                self.assertEqual(build.mode_inputs('fd')[1], fd)
+                self.assertEqual(build.mode_inputs('peer-exit')[1], peer)
                 self.assertEqual(set(peer_sources) - set(hello_sources), set(build.PEER_SOURCES))
                 self.assertNotEqual(hello, fd)
                 self.assertEqual(set(fd_sources) - set(hello_sources), set(build.FD_SOURCES))
@@ -52,6 +59,38 @@ class WorkerBuildTests(unittest.TestCase):
                 self.assertEqual(build.mode_inputs('hello')[1], hello)
                 with self.assertRaises(ValueError):
                     build.mode_inputs('unknown')
+
+    def test_preload_metadata_survives_allowed_self_reconstruction(self):
+        fixture_spec = importlib.util.spec_from_file_location('preload_fixture', ROOT / 'tests/test_native_service_converter.py')
+        fixture_module = importlib.util.module_from_spec(fixture_spec)
+        fixture_spec.loader.exec_module(fixture_module)
+        value = fixture_module.fixture()
+        struct.pack_into('<I', value, 68, 7)  # synthetic file-backed executable LOAD
+        struct.pack_into('<H', value, 56, 5)
+        struct.pack_into('<IIQQQQQQ', value, 64 + 4 * 56, 4, 0, len(value), 0, 0, 24, 0, 4)
+        value += struct.pack('<III4s', 4, 8, 3, b'SIE\0') + b'build-id'
+        recovered = bytearray(value); recovered[7] = 9; recovered[-24:] = bytes(24)
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Path(tmp) / 'original.elf'; extracted = Path(tmp) / 'recovered.elf'
+            original.write_bytes(value); extracted.write_bytes(recovered)
+            build.verify_reconstruction(original, extracted)
+        before = build.inspect_service_preload(bytes(value))
+        after = build.inspect_service_preload(bytes(recovered))
+        self.assertNotEqual(before['elf_sha256'], after['elf_sha256'])
+        build.compare_service_preload(before, after)
+        moved = bytearray(recovered)
+        struct.pack_into('<Q', moved, 0x390, 0x1088)
+        struct.pack_into('<Q', moved, 0x288, fixture_module.module.PRELOAD_MASK)
+        moved_metadata = build.inspect_service_preload(bytes(moved))
+        with self.assertRaises(ValueError):
+            build.compare_service_preload(before, moved_metadata)
+        moved[0x288] ^= 1
+        with self.assertRaises(ValueError):
+            build.inspect_service_preload(bytes(moved))
+        for field in before.keys() - {'elf_sha256'}:
+            changed = dict(after); changed[field] = 'incorrect metadata'
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                build.compare_service_preload(before, changed)
 
     def test_only_pinned_unmapped_sie_note_may_be_zeroed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,6 +249,16 @@ class WorkerBuildTests(unittest.TestCase):
                 analyzer.imports = build.PEER_IMPORTS | {forbidden}
                 with self.subTest(peer_forbidden=forbidden), self.assertRaises(ValueError):
                     build.validate_link(linked, sdk, root, analyzer, 'peer-exit')
+            analyzer.imports = set(build.SERVICE_IMPORTS)
+            self.assertEqual(build.validate_link(linked, sdk, root, analyzer, 'service')['imports'], sorted(build.SERVICE_IMPORTS))
+            for missing in build.SERVICE_IMPORTS:
+                analyzer.imports = build.SERVICE_IMPORTS - {missing}
+                with self.subTest(service_missing=missing), self.assertRaises(ValueError):
+                    build.validate_link(linked, sdk, root, analyzer, 'service')
+            for forbidden in ('fcntl', 'ioctl', 'read', 'write', 'setsockopt', '__error', 'socket', 'socketpair', 'sceSystemServiceAddLocalProcess'):
+                analyzer.imports = build.SERVICE_IMPORTS | {forbidden}
+                with self.subTest(service_extra=forbidden), self.assertRaises(ValueError):
+                    build.validate_link(linked, sdk, root, analyzer, 'service')
             analyzer.imports = set(build.IMPORTS)
             for field, bad in (('needed', 'libkernel_web.sprx'), ('imports', build.IMPORTS | {'__error'}),
                                ('imports', build.IMPORTS - {'_exit'}), ('kind', 'OBJECT'), ('binding', 'LOCAL'),
