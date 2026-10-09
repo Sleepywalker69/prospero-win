@@ -261,6 +261,93 @@ class SeedTests(unittest.TestCase):
             self.assertEqual(struct.unpack_from('<H', image, 118)[0], 0x2000 if is_dll else 0)
             self.assertEqual(image[1024:], b'\0' * 8)
 
+    def test_vulkan_json_exact_values_bytes_and_paths(self):
+        converter, _, prefix, host, records = self.fixture()
+        content = (b'{\n    "file_format_version": "1.0.0",\n    "ICD": {\n'
+                   b'        "library_path": ".\\\\winevulkan.dll",\n'
+                   b'        "api_version": "1.4.357"\n    }\n}\n')
+        self.assertEqual(hashlib.sha256(content).hexdigest(), seed.VULKAN_JSON_SHA)
+        paths = ['drive_c/windows/system32/winevulkan.json', 'drive_c/windows/syswow64/winevulkan.json']
+        generated = {seed.VULKAN_JSON_SHA: {'kind': 'data', 'names': ['winevulkan.json'], 'paths': paths}}
+        for name in paths: (prefix / name).write_bytes(content)
+        audit = seed.audit_source(converter, prefix, host, records, generated=generated)
+        self.assertTrue(all(audit[name]['source'] == 'bound-runtime-generated-data' for name in paths))
+        for changed in (content.replace(b'.\\\\winevulkan.dll', b'C:\\\\other.dll'),
+                        content.replace(b'1.4.357', b'1.4.999'), content.replace(b'{\n', b'{ \n', 1),
+                        content.replace(b'"ICD": {', b'"extra": 1, "ICD": {')):
+            with self.subTest(changed=changed):
+                (prefix / paths[0]).write_bytes(changed)
+                with self.assertRaisesRegex(ValueError, 'unapproved generated/copied'):
+                    seed.audit_source(converter, prefix, host, records, generated=generated)
+        (prefix / paths[0]).write_bytes(content)
+        (prefix / 'drive_c/windows/winevulkan.json').write_bytes(content)
+        with self.assertRaisesRegex(ValueError, 'unapproved generated/copied'):
+            seed.audit_source(converter, prefix, host, records, generated=generated)
+
+    def test_unknown_metadata_collects_all_and_does_not_skip_text_guards(self):
+        converter, _, prefix, host, records = self.fixture()
+        unknown = {'drive_c/aaa-original.bin': b'first unapproved fixture',
+                   'drive_c/zzz-original.bin': b'second unapproved fixture'}
+        for name, content in unknown.items(): (prefix / name).write_bytes(content)
+        (prefix / 'user.reg').write_bytes(b'WINE REGISTRY Version 2\n"path"="Z:\\\\home\\\\runner"')
+        issues = {}
+        with self.assertRaisesRegex(ValueError, '2 total; export refused'):
+            seed.audit_source(converter, prefix, host, records, issues=issues)
+        self.assertTrue(issues['scan_complete'])
+        self.assertEqual(issues['files'], [{'path': name, 'bytes': len(data),
+                         'sha256': hashlib.sha256(data).hexdigest()} for name, data in sorted(unknown.items())])
+        encoded = seed.unapproved_metadata(issues)
+        self.assertNotIn(b'first unapproved fixture', encoded)
+        self.assertNotIn(b'user.reg', encoded)
+        for name in unknown: (prefix / name).unlink()
+        with self.assertRaisesRegex(ValueError, 'host path/environment'):
+            seed.audit_source(converter, prefix, host, records)
+
+    def test_unknown_scan_stops_on_unsafe_file_and_marks_incomplete(self):
+        converter, _, prefix, host, records = self.fixture()
+        (prefix / 'drive_c/aaa-original.bin').write_bytes(b'original unknown')
+        outside = self.root / 'outside'; outside.write_bytes(b'not read or uploaded')
+        (prefix / 'zzz-outside').symlink_to(outside)
+        issues = {}
+        with self.assertRaisesRegex(ValueError, 'unapproved dereferenced'):
+            seed.audit_source(converter, prefix, host, records, issues=issues)
+        self.assertFalse(issues['scan_complete'])
+        self.assertEqual(len(issues['files']), 1)
+        self.assertNotIn(b'not read or uploaded', seed.unapproved_metadata(issues))
+
+    def test_unknown_metadata_rejects_extra_fields_escape_and_bounds(self):
+        record = {'path': 'drive_c/windows/unknown.bin', 'bytes': 4, 'sha256': 'a' * 64}
+        issues = {'files': [record], 'scan_complete': True}
+        seed.unapproved_metadata(issues)
+        for changed in (dict(record, content='never upload'), dict(record, path='../outside'),
+                        dict(record, path='/absolute'), dict(record, path='x' * 1025),
+                        dict(record, bytes=True), dict(record, sha256='not-a-hash')):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                seed.unapproved_metadata({'files': [changed], 'scan_complete': True})
+        with self.assertRaises(ValueError):
+            seed.unapproved_metadata({'files': [record, record], 'scan_complete': True})
+        old = seed.MAX_METADATA_BYTES
+        try:
+            seed.MAX_METADATA_BYTES = 8
+            with self.assertRaises(ValueError): seed.unapproved_metadata(issues)
+        finally:
+            seed.MAX_METADATA_BYTES = old
+
+    def test_diagnostics_retains_only_valid_unknown_metadata(self):
+        work = self.root / 'work'; work.mkdir()
+        issues = {'scan_complete': True, 'files': [{'path': 'drive_c/windows/unknown.bin',
+                  'bytes': 4, 'sha256': 'a' * 64}]}
+        metadata = work / 'UNAPPROVED-FILES.json'; metadata.write_bytes(seed.unapproved_metadata(issues))
+        out = self.root / 'approved-diagnostics'
+        seed.diagnostics(SimpleNamespace(work=work, out=out))
+        self.assertEqual(json.loads((out / 'UNAPPROVED-FILES.json').read_text()), issues)
+        issues['files'][0]['content'] = 'private synthetic content'
+        metadata.write_text(json.dumps(issues))
+        out = self.root / 'withheld-diagnostics'
+        seed.diagnostics(SimpleNamespace(work=work, out=out))
+        self.assertFalse((out / 'UNAPPROVED-FILES.json').exists())
+        self.assertIn('withheld', json.loads((out / 'DIAGNOSTICS.json').read_text())['unapproved_files'])
+
     def test_archive_hash_and_traversal_rejected(self):
         raw = io.BytesIO()
         with tarfile.open(fileobj=raw, mode='w:gz') as tar:

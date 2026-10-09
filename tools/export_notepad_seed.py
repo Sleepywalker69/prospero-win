@@ -43,6 +43,8 @@ BOUND_FILES = {
 }
 CPU_SHA = '7fdd490b6a1eeff78f8de585f7f5624d03a11239520287fc61ff12abb4c13226'
 MAX_FILES, MAX_BYTES, MAX_FILE = 16000, 4 << 30, 256 << 20
+MAX_METADATA_BYTES, MAX_METADATA_PATH = 32 << 20, 1024
+VULKAN_JSON_SHA = '21f30d7ef5dd82189dfd91e09c8a01a92a3d94a95518443db444e2894b712aea'
 REGISTRIES = {'system.reg', 'user.reg', 'userdef.reg'}
 GENERATED_TEXT = {'drive_c/windows/win.ini', 'drive_c/windows/system.ini'}
 
@@ -249,7 +251,7 @@ def audit_text(data, name):
     require('\x00' not in text, 'NUL in generated text')
 
 
-def wine_resources(path):
+def wine_resources(path, vulkan_manifest=False):
     """Read only bounded WINE_DATA_FILE and WINE_MANIFEST resource bytes.
 
     Matches pinned Wine setupapi/queue.c:do_file_copy and
@@ -305,10 +307,13 @@ def wine_resources(path):
             name = resource_name(resource_integer(entry, 4))
             child = resource_integer(entry + 4, 4)
             path_keys = keys + [name]
-            if not keys and name not in ('WINE_DATA_FILE', 24):
+            if not keys and name not in (('WINE_DATA_FILE', 24, 10) if vulkan_manifest else ('WINE_DATA_FILE', 24)):
                 continue
             if len(path_keys) == 2 and path_keys[0] == 24 and not (
                     isinstance(name, str) and name.startswith('WINE_MANIFEST')):
+                continue
+            # wrc uppercases named resource IDs in the compiled PE table.
+            if len(path_keys) == 2 and path_keys[0] == 10 and name != 'WINEVULKAN_JSON':
                 continue
             if child & 0x80000000:
                 walk(child & 0x7fffffff, path_keys)
@@ -444,7 +449,9 @@ def generated_module_hashes(host, host_files, source_archive):
     source_hashes = {'dlls/setupapi/fakedll.c': '1df365043c2a84dc2b44129641178fd325eb809126a1c44639cf1b77055c7b4c',
                      'include/winnt.h': '030dfb2b3fbdebad4c386d96cb31d081ac635914ab2ff674cbf12b5cecbf8834',
                      'dlls/setupapi/dirid.c': '7409a51e12814df2e35b08fce392b4319e4464d26512c599cce68dd4f2966fb2',
-                     'dlls/ntdll/unix/file.c': 'bc6c1d35deaa2ee7396ff940aac75ba379a976a72e9b3d5ee6d3619c36db8af4'}
+                     'dlls/ntdll/unix/file.c': 'bc6c1d35deaa2ee7396ff940aac75ba379a976a72e9b3d5ee6d3619c36db8af4',
+                     'dlls/winevulkan/winevulkan.json': VULKAN_JSON_SHA,
+                     'dlls/winevulkan/loader.c': '00669ab341904b567ada54aee7a7f17fd6c3fa21ed051ac90d6bca5ecb166df2'}
     with tarfile.open(source_archive, 'r:gz') as archive:
         for name, digest in source_hashes.items():
             member = archive.getmember(name)
@@ -496,15 +503,35 @@ def generated_module_hashes(host, host_files, source_archive):
             'method': 'setupapi-build-fake-dll-i386', 'source_member': 'dlls/setupapi/fakedll.c',
             'source_sha256': source_hashes['dlls/setupapi/fakedll.c'], 'bytes': len(image),
             'names': selected, 'paths': ['drive_c/windows/syswow64/' + name for name in selected]}
+    # DllRegisterServer writes this exact resource with WriteFile. No text-mode
+    # conversion, arbitrary JSON equivalence, external DLL path or extra keys.
+    expected = {'file_format_version': '1.0.0',
+                'ICD': {'library_path': '.\\winevulkan.dll', 'api_version': '1.4.357'}}
+    for arch, destination in (('x86_64-windows', 'system32'), ('i386-windows', 'syswow64')):
+        relative = 'lib/wine/' + arch + '/winevulkan.dll'
+        parent = host / relative
+        record = host_files.get('pc/host-wine/usr/' + relative, {})
+        require(sha(parent) == record.get('sha256'), 'Vulkan JSON parent bytes changed')
+        payloads = [data for kind, data in wine_resources(parent, vulkan_manifest=True) if kind == 10]
+        require(len(payloads) == 1 and hashlib.sha256(payloads[0]).hexdigest() == VULKAN_JSON_SHA and
+                json.loads(payloads[0].decode('ascii')) == expected, 'Vulkan JSON resource differs from pinned source')
+        entry = allowed.setdefault(VULKAN_JSON_SHA, {'method': 'winevulkan-DllRegisterServer-RT_RCDATA',
+            'kind': 'data', 'source_member': 'dlls/winevulkan/winevulkan.json', 'source_sha256': VULKAN_JSON_SHA,
+            'bytes': len(payloads[0]), 'names': ['winevulkan.json'], 'paths': [], 'parents': []})
+        path = 'drive_c/windows/' + destination + '/winevulkan.json'
+        entry['paths'].append(path)
+        entry['parents'].append({'module': relative, 'sha256': record['sha256'], 'destination': path})
     return allowed
 
 
-def audit_source(converter, prefix, host, host_files, resources=None, generated=None):
+def audit_source(converter, prefix, host, host_files, resources=None, generated=None, issues=None):
     files, directories, links = converter.local_tree(prefix)
     require(len(files) <= MAX_FILES and len(directories) <= MAX_FILES, 'prefix too large')
     approved = {record['sha256'] for name, record in host_files.items() if name.startswith('pc/host-wine/usr/')}
     resources = resources or {}
     generated = generated or {}
+    issues = issues if issues is not None else {}
+    issues.update(files=[], scan_complete=False)
     audit, total, folded_paths = {}, 0, set()
     for path in prefix.rglob('*'):
         if '.wineserver' in path.relative_to(prefix).parts:
@@ -515,6 +542,7 @@ def audit_source(converter, prefix, host, host_files, resources=None, generated=
                      for directory, table in links.items() for name in table}
     for name in sorted(set(files) | (set(directories) - {''}) | virtual_paths):
         safe_relative(name)
+        require(len(name.encode('utf-8')) <= MAX_METADATA_PATH, 'prefix path exceeds diagnostic/runtime bound')
         require(name.casefold() not in folded_paths, 'case-colliding prefix path')
         folded_paths.add(name.casefold())
     folded_paths.clear()
@@ -531,31 +559,43 @@ def audit_source(converter, prefix, host, host_files, resources=None, generated=
         require(total <= MAX_BYTES, 'prefix byte limit')
         digest = sha(resolved)
         if name in REGISTRIES:
-            data = resolved.read_bytes()
-            require(data.startswith(b'WINE REGISTRY Version 2'), 'invalid registry header')
-            audit_text(data, name)
             source = 'generated-registry'
         elif name == '.update-timestamp':
-            # wineboot's text-mode _wopen/_write emits CRLF on disk. Keep
-            # the original bytes; an optional ending must be LF or CRLF.
-            require(re.fullmatch(rb'[0-9]+(?:\r?\n)?', resolved.read_bytes()), 'invalid initialization timestamp')
             source = 'generated-timestamp'
         elif name in GENERATED_TEXT:
-            audit_text(resolved.read_bytes(), name)
             source = 'generated-ini'
         else:
             # Every copied PE/font/data file must match the hash-bound runtime.
             record = generated.get(digest)
             derived = record and Path(name).name.casefold() in record['names'] and (
                 'paths' not in record or name.casefold() in record['paths'])
-            require(digest in approved or digest in resources or derived, 'unapproved generated/copied file: ' + name)
+            if not (digest in approved or digest in resources or derived):
+                issues['files'].append({'path': name, 'bytes': resolved.stat().st_size, 'sha256': digest})
+                continue
             source = ('bound-host-runtime' if digest in approved else
-                      'bound-runtime-resource' if digest in resources else 'bound-runtime-generated-module')
+                      'bound-runtime-resource' if digest in resources else
+                      'bound-runtime-generated-data' if record.get('kind') == 'data' else 'bound-runtime-generated-module')
         audit[name] = {'sha256': digest, 'bytes': resolved.stat().st_size, 'source': source}
         if source == 'bound-runtime-resource':
             audit[name]['origin'] = resources[digest]
-        elif source == 'bound-runtime-generated-module':
+        elif source in ('bound-runtime-generated-module', 'bound-runtime-generated-data'):
             audit[name]['origin'] = generated[digest]
+    issues['scan_complete'] = True
+    require(not issues['files'], 'unapproved generated/copied file: ' +
+            (issues['files'][0]['path'] if issues['files'] else '-') +
+            f" ({len(issues['files'])} total; export refused)")
+    # These strict content checks are deferred only until the unknown-content
+    # inventory is complete. None is bypassed before a successful export.
+    for name, record in audit.items():
+        if name in REGISTRIES:
+            data = files[name].read_bytes()
+            require(data.startswith(b'WINE REGISTRY Version 2'), 'invalid registry header')
+            audit_text(data, name)
+        elif name == '.update-timestamp':
+            # wineboot text-mode output is CRLF; retain the original bytes.
+            require(re.fullmatch(rb'[0-9]+(?:\r?\n)?', files[name].read_bytes()), 'invalid initialization timestamp')
+        elif name in GENERATED_TEXT:
+            audit_text(files[name].read_bytes(), name)
     require(REGISTRIES <= set(files), 'missing initialized registry')
     core = {'drive_c/windows/system32/notepad.exe': 'x86_64-windows/notepad.exe',
             'drive_c/windows/system32/kernel32.dll': 'x86_64-windows/kernel32.dll',
@@ -582,6 +622,26 @@ def audit_source(converter, prefix, host, host_files, resources=None, generated=
     return audit
 
 
+def unapproved_metadata(issues):
+    """Whitelisted metadata only, bounded independently before persistence/upload."""
+    require(isinstance(issues, dict) and set(issues) == {'files', 'scan_complete'} and
+            type(issues['scan_complete']) is bool and isinstance(issues['files'], list) and
+            len(issues['files']) <= MAX_FILES, 'invalid unapproved-file metadata')
+    previous = ''
+    for entry in issues['files']:
+        require(isinstance(entry, dict) and set(entry) == {'path', 'bytes', 'sha256'}, 'unexpected metadata field')
+        safe_relative(entry['path'])
+        require(len(entry['path'].encode('utf-8')) <= MAX_METADATA_PATH and entry['path'] > previous,
+                'unordered/oversized metadata path')
+        previous = entry['path']
+        require(type(entry['bytes']) is int and 0 <= entry['bytes'] <= MAX_FILE and
+                isinstance(entry['sha256'], str) and re.fullmatch('[0-9a-f]{64}', entry['sha256']),
+                'invalid unapproved-file identity')
+    encoded = json.dumps(issues, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    require(len(encoded) + 1 <= MAX_METADATA_BYTES, 'unapproved-file metadata exceeds bound')
+    return encoded + b'\n'
+
+
 def export(args):
     checkpoint, kit = args.work / 'checkpoint', args.work / 'kit'
     _, host_files = verify_tree(checkpoint, 'host-checkpoint')
@@ -604,8 +664,14 @@ def export(args):
     audit_text(profile.read_bytes(), 'diagnostic profile')
     converter = load_converter(checkpoint)
     host = checkpoint / 'pc/host-wine/usr'
-    audit = audit_source(converter, prefix, host, host_files, resource_hashes(host, host_files),
-                         generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz'))
+    issues = {'files': [], 'scan_complete': False}
+    try:
+        audit = audit_source(converter, prefix, host, host_files, resource_hashes(host, host_files),
+                             generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz'), issues)
+    finally:
+        if issues['files']:
+            with (args.work / 'UNAPPROVED-FILES.json').open('xb') as stream:
+                stream.write(unapproved_metadata(issues))
     # Ensure conversion actually changes the expected existing backend section.
     system = (prefix / 'system.reg').read_bytes()
     require(converter.CPU_KEY in system and converter.to_console('system.reg', system) != system,
@@ -674,6 +740,17 @@ def diagnostics(args):
             text = text.replace('/home/runner/', '<runner>/')
             (args.out / 'initialization.filtered.log').write_text(text)
             report['initialization_log'] = 'bounded and filtered'
+    unknown = args.work / 'UNAPPROVED-FILES.json'
+    if unknown.is_file() and not unknown.is_symlink():
+        try:
+            require(unknown.stat().st_size <= MAX_METADATA_BYTES, 'oversized metadata')
+            issues = json.loads(unknown.read_text())
+            encoded = unapproved_metadata(issues)
+            (args.out / 'UNAPPROVED-FILES.json').write_bytes(encoded)
+            report['unapproved_files'] = len(issues['files'])
+            report['unapproved_scan_complete'] = issues['scan_complete']
+        except (OSError, ValueError, TypeError, KeyError):
+            report['unapproved_files'] = 'withheld: invalid metadata'
     (args.out / 'DIAGNOSTICS.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
 
 
