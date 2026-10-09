@@ -539,3 +539,4 @@ tests/test_native_fd_mock.c
 native/pw_native_fd_report.c
 native/pw_native_fd_report.h
 tests/test_pw_native_fd_report.c
+tests/test_pw_native_child_capabilities.c
