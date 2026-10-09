@@ -13,10 +13,17 @@
 #include <unistd.h>
 
 static _Atomic int online, retries, closed, slow_reconnect, slow_send;
+static _Atomic int line_calls, hold_send, sender_inside;
 static char raw[256];
 static void pause_ms(unsigned ms) { struct timespec t = { 0, (long)ms * 1000000L }; nanosleep(&t, NULL); }
 static uint64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u; }
-int ps5log_line(const char *level, const char *text) { (void)level; (void)text; if (slow_send) pause_ms(300); return 0; }
+int ps5log_line(const char *level, const char *text)
+{
+    (void)level; (void)text; line_calls++;
+    if (hold_send) { sender_inside = 1; while (hold_send) pause_ms(1); }
+    if (slow_send) pause_ms(300);
+    return 0;
+}
 int ps5log_raw(const void *bytes, size_t length) { memcpy(raw, bytes, length < sizeof(raw) ? length : sizeof(raw) - 1); return 0; }
 int ps5log_enabled(void) { return online; }
 /* Like the real one, a reconnect to an absent server waits for the timeout. */
@@ -29,6 +36,13 @@ static void *writer(void *arg)
     return NULL;
 }
 
+static void *held_writer(void *unused)
+{
+    (void)unused;
+    pw_diagnostics_log("held-network-writer");
+    return NULL;
+}
+
 int main(void)
 {
     char root[] = "/tmp/pw-diagnostics-XXXXXX", path[512], data[8192], status[80];
@@ -38,6 +52,23 @@ int main(void)
     pw_diagnostics_log("before-open");
     assert(pw_diagnostics_open(root, "test-build", "pinball", 3) == 0);
     pw_diagnostics_status(status, sizeof(status)); assert(strstr(status, "LOG SAVED"));
+    /* The local-only entry point neither waits on the held network mutex nor
+     * calls send/reconnect, and uses the same saved record formatting. */
+    hold_send = 1;
+    pthread_t held; assert(!pthread_create(&held, NULL, held_writer, NULL));
+    for (unsigned i = 0; i < 1000 && !sender_inside; ++i) pause_ms(1);
+    assert(sender_inside);
+    int sent_before = line_calls, retries_before = retries;
+    uint64_t local_start = now_ms();
+    pw_diagnostics_log_local("local-only value=%d text=%s", -37, "retained");
+    pw_diagnostics_tick(5000000000ull);
+    assert(now_ms() - local_start < 100);
+    assert(line_calls == sent_before && retries == retries_before);
+    hold_send = 0; pthread_join(held, NULL);
+    snprintf(path, sizeof(path), "%s/logs/session-0.log", root);
+    FILE *local_file = fopen(path, "r"); assert(local_file);
+    size_t local_n = fread(data, 1, sizeof(data) - 1, local_file); data[local_n] = 0; fclose(local_file);
+    assert(strstr(data, "local-only value=-37 text=retained\n"));
     /* The title's loop never reconnects, whatever the channel's state. */
     online = 0; slow_reconnect = 1;
     uint64_t start = now_ms();
