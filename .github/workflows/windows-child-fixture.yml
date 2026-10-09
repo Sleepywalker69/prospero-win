@@ -102,6 +102,27 @@ jobs:
         with:
           name: original-fixture-x64-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/fixture-x64
+      - name: Verify downloaded fixture inputs before compilation
+        id: fixture-preflight
+        run: |
+          python3 - "$RUNNER_TEMP/fixture-x64" <<'PY'
+          import hashlib, json, os, pathlib, subprocess, sys
+          root = pathlib.Path.cwd()
+          sys.path.insert(0, str(root / 'tools'))
+          from prepare_windows_child_prefix import validate_pair
+          project = {name: subprocess.check_output(['git', 'rev-parse', value], text=True).strip()
+                     for name, value in [('commit', 'HEAD'), ('tree', 'HEAD^{tree}')]}
+          pair = validate_pair(pathlib.Path(sys.argv[1]), project)
+          for field, name in [('source_sha256', 'tests/fixtures/windows_child_process.c'),
+                              ('recipe_sha256', 'tools/build_windows_child_fixture.ps1')]:
+              expected = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if pair.get(field) != expected:
+                  raise SystemExit('fixture input bytes differ: ' + name)
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fixture-evidence'
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / 'fixture-preflight.json').write_text(json.dumps(pair, indent=2) + '\n')
+          print('Original Windows fixture bytes and producer inputs verified before compilation')
+          PY
       - name: Prepare ordinary hosted prerequisites
         run: |
           sudo apt-get update

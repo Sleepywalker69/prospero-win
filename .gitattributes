@@ -1,0 +1,3 @@
+# Keep cross-platform fixture provenance bound to the exact Git input bytes.
+tests/fixtures/windows_child_process.c text eol=lf
+tools/build_windows_child_fixture.ps1 text eol=lf

@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Actual title routing and environment ordering, using inert host boundaries."""
 import os
+import hashlib
+import json
 from pathlib import Path
 import re
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +34,78 @@ def preprocess(mode, include):
 
 
 class WineChildIntegration(unittest.TestCase):
+    def test_fixture_provenance_preflight_runs_before_expensive_builds(self):
+        workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
+                             Loader=yaml.BaseLoader)
+        steps = workflow['jobs']['matched-runtime']['steps']
+        index = next(i for i, step in enumerate(steps) if step.get('id') == 'fixture-preflight')
+        self.assertTrue(any(step.get('uses', '').startswith('actions/download-artifact@') for step in steps[:index]))
+        self.assertFalse(any('apt-get' in step.get('run', '') or 'build_wine' in step.get('run', '')
+                             for step in steps[:index]))
+        self.assertNotIn('if', steps[index])
+        project = {name: subprocess.check_output(['git', 'rev-parse', value], cwd=ROOT, text=True).strip()
+                   for name, value in [('commit', 'HEAD'), ('tree', 'HEAD^{tree}')]}
+        with tempfile.TemporaryDirectory(prefix='fixture provenance ') as directory:
+            temp = Path(directory)
+            pair = temp / 'fixture-x64'; pair.mkdir()
+            value = bytearray(512); value[:2] = b'MZ'
+            struct.pack_into('<I', value, 60, 128); value[128:132] = b'PE\0\0'
+            struct.pack_into('<H', value, 132, 0x8664); struct.pack_into('<H', value, 152, 0x20b)
+            struct.pack_into('<II', value, 152 + 152, 0x1000, 16)
+            for name in ('parent.exe', 'child.exe'):
+                (pair / name).write_bytes(value)
+            sha = lambda data: hashlib.sha256(data).hexdigest()
+            metadata = {'schema': 'pw-original-windows-child-msvc/1', 'project': project, 'architecture': 'x64',
+                'compiler': {'name': 'MSVC cl.exe', 'file_version': 'synthetic', 'sha256': 'a'*64},
+                'reference': {'exit': 0, 'deadline_seconds': 45},
+                'files': {name: {'bytes': len(value), 'sha256': sha(value)} for name in ('parent.exe', 'child.exe')},
+                'source_sha256': sha((ROOT / 'tests/fixtures/windows_child_process.c').read_bytes()),
+                'recipe_sha256': sha((ROOT / 'tools/build_windows_child_fixture.ps1').read_bytes())}
+            for changed in (None, 'source_sha256', 'recipe_sha256'):
+                record = dict(metadata)
+                if changed: record[changed] = '0'*64
+                (pair / 'fixture-source.json').write_text(json.dumps(record))
+                result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', steps[index]['run']],
+                    cwd=ROOT, env=dict(os.environ, RUNNER_TEMP=str(temp)), capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode == 0, changed is None, result.stderr)
+                if changed: self.assertIn('fixture input bytes differ:', result.stderr)
+            self.assertTrue((temp / 'fixture-evidence/fixture-preflight.json').is_file())
+
+    def test_windows_fixture_checkout_preserves_hashed_input_bytes(self):
+        inputs = ('tests/fixtures/windows_child_process.c', 'tools/build_windows_child_fixture.ps1')
+        with tempfile.TemporaryDirectory(prefix='fixture checkout ') as directory:
+            checkout = Path(directory)
+            env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(checkout), *args], env=env,
+                                               stderr=subprocess.PIPE)
+            git('init', '--quiet')
+            git('config', 'core.autocrlf', 'true')
+            expected = {}
+            for name in inputs:
+                data = (ROOT / name).read_bytes()
+                self.assertNotIn(b'\r\n', data, 'fixture provenance inputs must have LF bytes')
+                expected[name] = data
+                target = checkout / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            attributes = ROOT / '.gitattributes'
+            if attributes.exists():
+                (checkout / '.gitattributes').write_bytes(attributes.read_bytes())
+            # Prove conversion is active for unrelated text, so this cannot
+            # pass merely because the temporary checkout ignored autocrlf.
+            (checkout / 'unrelated.txt').write_bytes(b'ordinary\ntext\n')
+            git('add', '--all')
+            for name in (*inputs, 'unrelated.txt'):
+                (checkout / name).unlink()
+            git('checkout-index', '--all')
+            self.assertEqual((checkout / 'unrelated.txt').read_bytes(), b'ordinary\r\ntext\r\n')
+            for name in inputs:
+                with self.subTest(path=name):
+                    self.assertEqual(git('show', ':' + name), expected[name])
+                    self.assertTrue((checkout / name).read_bytes() == expected[name],
+                                    'checkout changed the hashed input bytes: ' + name)
+
     def test_workflow_job_environment_contexts(self):
         workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
                              Loader=yaml.BaseLoader)
