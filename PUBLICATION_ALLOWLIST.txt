@@ -543,4 +543,10 @@ tests/test_pw_native_child_capabilities.c
 tests/test_pw_native_fd_worker.c
 native/pw_native_peer_protocol.c
 native/pw_native_peer_protocol.h
+native/pw_native_peer_probe.c
+native/pw_native_peer_probe.h
 tests/test_pw_native_peer_protocol.c
+tests/test_pw_native_peer_probe.c
+tests/native_peer_fixture/peer_abi.h
+tests/native_peer_fixture/sys/socket.h
+tests/native_peer_fixture/sys/un.h
