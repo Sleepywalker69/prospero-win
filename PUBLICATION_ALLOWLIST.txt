@@ -873,3 +873,5 @@ wine/ps5/d3d9/pw_d3d9_native_gamma.h
 tests/lab/d3d9_native_gamma.c
 tests/lab/d3d9_native_gamma.py
 docs/d3d9-native-gamma.md
+tools/check_private_dispatch_abi.py
+tests/test_private_dispatch_build.py
