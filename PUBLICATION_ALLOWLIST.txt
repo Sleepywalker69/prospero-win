@@ -903,3 +903,13 @@ wine/patches/0912-wine-fixture-service-consumers.patch
 wine/patches/0913-wine-owned-stream-setup.patch
 wine/ps5/pw_wine_fixture_provider.c
 wine/ps5/pw_wine_fixture_provider.h
+native/pw_wine_child_bootstrap.c
+native/pw_wine_child_bootstrap.h
+native/pw_wine_child_main.c
+native/pw_wine_child_wire.c
+native/pw_wine_child_wire.h
+tests/test_pw_wine_child_bootstrap.c
+tests/test_pw_wine_child_main.c
+tests/test_pw_wine_child_wire.c
+tests/wine_child_fixture/sys/socket.h
+tests/wine_child_fixture/wine-child-build.h
