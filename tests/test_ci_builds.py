@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Keep CI fail-closed, source-backed, read-only, and explicit about its artifacts."""
 from pathlib import Path
+import hashlib
+import importlib.util
+import json
+import struct
 import os
 import re
 import subprocess
@@ -241,4 +245,46 @@ with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
     assert '--dyn-syms -r -W' in (evidence / 'later.shared.elf.log').read_text()
     assert (evidence / 'later.shared.elf-disassembly.log').is_file()
     assert (evidence / 'later.elf.log').is_file()
+watchdog = next(step for step in prxs['steps'] if step.get('name') ==
+                'Check actual compiled watchdog source and object')
+assert 'check_wine_prx_build.py' in prx_runs and 'watchdog-build.json' in prx_runs
+code = watchdog['run'].split("<<'PY'\n", 1)[1].split('\nPY', 1)[0]
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location('watchdog_fixture', ROOT/'tests/test_wine_watchdog_process_guard.py')
+guard = importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory); work = root/'work'; output = root/'watchdog.json'; readelf = root/'readelf'
+    source, obj, linked = work/'source/server/thread.c', work/'build/server/thread.o', work/'build/server/wineserver'
+    source.parent.mkdir(parents=True); obj.parent.mkdir(parents=True)
+    patched = 'static void wait_watchdog( void *arg )\n{\n'+guard.patch_sides()[2]+'\n}\nstatic void start_wait_watchdog(void) {}\n'
+    source.write_text(patched); linked.write_bytes(b'original linked fixture')
+    header = bytearray(64); header[:7] = b'\x7fELF\x02\x01\x01'; struct.pack_into('<HH', header, 16, 1, 62)
+    obj.write_bytes(header)
+    row = '1: 00000000 19 FUNC LOCAL DEFAULT 1 wait_watchdog'
+    def analyzer(text=row, status=0):
+        readelf.write_text("#!/bin/sh\ncat <<'END'\n"+text+"\nEND\nexit "+str(status)+"\n")
+        readelf.chmod(0o755)
+    analyzer()
+    report = {'prx': {'status': '0'}, 'patches': [guard.PATCH.name], 'targets': {
+        'server/wineserver': {'built': True, 'sha256': hashlib.sha256(linked.read_bytes()).hexdigest()}}}
+    def run():
+        (work/'report.json').write_text(json.dumps(report))
+        return subprocess.run([sys.executable, '-c', code, str(work), str(readelf), str(output)],
+                              cwd=ROOT, capture_output=True, text=True)
+    assert run().returncode == 0
+    recorded = json.loads(output.read_text()); assert recorded['executed'] is False
+    assert recorded['object_sha256'] == hashlib.sha256(header).hexdigest()
+    for bad in ('', row.replace('FUNC', 'OBJECT'), row.replace('DEFAULT 1', 'DEFAULT UND'), row.replace(' 19 ', ' 0 '), row+'\n'+row):
+        analyzer(bad); assert run().returncode != 0
+    analyzer(status=7); assert run().returncode != 0; analyzer()
+    obj.unlink(); assert run().returncode != 0; obj.write_bytes(header)
+    for offset, value in ((4, 1), (16, 2), (18, 3)):
+        bad = bytearray(header); bad[offset] = value; obj.write_bytes(bad); assert run().returncode != 0
+    obj.write_bytes(header)
+    source.write_text(patched.replace(guard.condition(guard.patch_sides()[2])[0], guard.condition(guard.patch_sides()[1])[0]))
+    assert run().returncode != 0; source.write_text(patched)
+    report['patches'] = []; assert run().returncode != 0; report['patches'] = [guard.PATCH.name]
+    report['prx']['status'] = 'skipped'; assert run().returncode != 0; report['prx']['status'] = '0'
+    linked.write_bytes(b'changed after report'); assert run().returncode != 0
+
 print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX build artifacts")
