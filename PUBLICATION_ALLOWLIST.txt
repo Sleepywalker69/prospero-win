@@ -580,3 +580,6 @@ wine/patches/0902-ntdll-native-service-domain.patch
 tests/lab/d3d9_native_domain.c
 tests/lab/d3d9_native_domain.py
 docs/d3d9-native-domain.md
+native/pw_native_socket_diagnostic.c
+native/pw_native_socket_diagnostic.h
+tests/test_pw_native_socket_diagnostic.c
