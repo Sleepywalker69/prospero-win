@@ -32,17 +32,24 @@ class WorkerBuildTests(unittest.TestCase):
     def test_mode_and_linked_sources_bind_the_worker_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for name in build.SOURCES + build.FD_SOURCES:
+            for name in build.SOURCES + build.FD_SOURCES + build.PEER_SOURCES:
                 path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(name)
             with mock.patch.object(build, 'ROOT', root):
                 hello_sources, hello = build.mode_inputs('hello')
                 fd_sources, fd = build.mode_inputs('fd')
+                peer_sources, peer = build.mode_inputs('peer-exit')
+                self.assertEqual(len({hello, fd, peer}), 3)
+                self.assertEqual(set(peer_sources) - set(hello_sources), set(build.PEER_SOURCES))
                 self.assertNotEqual(hello, fd)
                 self.assertEqual(set(fd_sources) - set(hello_sources), set(build.FD_SOURCES))
                 (root / build.FD_SOURCES[0]).write_text('changed descriptor implementation')
                 self.assertEqual(build.mode_inputs('hello')[1], hello)
                 self.assertNotEqual(build.mode_inputs('fd')[1], fd)
+                self.assertEqual(build.mode_inputs('peer-exit')[1], peer)
+                (root / build.PEER_SOURCES[0]).write_text('changed credential/event implementation')
+                self.assertNotEqual(build.mode_inputs('peer-exit')[1], peer)
+                self.assertEqual(build.mode_inputs('hello')[1], hello)
                 with self.assertRaises(ValueError):
                     build.mode_inputs('unknown')
 
@@ -183,6 +190,15 @@ class WorkerBuildTests(unittest.TestCase):
                 analyzer.imports = build.FD_IMPORTS | {forbidden}
                 with self.subTest(forbidden=forbidden), self.assertRaises(ValueError):
                     build.validate_link(linked, sdk, root, analyzer, 'fd')
+            analyzer.imports = set(build.IMPORTS)
+            with self.assertRaises(ValueError):
+                build.validate_link(linked, sdk, root, analyzer, 'peer-exit')
+            analyzer.imports = set(build.PEER_IMPORTS)
+            self.assertEqual(build.validate_link(linked, sdk, root, analyzer, 'peer-exit')['imports'], sorted(build.PEER_IMPORTS))
+            for forbidden in ('__error', 'kqueue', 'kevent', 'sysctl', 'socketpair', 'shutdown', '__patch_init'):
+                analyzer.imports = build.PEER_IMPORTS | {forbidden}
+                with self.subTest(peer_forbidden=forbidden), self.assertRaises(ValueError):
+                    build.validate_link(linked, sdk, root, analyzer, 'peer-exit')
             analyzer.imports = set(build.IMPORTS)
             for field, bad in (('needed', 'libkernel_web.sprx'), ('imports', build.IMPORTS | {'__error'}),
                                ('imports', build.IMPORTS - {'_exit'}), ('kind', 'OBJECT'), ('binding', 'LOCAL'),
