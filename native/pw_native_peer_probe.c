@@ -242,6 +242,7 @@ int pw_native_peer_parent_open(PwNativePeerProbe *p, const char *path, PwNativeC
     memset(p,0,sizeof(*p));p->listener=p->stream=p->queue=-1;memset(r,0,sizeof(*r));
     if(remaining(io,r,NULL) || address(path,&a,&length,r))return -1;
     p->listener=socket_new(r);if(p->listener<0)return -1;
+    if(remaining(io,r,NULL))goto failed;
     api(r,PW_NP_API_BIND);int rc=bind(p->listener,(struct sockaddr *)(void *)&a,length);
     if(rc){fail(r,PW_NP_OS,rc);goto failed;}
     p->bound=1;memcpy(p->path,path,strlen(path)+1);
@@ -378,6 +379,7 @@ int pw_native_peer_worker_exchange(PwNativeChildIo *io, const PwNativeChildFrame
     io->stage_end=effective-PW_NP_REPORT_RESERVE_MS;
     if(pw_native_peer_paths(session->parent_pid,session->correlation,directory,path) || address(path,&a,&length,r)){fail(r,PW_NP_INVALID,0);goto finish;}
     fd=socket_new(r);if(fd<0)goto finish;
+    if(remaining(io,r,NULL))goto finish;
     api(r,PW_NP_API_CONNECT);int rc=connect(fd,(struct sockaddr *)(void *)&a,length);
     if(rc){fail(r,PW_NP_OS,rc);goto finish;}
     phase(r,PW_NP_READY);pw_native_peer_record(&record,session,PW_NP_WORKER_READY);

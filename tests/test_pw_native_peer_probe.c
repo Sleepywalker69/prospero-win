@@ -75,7 +75,7 @@ static struct {
  int fcntl_calls,close_errno,ioctl_calls[256],fd_flags[256],file_flags[256];
  int ioctl_fail_fd,ioctl_fail_result,setsockopt_fail_fd,connects,worker_reports;
  unsigned long ioctl_fail_request;PwNativePeerRecord sent_worker_report;
- int setsockopt_calls,bind_calls,listen_calls;
+ int setsockopt_calls,bind_calls,listen_calls,prepare_effect;
  int poll_effect,control_poll,control_short; unsigned control_at,control_sent;
  int event_step,receipt_case,early_case,event_case,rng_return,rng_size,rng_calls,receipt_calls;
  int rng_effect,send_effect,recv_effect,event_effect; unsigned max_slice;
@@ -151,7 +151,7 @@ static int mock_ioctl(int fd,unsigned long request,...)
  return 0;
 }
 static int mock_setsockopt(int fd,int level,int name,const void *value,socklen_t n)
-{ m.setsockopt_calls++;assert(fd==20||fd==30);assert(level==SOL_SOCKET&&name==SO_NOSIGPIPE&&n==sizeof(int)&&*(const int *)value==1);assert(m.ioctl_calls[fd]==2);if(fd==m.setsockopt_fail_fd){errno=EINVAL;return -1;}return 0; }
+{ m.setsockopt_calls++;assert(fd==20||fd==30);assert(level==SOL_SOCKET&&name==SO_NOSIGPIPE&&n==sizeof(int)&&*(const int *)value==1);assert(m.ioctl_calls[fd]==2);if(fd==m.setsockopt_fail_fd){errno=EINVAL;return -1;}effect(m.prepare_effect);return 0; }
 static int mock_bind(int fd,const struct sockaddr *a,socklen_t n)
 { m.bind_calls++;assert(fd==20&&a&&n>2&&a->sa_len==n&&a->sa_family==AF_UNIX);return m.bind_fail?-1:0; }
 static int mock_listen(int fd,int backlog){m.listen_calls++;assert(fd==20&&backlog==1);return m.listen_fail?-1:0;}
@@ -376,10 +376,33 @@ static int test_ioctl_contract(void)
  }
  return 0;
 }
+static int test_prepare_boundary(int worker,int cancelled)
+{
+ reset();m.prepare_effect=cancelled?2:1;int rc;
+ if(worker){m.worker=1;rc=pw_native_peer_worker_exchange(&m.io,&m.session,&m.result);}
+ else rc=open_parent();
+ CHECK(rc<0);CHECK(m.result.status==(cancelled?PW_NP_CANCELLED:PW_NP_TIMEOUT));
+ CHECK(m.close_count[20]==1);CHECK(!m.sends&&!m.receives&&!m.queues);
+ fprintf(stderr,"boundary worker=%d cancel=%d bind=%d listen=%d connect=%d close=%d status=%d\n",
+   worker,cancelled,m.bind_calls,m.listen_calls,m.connects,m.close_count[20],m.result.status);
+ if(worker)CHECK(!m.connects);else CHECK(!m.bind_calls&&!m.listen_calls&&!m.unlinks);
+ return 0;
+}
 int main(int argc,char **argv)
 {
  (void)mock_ioctl;(void)mock_fcntl;
- if(argc>1){if(!strcmp(argv[1],"ioctl"))return test_ioctl_contract();if(!strcmp(argv[1],"receipt"))return test_receipt();if(!strcmp(argv[1],"reserve"))return test_reserve();if(!strcmp(argv[1],"close-budget"))return test_close_budget();return 2;}
- if(test_ioctl_contract()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
+ if(argc>1){
+  if(!strcmp(argv[1],"prepare-parent-expiry"))return test_prepare_boundary(0,0);
+  if(!strcmp(argv[1],"prepare-parent-cancel"))return test_prepare_boundary(0,1);
+  if(!strcmp(argv[1],"prepare-worker-expiry"))return test_prepare_boundary(1,0);
+  if(!strcmp(argv[1],"prepare-worker-cancel"))return test_prepare_boundary(1,1);
+  if(!strcmp(argv[1],"ioctl"))return test_ioctl_contract();
+  if(!strcmp(argv[1],"receipt"))return test_receipt();
+  if(!strcmp(argv[1],"reserve"))return test_reserve();
+  if(!strcmp(argv[1],"close-budget"))return test_close_budget();
+  return 2;
+ }
+ if(test_prepare_boundary(0,0)||test_prepare_boundary(0,1)||test_prepare_boundary(1,0)||test_prepare_boundary(1,1)||
+    test_ioctl_contract()||test_receipt()||test_reserve()||test_close_budget()||test_credentials()||test_events_entropy()||test_paths_deadlines()||test_worker_cleanup())return 1;
  printf("native peer target-ABI pure mocks: %u checks passed; no native capabilities verified\n",checks);return 0;
 }
