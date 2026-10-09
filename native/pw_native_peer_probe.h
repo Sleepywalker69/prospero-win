@@ -13,7 +13,8 @@ enum { PW_NP_API_NONE, PW_NP_API_CLOCK, PW_NP_API_SOCKET, PW_NP_API_FCNTL,
        /* Append codes so saved records retain their original meaning. */
        PW_NP_API_FCNTL_GETFD, PW_NP_API_FCNTL_SETFD,
        PW_NP_API_FCNTL_GETFL, PW_NP_API_FCNTL_SETFL,
-       PW_NP_API_IOCTL_FIOCLEX, PW_NP_API_IOCTL_FIONBIO };
+       PW_NP_API_IOCTL_FIOCLEX, PW_NP_API_IOCTL_FIONBIO,
+       PW_NP_API_SETSOCKOPT_NBIO, PW_NP_API_GETSOCKOPT_NBIO };
 typedef struct {
     uint32_t pid, uid, euid, gid, groups;
 } PwNativePeerCredential;

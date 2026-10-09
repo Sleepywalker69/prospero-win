@@ -31,7 +31,7 @@ WORKER_FLAGS = ("--no-default-config", "-std=c11", "-O2", "-Wall", "-Wextra", "-
                 "-ffreestanding", "-fno-builtin", "-fPIE", "-fasynchronous-unwind-tables")
 IMPORTS = {"_exit", "getpid", "getppid", "clock_gettime", "fcntl", "poll", "read", "write", "setsockopt"}
 FD_IMPORTS = IMPORTS | {"socket", "socketpair", "connect", "close", "sendmsg", "recvmsg", "shutdown"}
-PEER_IMPORTS = IMPORTS | {"socket", "connect", "close", "sendmsg", "recvmsg", "ioctl"}
+PEER_IMPORTS = IMPORTS | {"socket", "connect", "close", "sendmsg", "recvmsg", "ioctl", "getsockopt"}
 MAX_WORKER = 4 * 1024 * 1024
 
 
