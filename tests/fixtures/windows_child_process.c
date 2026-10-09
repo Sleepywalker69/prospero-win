@@ -111,7 +111,11 @@ static int start_child(const wchar_t *path, const wchar_t *mode, DWORD nonce, st
     int length;
     DWORD error;
     memset(child, 0, sizeof(*child)); memset(&startup, 0, sizeof(startup)); startup.cb = (DWORD)sizeof(startup);
-    if (!CreatePipe(&child->read_pipe, &write_pipe, &attributes, 0)) goto setup_failed;
+    if (!CreatePipe(&child->read_pipe, &write_pipe, &attributes, 0)) {
+        /* CreatePipe documents indeterminate output handles on failure. */
+        child->read_pipe = write_pipe = NULL;
+        goto setup_failed;
+    }
     owned_handles += 2;
     if (!SetHandleInformation(child->read_pipe, HANDLE_FLAG_INHERIT, 0)) goto setup_failed;
     child->release_event = CreateEventW(&attributes, TRUE, FALSE, NULL);
