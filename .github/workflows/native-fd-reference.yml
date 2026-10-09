@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Original native descriptor reference
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+concurrency:
+  group: native-fd-reference-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  linux-reference:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'test-native-fd-capability')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang-18]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare original source and supported host tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-fd-evidence/source" "$RUNNER_TEMP/native-fd-build"
+          cp --parents native/pw_native_fd_probe.{c,h} tests/fixtures/native_fd_capability.c \
+            docs/NATIVE_FD_REFERENCE.md LICENSE NOTICE.md LICENSING.md \
+            "$RUNNER_TEMP/native-fd-evidence/source/"
+          git rev-parse HEAD > "$RUNNER_TEMP/native-fd-evidence/source-commit.txt"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18
+      - name: Compile the real original Linux fixture
+        env:
+          REFERENCE_CC: ${{ matrix.compiler }}
+        run: |
+          {
+            "$REFERENCE_CC" --version
+            flags=(-std=c11 -O2 -Wall -Wextra -Werror -pedantic)
+            if [[ "$REFERENCE_CC" == clang-18 ]]; then
+              flags+=(-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined)
+            fi
+            printf 'Compiler: %s\nFlags: %s\n' "$REFERENCE_CC" "${flags[*]}"
+            "$REFERENCE_CC" "${flags[@]}" tests/fixtures/native_fd_capability.c \
+              -o "$RUNNER_TEMP/native-fd-build/reference"
+            sha256sum "$RUNNER_TEMP/native-fd-build/reference"
+          } 2>&1 | tee "$RUNNER_TEMP/native-fd-evidence/build.log"
+      - name: Run permitted Linux descriptor tests with an outer deadline
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          set +e
+          timeout --kill-after=2s 20s "$RUNNER_TEMP/native-fd-build/reference" \
+            > "$RUNNER_TEMP/native-fd-evidence/reference.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/native-fd-evidence/reference.log"
+          printf '%s\n' "$result" > "$RUNNER_TEMP/native-fd-evidence/reference.exit"
+          test "$result" -eq 0
+      - name: Hash available source and reference evidence
+        if: ${{ always() }}
+        run: |
+          evidence="$RUNNER_TEMP/native-fd-evidence"
+          if [[ -d "$evidence" ]]; then
+            (cd "$evidence" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          fi
+      - name: Retain original source and Linux results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-fd-linux-${{ matrix.compiler }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-fd-evidence/
+          if-no-files-found: warn
+          retention-days: 7

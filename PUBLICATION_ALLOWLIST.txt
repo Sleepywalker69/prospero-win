@@ -532,4 +532,7 @@ tests/test_pw_native_child_probe.c
 tests/native_child_probe_fixture/native-child-build.h
 native/pw_native_fd_probe.c
 native/pw_native_fd_probe.h
+tests/fixtures/native_fd_capability.c
+.github/workflows/native-fd-reference.yml
+docs/NATIVE_FD_REFERENCE.md
 tests/test_native_fd_mock.c
