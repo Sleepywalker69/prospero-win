@@ -34,7 +34,10 @@ scripts' cache locations only after verification. There are no shared warm
 build caches or floating source branches.
 
 The proposed Ubuntu build uses matching Clang/LLVM18, LLVM-SPIRV-Translator18.1
-and SPIRV-Tools >=2024.1. Mesa's configure API checks remain mandatory. Meson
+and SPIRV-Tools >=2024.1. The official `glslang-tools` package supplies host
+`glslangValidator`; its checked `--version` preflight is retained, and pinned
+Mesa requires glslang >=12.2 for AMD Vulkan BVH shader generation. Mesa's
+configure version and API checks remain mandatory. Meson
 1.7.2 and Python generator dependencies are pinned in an isolated environment;
 Ubuntu 24.04's base Meson 1.3.2 would be too old. Installed system package and
 Python versions are retained. Ubuntu adaptation is not an assertion that the

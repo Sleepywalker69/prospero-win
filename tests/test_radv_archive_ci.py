@@ -4,6 +4,8 @@
 from pathlib import Path
 import json
 import os
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -130,6 +132,35 @@ class ArchiveTests(unittest.TestCase):
             self.assertFalse(trace.exists())
             self.assertEqual(setup.stat().st_mode & 0o777, 0o644)
             self.assertEqual(build.stat().st_mode & 0o777, 0o644)
+
+    def test_glslang_package_and_real_version_probe_are_required(self):
+        workflow = yaml.load((ROOT / '.github/workflows/radv-archive.yml').read_text(), Loader=yaml.BaseLoader)
+        step = next(s for s in workflow['jobs']['radv-archive']['steps']
+                    if s.get('name', '').startswith('Install matched'))
+        logical = step['run'].replace('\\\n', ' ').splitlines()
+        install = next(line for line in logical if line.strip().startswith('sudo apt-get install '))
+        self.assertIn('glslang-tools', shlex.split(install))
+        probes = [line.strip() for line in logical if line.strip().startswith('glslangValidator ')]
+        self.assertEqual(probes, ['glslangValidator --version'])
+        bash = shutil.which('bash'); self.assertIsNotNone(bash)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); tool = root / 'glslangValidator'; trace = root / 'called'
+            env = dict(os.environ, PATH=str(root), TRACE=str(trace), LC_ALL='C')
+            def run():
+                return subprocess.run([bash, '-e', '-o', 'pipefail', '-c', probes[0]],
+                                      env=env, capture_output=True, text=True)
+            self.assertEqual(run().returncode, 127)  # actual missing executable
+            tool.write_text('#!/bin/sh\n[ "$1" = --version ] || exit 32\n'
+                            'printf called > "$TRACE"\nprintf "Glslang Version: 11:15.1.0\\n"\n')
+            tool.chmod(0o755)
+            result = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(trace.read_text(), 'called')
+            self.assertIn('15.1.0', result.stdout)
+            tool.chmod(0o644)
+            self.assertEqual(run().returncode, 126)  # readable is insufficient for this installed binary
+            tool.chmod(0o755); tool.write_text('#!/bin/sh\necho fixture-compiler-failed >&2\nexit 43\n')
+            self.assertEqual(run().returncode, 43)
 
     def test_workflow_keeps_explicit_boundaries(self):
         workflow = yaml.load((ROOT / '.github/workflows/radv-archive.yml').read_text(), Loader=yaml.BaseLoader)
