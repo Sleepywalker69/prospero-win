@@ -48,6 +48,9 @@ RUNTIME_PACKAGES = ('gcc-mingw-w64-base', 'gcc-mingw-w64-x86-64-posix',
                     'g++-mingw-w64-x86-64-posix', 'mingw-w64-common', 'mingw-w64-x86-64-dev')
 RUNTIME_LIBRARIES = ('crt2.o', 'dllcrt2.o', 'libmingw32.a', 'libmingwex.a', 'libgcc.a',
                      'libgcc_eh.a', 'libstdc++.a', 'libwinpthread.a')
+TOOL_ALIASES = {'x86_64-w64-mingw32-gcc': 'x86_64-w64-mingw32-gcc-posix',
+                'x86_64-w64-mingw32-g++': 'x86_64-w64-mingw32-g++-posix',
+                'widl': 'x86_64-w64-mingw32-widl', 'glslang': 'glslangValidator'}
 
 
 def require(ok, message):
@@ -267,6 +270,20 @@ def verify_checkpoint(work):
     return value
 
 
+def build_environment(work, selected):
+    # Bind upstream's first compiler/IDL/GLSL lookups to recorded providers,
+    # before inherited PATH entries, without changing system alternatives.
+    wrappers = work / 'tools'; wrappers.mkdir()
+    for name, provider in TOOL_ALIASES.items():
+        (wrappers / name).symlink_to(selected[provider])
+    env = dict(os.environ)
+    for name in ('CC', 'CXX', 'CPP', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'LD_PRELOAD',
+                 'MESON_ARGS', 'WINELOADER', 'WINESERVER', 'WINEPREFIX'):
+        env.pop(name, None)
+    env.update(PATH=str(wrappers) + os.pathsep + env.get('PATH', ''), LC_ALL='C', TZ='UTC', PYTHONDONTWRITEBYTECODE='1')
+    return env
+
+
 def build(work):
     work = work.resolve()
     checkpoint = verify_checkpoint(work)
@@ -275,18 +292,7 @@ def build(work):
             'build output already exists')
     (work / 'app').mkdir()
     selected = {name: value['path'] for name, value in checkpoint['tools'].items()}
-    # Private wrappers select POSIX compilers and the MinGW IDL compiler without
-    # changing system alternatives; upstream's first widl lookup is bound.
-    wrappers = work / 'tools'; wrappers.mkdir()
-    for name, provider in {'x86_64-w64-mingw32-gcc': 'x86_64-w64-mingw32-gcc-posix',
-                           'x86_64-w64-mingw32-g++': 'x86_64-w64-mingw32-g++-posix',
-                           'widl': 'x86_64-w64-mingw32-widl'}.items():
-        (wrappers / name).symlink_to(selected[provider])
-    env = dict(os.environ)
-    for name in ('CC', 'CXX', 'CPP', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'LD_PRELOAD',
-                 'MESON_ARGS', 'WINELOADER', 'WINESERVER', 'WINEPREFIX'):
-        env.pop(name, None)
-    env.update(PATH=str(wrappers) + os.pathsep + env.get('PATH', ''), LC_ALL='C', TZ='UTC', PYTHONDONTWRITEBYTECODE='1')
+    env = build_environment(work, selected)
     script = commands(source, work)
     (work / 'COMMANDS.json').write_text(json.dumps(script, indent=2) + '\n')
     for index, argv in enumerate(script):

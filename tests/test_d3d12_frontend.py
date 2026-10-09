@@ -5,8 +5,10 @@ from pathlib import Path
 import io
 import copy
 import json
+import os
 import shutil
 import stat
+import subprocess
 import struct
 import sys
 import tarfile
@@ -148,6 +150,24 @@ class FrontendTests(unittest.TestCase):
         for name, digest in build.FIXTURES.items():
             self.assertEqual(build.sha(ROOT / 'tests/fixtures' / name), digest)
         self.assertEqual(build.sha(ROOT / 'tools/inspect_graphics_pe.py'), build.PE_INSPECTOR_SHA)
+
+    def test_actual_glslang_wrapper_precedes_competing_inherited_path(self):
+        # Only original tiny host scripts execute here, never a shader compiler.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); chosen = root / 'chosen'; other = root / 'other'; work = root / 'work'
+            chosen.mkdir(); other.mkdir(); work.mkdir()
+            selected = {}
+            for name in set(build.TOOL_ALIASES.values()):
+                path = chosen / name; path.write_text('#!/bin/sh\nprintf "selected-provider\\n"\n'); path.chmod(0o755)
+                selected[name] = str(path.resolve())
+            wrong = other / 'glslang'; wrong.write_text('#!/bin/sh\nprintf "wrong-provider\\n"\n'); wrong.chmod(0o755)
+            with patch.dict(os.environ, {'PATH': str(other)}, clear=False):
+                env = build.build_environment(work, selected)
+            actual = shutil.which('glslang', path=env['PATH'])
+            self.assertEqual(Path(actual).resolve(), Path(selected['glslangValidator']))
+            result = subprocess.run(['glslang'], env=env, text=True, capture_output=True, check=True)
+            self.assertEqual(result.stdout, 'selected-provider\n')
+            self.assertEqual(env['PATH'].split(os.pathsep)[0], str(work / 'tools'))
 
     def test_source_pins_cleanliness_and_nested_membership_are_enforced(self):
         with tempfile.TemporaryDirectory() as tmp:
