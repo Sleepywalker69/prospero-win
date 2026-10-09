@@ -891,3 +891,6 @@ tests/test_private_dispatch_wow64_contract.py
 tests/fixtures/private_dispatch_i386.c
 wine/patches/0914-ntdll-private-dispatcher-wow64.patch
 docs/private-dispatch-wow64.md
+wine/ps5/pw_wine_fixture_socket.c
+wine/ps5/pw_wine_fixture_socket.h
+tests/test_pw_wine_fixture_socket.c
