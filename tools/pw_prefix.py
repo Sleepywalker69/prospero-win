@@ -21,6 +21,14 @@ registry and saves beside themselves. A push refuses to overwrite a console
 prefix it does not know, or one whose registry changed since the last push
 or pull, until it is pulled (or --force).
 
+An existing profiles.lst is checked before any remote file or directory write:
+its byte syntax, unique names, 16-entry limit and native reader size must fit.
+An already-listed profile can be updated at capacity. Existing catalog bytes
+and unrelated entries are preserved. Stop concurrent catalog editing while
+pushing: the catalog is checked again before publishing the profile/index, but
+FTP has no compare-and-swap and the whole transfer is not atomic. A detected
+late change can leave prefix files already transferred for review/recovery.
+
 A title cannot make symbolic links, so prospero-win keeps them per directory
 in a .pw-symlinks table (NAME<TAB>TARGET lines, wine/ps5/pw_wine_cwd.h). A
 push writes each directory's links inside the prefix there (dosdevices' c:
@@ -87,6 +95,8 @@ CHUNK = 4 << 20
 # How often a push records its progress in the manifest.
 SAVE_EVERY_FILES = 200
 SAVE_EVERY_BYTES = 256 << 20
+# src/pw_profile_catalog.{c,h}; native/pw_wine_library.c rejects >= 8192 bytes.
+PROFILE_CATALOG_MAX, PROFILE_CATALOG_NAME, PROFILE_CATALOG_BYTES = 16, 64, 8192
 # ps5upload's payload: transactions on 9113; hello and query-tx on its
 # management port, 9114 (it answers wrong_port to anything else).
 # Each transaction carries up to PS5UPLOAD_BATCH_* of the game, and a push
@@ -120,6 +130,25 @@ def to_pc(key: str, data: bytes) -> bytes:
 
 class SyncError(Exception):
     pass
+
+
+def profile_catalog_names(data: bytes) -> list[bytes]:
+    """Match the native parser's LF-only split and explicit byte trimming."""
+    if len(data) >= PROFILE_CATALOG_BYTES:
+        raise SyncError("profiles.lst reaches the native reader's 8192-byte limit")
+    names = []
+    for number, raw in enumerate(data.split(b"\n"), 1):
+        name = raw.lstrip(b" \t").rstrip(b" \t\r")
+        if not name or name[:1] in (b"#", b";"):
+            continue
+        if len(name) >= PROFILE_CATALOG_NAME or not re.fullmatch(rb"[a-z0-9_-]+\.profile", name):
+            raise SyncError(f"profiles.lst has an invalid filename on line {number}")
+        if name in names:
+            raise SyncError(f"profiles.lst repeats a filename on line {number}")
+        if len(names) == PROFILE_CATALOG_MAX:
+            raise SyncError("profiles.lst exceeds the native limit of 16 entries")
+        names.append(name)
+    return names
 
 
 class Interrupted(Exception):
@@ -412,6 +441,7 @@ class Sync:
     def push(self) -> None:
         if not self.prefix.is_dir() or not self.profile.is_file():
             raise SyncError(f"no installed {self.slug} in {self.library} (tools/pw_install.py)")
+        catalog_before, catalog_after = self.prepare_profile_catalog()
         exists = self.remote.exists(self.remote_prefix)
         if exists and not self.force:
             if self.manifest is None:
@@ -486,7 +516,7 @@ class Sync:
             for key in sorted(set(known) - set(files) - {CPU_DLL}):
                 self.remote.delete(f"{self.remote_prefix}/{key}")
                 removed += 1
-        self.push_profile()
+        self.push_profile(catalog_before, catalog_after)
         self.save(pushed)
         log(f"pushed {self.slug}: {sent} of {len(files)} files sent ({gib(sent_bytes)}), "
             f"{trusted} taken by size, {removed} removed, "
@@ -518,16 +548,73 @@ class Sync:
         self.checkpoint()
         return size
 
-    def push_profile(self) -> None:
+    def profile_directory_listing(self, directory: str) -> dict | None:
+        """None means a missing directory proved by a readable ancestor list."""
+        try:
+            return self.remote.listdir(directory)
+        except (FileNotFoundError, PermissionError, ftplib.error_perm) as error:
+            parent, name = posixpath.split(directory.rstrip("/"))
+            if not name:
+                raise SyncError("cannot establish profiles.lst absence from readable directory metadata") from error
+            entries = self.profile_directory_listing(parent or "/")
+            if entries is None or name not in entries:
+                return None
+            raise SyncError("cannot read the existing profiles.lst parent directory") from error
+
+    def read_profile_catalog(self) -> bytes | None:
+        listing = f"{self.remote_root}/profiles/profiles.lst"
+        size = self.remote.size(listing)
+        if size is None:
+            # FtpRemote maps denied/unsupported SIZE to None too. Only a
+            # successful directory listing can establish that no index exists.
+            entries = self.profile_directory_listing(f"{self.remote_root}/profiles")
+            if entries is not None and "profiles.lst" in entries:
+                raise SyncError("profiles.lst exists but readable SIZE metadata is unavailable")
+            return None  # Keep the existing no-index directory-scan behavior.
+        if size < 0 or size >= PROFILE_CATALOG_BYTES:
+            raise SyncError("profiles.lst reaches the native reader's 8192-byte limit")
+        data = bytearray()
+        def take(chunk):
+            if len(data) + len(chunk) >= PROFILE_CATALOG_BYTES:
+                raise SyncError("profiles.lst grew past the native reader's size limit")
+            data.extend(chunk)
+        self.remote.read_stream(listing, take)
+        if len(data) != size:
+            raise SyncError("profiles.lst changed while reading; review it before pushing")
+        return bytes(data)
+
+    def prepare_profile_catalog(self) -> tuple[bytes | None, bytes | None]:
+        try:
+            name = f"{self.slug}.profile".encode("ascii")
+        except UnicodeError as error:
+            raise SyncError("profiles.lst requires an ASCII profile filename") from error
+        if profile_catalog_names(name) != [name]:
+            raise SyncError("profiles.lst cannot index that profile filename")
+        before = self.read_profile_catalog()
+        if before is None:
+            return None, None
+        names = profile_catalog_names(before)
+        if name in names:
+            return before, before
+        if len(names) == PROFILE_CATALOG_MAX:
+            raise SyncError("profiles.lst has 16 entries; choose a catalog with room before pushing")
+        after = before + (b"\n" if before and not before.endswith(b"\n") else b"") + name + b"\n"
+        profile_catalog_names(after)
+        return before, after
+
+    def push_profile(self, catalog_before: bytes | None, catalog_after: bytes | None) -> None:
+        # Prefix files may already have transferred. Do not overwrite a changed
+        # catalog, including its creation/deletion during this push. This check
+        # is not atomic with the subsequent FTP writes; stop other editors.
+        if self.read_profile_catalog() != catalog_before:
+            raise SyncError("profiles.lst changed since preflight; review the transferred prefix and catalog")
         profiles = f"{self.remote_root}/profiles"
         self.remote.makedirs(profiles)
         self.remote.write(f"{profiles}/{self.slug}.profile", self.profile.read_bytes())
-        # The launcher lists profiles.lst's order when it exists.
-        listing = f"{profiles}/profiles.lst"
-        if self.remote.size(listing) is not None:
-            lines = self.remote.read(listing).decode("latin-1").splitlines()
-            if f"{self.slug}.profile" not in (line.strip() for line in lines):
-                self.remote.write(listing, ("\n".join(lines + [f"{self.slug}.profile"]) + "\n").encode("latin-1"))
+        if catalog_after != catalog_before:
+            if self.read_profile_catalog() != catalog_before:
+                raise SyncError("profiles.lst changed while publishing the profile; review before retrying")
+            self.remote.write(f"{profiles}/profiles.lst", catalog_after)
 
     def walk_remote(self, directory: str = "") -> dict[str, int]:
         found = {}
