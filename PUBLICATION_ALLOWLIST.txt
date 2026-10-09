@@ -913,3 +913,6 @@ tests/test_pw_wine_child_main.c
 tests/test_pw_wine_child_wire.c
 tests/wine_child_fixture/sys/socket.h
 tests/wine_child_fixture/wine-child-build.h
+native/pw_wine_fixture_owner.c
+native/pw_wine_fixture_owner.h
+tests/test_pw_wine_fixture_owner.c
