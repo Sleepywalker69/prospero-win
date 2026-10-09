@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: RADV driver link and container checks
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: radv-prx-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+  PS5_CLANG: clang-18
+  LC_ALL: C
+  TZ: UTC
+  SOURCE_DATE_EPOCH: '1000000000'
+jobs:
+  radv-prx:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'build-radv-prx')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Prepare matched converter and analyzer tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 \
+            llvm-18-dev libclang-rt-18-dev git wget unzip
+          python3 -m pip install pyyaml==6.0.1
+          mkdir -p "$RUNNER_TEMP/radv-prx-inputs" "$RUNNER_TEMP/radv-prx-evidence"
+          {
+            dpkg-query -W
+            clang-18 --version
+            /usr/bin/llvm-config-18 --version
+            builtins="$(clang-18 --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64.a"
+            test -s "$builtins"
+            sha256sum "$builtins"
+          } > "$RUNNER_TEMP/radv-prx-inputs/TOOLCHAIN.txt"
+          python3 tests/test_radv_prx.py
+          make audit check-whitespace
+      - name: Verify and restore the exact accepted RADV prerequisite
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/Sleepywalker69/prospero-win/actions/runs/37867691558 \
+            > "$RUNNER_TEMP/radv-prx-inputs/run.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11589485912 \
+            > "$RUNNER_TEMP/radv-prx-inputs/artifact.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11589485912/zip \
+            > "$RUNNER_TEMP/radv-prx-inputs/prerequisite.zip"
+          python3 tools/prepare_radv_prx.py prepare --work "$RUNNER_TEMP/radv-prx" \
+            --zip "$RUNNER_TEMP/radv-prx-inputs/prerequisite.zip" \
+            --run-json "$RUNNER_TEMP/radv-prx-inputs/run.json" \
+            --artifact-json "$RUNNER_TEMP/radv-prx-inputs/artifact.json"
+          cp "$RUNNER_TEMP/radv-prx-inputs/TOOLCHAIN.txt" "$RUNNER_TEMP/radv-prx/"
+      - name: Build the exact public converter using its pinned zlib source
+        timeout-minutes: 10
+        run: |
+          {
+            foundation="$RUNNER_TEMP/radv-prx/foundation"
+            git init --quiet "$foundation"
+            git -C "$foundation" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+            git -C "$foundation" fetch --depth=1 origin 30597512539e7edfde079cbcaf4a626bc0a948c5
+            git -C "$foundation" checkout --detach FETCH_HEAD
+            test "$(git -C "$foundation" rev-parse HEAD)" = 30597512539e7edfde079cbcaf4a626bc0a948c5
+            mkdir -p "$foundation/.deps/native/zlib" "$foundation/build/host"
+            cp "$RUNNER_TEMP/radv-prx/inputs/sources/zlib-1.3.2.tar.gz" "$foundation/.deps/native/zlib/"
+            BUILD_JOBS=4 bash "$foundation/tools/setup-native-dependencies.sh" --skip-sdk
+            native="$foundation/tooling/native"
+            zroot="$foundation/.deps/native/zlib/root"
+            mapfile -t archives < <(find "$zroot" -type f -name libz.a)
+            test "${#archives[@]}" = 1
+            clang++-18 --no-default-config -std=c++20 -O2 -Wall -Wextra -Werror \
+              -I "$zroot/usr/include" "$native/native_app_builder.cpp" "$native/self_container.cpp" \
+              "$native/elf_object.cpp" "$native/sce_module_writer.cpp" "${archives[0]}" \
+              -o "$foundation/build/host/ps5-native-tool"
+            sha256sum "$foundation/build/host/ps5-native-tool"
+          } 2>&1 | tee "$RUNNER_TEMP/radv-prx-evidence/converter.log"
+      - name: Run the unchanged production driver link and independent gate
+        timeout-minutes: 12
+        run: |
+          {
+            work="$RUNNER_TEMP/radv-prx"
+            bash "$work/link-project/tools/link_radv_prx.sh" "$work/radv" "$work/prx" \
+              "$work/foundation/build/host/ps5-native-tool" "$work/foundation/tooling/native/ps5-pie.ld"
+            python3 tools/check_radv_prx.py --work "$work/prx" \
+              --sdk "$work/radv/.deps/native/ps5-payload-sdk" --foundation "$work/foundation" \
+              --llvm-bindir /usr/lib/llvm-18/bin --output "$work/inspection"
+          } 2>&1 | tee "$RUNNER_TEMP/radv-prx-evidence/link-check.log"
+      - name: Package the checked standalone driver with complete source and notices
+        run: |
+          python3 tools/prepare_radv_prx.py package --work "$RUNNER_TEMP/radv-prx" \
+            --foundation "$RUNNER_TEMP/radv-prx/foundation" --out "$RUNNER_TEMP/radv-driver" \
+            --repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          (cd "$RUNNER_TEMP/radv-driver" && sha256sum --check SHA256SUMS)
+          tar -czf "$RUNNER_TEMP/radv-driver-link-checked.tar.gz" -C "$RUNNER_TEMP/radv-driver" .
+      - name: Upload successful standalone driver evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: radv-driver-link-checked-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/radv-driver-link-checked.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve produced failure binaries with exact source and notices
+        if: ${{ failure() }}
+        run: |
+          python3 tools/prepare_radv_prx.py failure --work "$RUNNER_TEMP/radv-prx" \
+            --foundation "$RUNNER_TEMP/radv-prx/foundation" --out "$RUNNER_TEMP/radv-prx-failure"
+          tar -czf "$RUNNER_TEMP/radv-prx-failure.tar.gz" -C "$RUNNER_TEMP/radv-prx-failure" .
+      - name: Retain raw evidence even if the new graph fails
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: radv-driver-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/radv-prx-evidence/
+            ${{ runner.temp }}/radv-prx-failure.tar.gz
+            ${{ runner.temp }}/radv-prx-inputs/TOOLCHAIN.txt
+            ${{ runner.temp }}/radv-prx-inputs/run.json
+            ${{ runner.temp }}/radv-prx-inputs/artifact.json
+            ${{ runner.temp }}/radv-prx/INPUTS-VERIFIED.json
+            ${{ runner.temp }}/radv-prx/prx/*.log
+            ${{ runner.temp }}/radv-prx/inspection/
+            ${{ runner.temp }}/radv-prx/foundation/.deps/native/zlib/build.log
+          if-no-files-found: warn
+          retention-days: 7
