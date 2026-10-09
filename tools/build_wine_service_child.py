@@ -20,13 +20,14 @@ from check_wine_prx_build import Commands, require
 from check_native_suite import (provider, inspect_bindings, compiled_identity, embedded_image,
                                 index_sdk_providers, source_archive, SERVICE_CALLS)
 from native_probe_elf import Elf, extract_self
-from native_service_converter import prepare_converter_source, inspect_service_preload, service_writer_bytes, FOUNDATION
+from native_service_converter import (prepare_converter_source, inspect_service_preload,
+                                      service_writer_bytes, service_converter_provenance,
+                                      FOUNDATION, TITLE_FOUNDATION)
 from build_native_child_probe import streamable_self, verify_reconstruction, compare_service_preload
 from check_private_dispatch_abi import check_build
 from tls_manifest import llvm_identity, tree_files
 
 ROOT = Path(__file__).resolve().parents[1]
-TITLE_FOUNDATION = '9c0b994a048521af6fb84c73ded364504fe250e9'
 CRT_SHA = 'a99fe406e36d8ce82e68e0245898ba064e28a56a9853f746e9cf13d23cc17a00'
 LAYOUT_SHA = '72ee9a1605cce2836d2290fa9a6a6fba0c3c277e78094e7f07562e92dd5b4e49'
 WRAPPER_SHA = 'c90881bd828048981da08644ae1e1730a0ef10692b6322cbd6a294de8c5c5346'
@@ -156,7 +157,8 @@ def inputs(args, commands):
                    'backend': 'native-amd64', 'runtime_validated': False},
                   {'mode': 2, 'prefix': 'battlenet-experimental-v1', 'guest_machine': 'I386',
                    'backend': 'wowprospero', 'runtime_validated': False}],
-              'title_foundation': TITLE_FOUNDATION, 'converter_foundation': FOUNDATION,
+              'title_foundation': TITLE_FOUNDATION, 'converter_foundation': TITLE_FOUNDATION,
+              'prx_foundation': FOUNDATION,
               'app_crt_sha256': CRT_SHA, 'layout_sha256': LAYOUT_SHA, 'wrapper_sha256': WRAPPER_SHA,
               'libc_companion': record(title / 'runtime/libc.prx'), 'host_llvm': llvm,
               'sdk_headers': tree_files(sdk / 'target/include'), 'sdk_wrappers': tree_files(sdk / 'bin'),
@@ -207,8 +209,11 @@ def build(args):
     stubs = [sdk / 'target/lib' / name for name in ('libSceLibcInternal.so', 'libkernel.so')]
     commands.run(*environment, sdk / 'bin/prospero-lld', '-T', title / 'tooling/native/ps5-pie-high.ld',
                  '--eh-frame-hdr', '-e', '_start', '-z', 'defs', '-o', linked, crt, *objects, '--as-needed', *stubs)
-    native = foundation / 'tooling/native'
-    writer, specialized = prepare_converter_source(native / 'sce_module_writer.cpp', out / 'sce_module_writer.service.cpp', service=True)
+    # The high layout and its executable converter are a matched title input.
+    # The PRX converter expects zero-based text and remains the runtime producer.
+    native = title / 'tooling/native'
+    writer, specialized = prepare_converter_source(native / 'sce_module_writer.cpp', out / 'sce_module_writer.service.cpp',
+                                                  service=True, foundation=TITLE_FOUNDATION)
     zroot = foundation / '.deps/native/zlib/root'
     archives = sorted(zroot.rglob('libz.a'))
     require(len(archives) == 1, 'converter requires one pinned built zlib archive')
@@ -260,6 +265,15 @@ def build(args):
     return manifest
 
 
+def verify_converter_copy(native, work, manifest):
+    original = (native / 'sce_module_writer.cpp').read_bytes()
+    require((work / 'sce_module_writer.service.cpp').read_bytes() ==
+            service_writer_bytes(original, foundation=TITLE_FOUNDATION), 'service converter source copy differs')
+    require(manifest['converter_specialization'] ==
+            service_converter_provenance(original, foundation=TITLE_FOUNDATION),
+            'service converter specialization report differs')
+
+
 def verify_child(args, commands):
     """Recheck a retained build graph without trusting its previous report alone."""
     bound, paths = inputs(args, commands)
@@ -284,9 +298,8 @@ def verify_child(args, commands):
     require(ordinary_graph(Elf((work / 'child.linked.elf').read_bytes()), Elf((work / 'child.elf').read_bytes()), providers)
             == manifest['linkage'], 'child actual import graph differs')
     require(inspect_code(work / 'child.linked.elf', bindir, commands) == manifest['code'], 'child code inspection differs')
-    native = foundation / 'tooling/native'
-    require((work / 'sce_module_writer.service.cpp').read_bytes() ==
-            service_writer_bytes((native / 'sce_module_writer.cpp').read_bytes()), 'service converter source copy differs')
+    native = title / 'tooling/native'
+    verify_converter_copy(native, work, manifest)
     require(manifest['converter_sources'] == {p.name: sha(p) for p in sorted(native.iterdir()) if p.is_file()} and
             manifest['converter_sha256'] == sha(work / 'ps5-native-tool'), 'converter retained inputs/output differ')
     zroot = foundation / '.deps/native/zlib/root'; archives = sorted(zroot.rglob('libz.a'))

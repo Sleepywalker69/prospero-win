@@ -421,9 +421,10 @@ class ArchiveControls(unittest.TestCase):
                             ('wine.tar.gz', b'same previously verified Wine archive'),
                             ('foundation.tar.gz', gzip.compress(b'wrong foundation')), ('LICENSE', b'original notice')):
             (source / name).write_bytes(value)
-        service = {'title_foundation': '3' * 40, 'converter_foundation': '4' * 40}
+        service = {'title_foundation': '3' * 40, 'converter_foundation': '3' * 40,
+                   'prx_foundation': '4' * 40}
         revisions = {'project': self.project['commit'], 'wine': package.prefix.WINE,
-                     'title-foundation': service['title_foundation'], 'prx-foundation': service['converter_foundation']}
+                     'title-foundation': service['title_foundation'], 'prx-foundation': service['prx_foundation']}
         roles = {}
         for role in ('project', 'wine', 'title-foundation', 'prx-foundation', 'sdk', 'freetype', 'gnutls',
                      'nettle', 'zlib', 'ca-bundle', 'lapy'):
@@ -437,6 +438,14 @@ class ArchiveControls(unittest.TestCase):
         save()
         args = (self.temp, source, metadata, self.project, source / 'wine.tar.gz', service,
                 self.temp / 'title/.deps/native/ps5-payload-sdk', self.temp / 'foundation', self.temp / 'wine')
+        service['converter_foundation'] = service['prx_foundation']
+        with self.assertRaisesRegex(ValueError, 'executable converter'):
+            package.retained_sources(*args)
+        service['converter_foundation'] = service['title_foundation']
+        roles['prx-foundation']['revision'] = service['title_foundation']; save()
+        with self.assertRaisesRegex(ValueError, 'source revision mismatch: prx-foundation'):
+            package.retained_sources(*args)
+        roles['prx-foundation']['revision'] = service['prx_foundation']; save()
         with patch.object(package.subprocess, 'run', return_value=SimpleNamespace(stdout=b'actual Git archive')):
             with self.assertRaisesRegex(ValueError, 'not exact source'): package.retained_sources(*args)
             (source / 'project.tar.gz').write_bytes(gzip.compress(b'actual Git archive')); save()

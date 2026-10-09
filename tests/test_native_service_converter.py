@@ -145,6 +145,33 @@ class ServiceConverterTests(unittest.TestCase):
                     self.assertEqual(record["original_sha256"], record["selected_sha256"])
             with self.assertRaises(ValueError): module.prepare_converter_source(source, output, service="false")
 
+    def test_title_writer_requires_explicit_matching_pin(self):
+        original = b"/* high-layout title writer */\n" + b"".join(before for before, _ in module.EDITS)
+        digest = hashlib.sha256(original).hexdigest()
+        with tempfile.TemporaryDirectory() as directory, patch.object(module, "TITLE_WRITER_SHA256", digest):
+            source = Path(directory) / "original.cpp"; source.write_bytes(original)
+            output = Path(directory) / "service.cpp"
+            selected, record = module.prepare_converter_source(
+                source, output, service=True, foundation=module.TITLE_FOUNDATION)
+            self.assertEqual(selected, output)
+            self.assertEqual(record["foundation_commit"], module.TITLE_FOUNDATION)
+            self.assertEqual(record["original_sha256"], digest)
+            self.assertEqual(record["edits"], 2)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(output.read_bytes(), module.service_writer_bytes(original, foundation=module.TITLE_FOUNDATION))
+            self.assertEqual(record["selected_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+            with self.assertRaisesRegex(ValueError, "source hash"):
+                module.service_writer_bytes(original)
+            for foundation, service in (("unrecognized", True), (module.TITLE_FOUNDATION, False)):
+                with self.assertRaisesRegex(ValueError, "selection"):
+                    module.prepare_converter_source(source, output, foundation=foundation, service=service)
+            with self.assertRaisesRegex(ValueError, "source hash"):
+                module.service_writer_bytes(original + b"changed", foundation=module.TITLE_FOUNDATION)
+        for source in (original + module.EDITS[0][0], original.replace(module.EDITS[0][0], b"")):
+            with patch.object(module, "TITLE_WRITER_SHA256", hashlib.sha256(source).hexdigest()):
+                with self.assertRaisesRegex(ValueError, "not unique"):
+                    module.service_writer_bytes(source, foundation=module.TITLE_FOUNDATION)
+
     def test_service_copy_is_exclusive_and_preserves_original(self):
         original = b"/* license preserved */\n" + b"".join(before for before, _ in module.EDITS)
         with tempfile.TemporaryDirectory() as directory, patch.object(module, "WRITER_SHA256", hashlib.sha256(original).hexdigest()):

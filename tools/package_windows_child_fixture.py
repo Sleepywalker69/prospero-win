@@ -522,7 +522,9 @@ def retained_sources(root, source_root, manifest_path, project, wine_archive, se
     require(set(roles) == required, 'complete retained source roles required')
     expected_revisions = {'project': project['commit'], 'wine': prefix.WINE,
                           'title-foundation': service['title_foundation'],
-                          'prx-foundation': service['converter_foundation']}
+                          'prx-foundation': service['prx_foundation']}
+    require(service['converter_foundation'] == service['title_foundation'],
+            'child executable converter differs from its retained title foundation')
     for role, item in roles.items():
         path = safe_name(item['path'])
         require(files.get(path, {}).get('type') == 'file' and item.get('revision') and item.get('url'),

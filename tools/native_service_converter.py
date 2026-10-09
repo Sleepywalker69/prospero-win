@@ -13,6 +13,8 @@ import struct
 
 FOUNDATION = "30597512539e7edfde079cbcaf4a626bc0a948c5"
 WRITER_SHA256 = "7c7a8e24d04309dd57e9c70c26ca1cdec7458451ef7877a1de7a41d8d93addcf"
+TITLE_FOUNDATION = "9c0b994a048521af6fb84c73ded364504fe250e9"
+TITLE_WRITER_SHA256 = "e217ed0974fffcfd25f3d0fc300f1371f067f52c49a2b61bab7c429896cf4f48"
 PRELOAD_MASK = 0x8000000000000002
 EDITS = (
     (b"    const ParameterBlocks blocks = build_parameter_blocks();\n",
@@ -36,9 +38,11 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def service_writer_bytes(original):
+def service_writer_bytes(original, *, foundation=FOUNDATION):
     """Two deterministic literal edits; no regex, fuzzy patch or fallback."""
-    require(sha256(original) == WRITER_SHA256, "unexpected pinned converter source hash")
+    require(foundation in (FOUNDATION, TITLE_FOUNDATION), "unsupported converter foundation")
+    expected = TITLE_WRITER_SHA256 if foundation == TITLE_FOUNDATION else WRITER_SHA256
+    require(sha256(original) == expected, "unexpected pinned converter source hash")
     changed = original
     for before, after in EDITS:
         require(changed.count(before) == 1, "converter source marker is not unique")
@@ -46,31 +50,39 @@ def service_writer_bytes(original):
     return changed
 
 
-def prepare_converter_source(source, output, *, service=False):
+def service_converter_provenance(original, *, foundation=FOUNDATION):
+    changed = service_writer_bytes(original, foundation=foundation)
+    return {"schema": "pw-native-service-converter/1", "service": True,
+            "foundation_commit": foundation, "original_sha256": sha256(original),
+            "selected_sha256": sha256(changed), "preload_mask": hex(PRELOAD_MASK),
+            "procparam_pointer_offset": 0x50, "edits": len(EDITS)}
+
+
+def prepare_converter_source(source, output, *, service=False, foundation=FOUNDATION):
     """Return (selected source path, provenance); never modify the input.
 
     The caller compiles the returned path. Use an owned output directory with
     no concurrent writers, then retain the copied source with the build record.
     """
     require(type(service) is bool, "service selection must be an explicit boolean")
+    require(foundation == FOUNDATION or (service and foundation == TITLE_FOUNDATION),
+            "unsupported converter source selection")
     source, output = Path(source), Path(output)
     require(source.is_file() and not source.is_symlink(), "converter source must be a regular file")
     original = source.read_bytes()
     record = {"schema": "pw-native-service-converter/1", "service": service,
-              "foundation_commit": FOUNDATION, "original_sha256": sha256(original)}
+              "foundation_commit": foundation, "original_sha256": sha256(original)}
     if not service:
         record["selected_sha256"] = record["original_sha256"]
         return source, record
-    changed = service_writer_bytes(original)
+    changed = service_writer_bytes(original, foundation=foundation)
     require(output.parent.is_dir() and not output.parent.is_symlink(), "converter output needs an owned directory")
     require(source.resolve() != output.resolve(), "converter copy cannot replace the original")
     # Exclusive creation refuses old files and symlinks, including dangling ones.
     with output.open("xb") as stream:
         stream.write(changed)
     require(source.read_bytes() == original, "converter input changed during source copy")
-    record.update({"selected_sha256": sha256(changed), "preload_mask": hex(PRELOAD_MASK),
-                   "procparam_pointer_offset": 0x50, "edits": len(EDITS)})
-    return output, record
+    return output, service_converter_provenance(original, foundation=foundation)
 
 
 def inspect_service_preload(data):

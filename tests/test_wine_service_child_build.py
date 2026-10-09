@@ -7,11 +7,14 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
+import hashlib
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import build_wine_service_child as build
+import native_service_converter as converter
 from native_probe_elf import nid
 
 
@@ -45,6 +48,27 @@ def fixture():
 
 
 class WineServiceChildBuild(unittest.TestCase):
+    def test_converter_replay_binds_every_specialization_field(self):
+        original = b"/* original high-layout writer */\n" + b"".join(before for before, _ in converter.EDITS)
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                converter, 'TITLE_WRITER_SHA256', hashlib.sha256(original).hexdigest()):
+            root = Path(directory); native = root / 'native'; work = root / 'work'
+            native.mkdir(); work.mkdir(); (native / 'sce_module_writer.cpp').write_bytes(original)
+            _, record = converter.prepare_converter_source(native / 'sce_module_writer.cpp',
+                work / 'sce_module_writer.service.cpp', service=True, foundation=build.TITLE_FOUNDATION)
+            manifest = {'converter_specialization': record}
+            build.verify_converter_copy(native, work, manifest)
+            for key in record:
+                wrong = copy.deepcopy(manifest); wrong['converter_specialization'][key] = 'stale'
+                with self.subTest(field=key), self.assertRaisesRegex(ValueError, 'specialization report'):
+                    build.verify_converter_copy(native, work, wrong)
+            wrong = copy.deepcopy(manifest); wrong['converter_specialization']['foundation_commit'] = build.FOUNDATION
+            with self.assertRaisesRegex(ValueError, 'specialization report'):
+                build.verify_converter_copy(native, work, wrong)
+            (work / 'sce_module_writer.service.cpp').write_bytes(original)
+            with self.assertRaisesRegex(ValueError, 'source copy'):
+                build.verify_converter_copy(native, work, manifest)
+
     def test_generated_header_requires_both_actual_capabilities(self):
         bound={'runtime': {'private_dispatch_abi':1, 'private_dispatch_wow64_abi':1,
                            'ntdll_sha256':'b'*64}}

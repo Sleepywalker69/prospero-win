@@ -72,7 +72,7 @@ two jobs. The measured resources and chosen limit are retained in the evidence.
 
 - `--work`: the clean committed project checkout
 - `--sdk`: the SDK under title foundation 9c0b994
-- `--foundation`: converter foundation 3059751
+- `--foundation`: runtime PRX foundation 3059751 and its pinned zlib build
 - `--runtime`: the freshly checked Wine work directory
 - `--llvm-bindir`: the actual SDK-selected LLVM 18 directory
 - `--out`: a new owned child-output directory
@@ -81,6 +81,12 @@ The output `native-wine-child-build.json` uses `pw-wine-service-child/1`. It bin
 the project, input sources, unchanged CRT/layout, ordinary libc/kernel stubs,
 compiler/SDK, exact ntdll PRX, linked/converted/recovered bytes, import NIDs and
 provider ranks, and preload metadata before signing and after recovery. The
+child uses the high-address executable converter from title foundation 9c0b994,
+with only the two service preload edits. Its `converter_foundation` and source
+hashes identify that selection; `prx_foundation` separately identifies the
+runtime converter and retained source archive. The converter's existing
+high-address LOAD mapping and strict `.data.rel.ro` requirement are preserved.
+The zero-based probe converter retains its original source selection. The
 entry must be the real `_start`; unwind metadata must exist. Unsupported data
 imports, providers, relocations, raw trap instructions and undecoded analyzer
 output fail.
