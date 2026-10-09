@@ -468,6 +468,202 @@ def check_ftp_without_self() -> None:
         pw_prefix.ftplib.FTP = real
 
 
+class CatalogRemote(DirRemote):
+    """Record every remote mutation, including directory creation/deletion."""
+    def __init__(self, root):
+        super().__init__(root)
+        self.mutations = []
+        self.catalog_change = None
+        self.change_on = "/prefixes/"
+    def makedirs(self, path):
+        self.mutations.append(("mkdir", path))
+        super().makedirs(path)
+    def write(self, path, data):
+        self.mutations.append(("write", path))
+        super().write(path, data)
+        if self.catalog_change is not None and self.change_on in path:
+            self._path("/data/prospero-win/profiles/profiles.lst").write_bytes(self.catalog_change)
+            self.catalog_change = None
+    def write_stream(self, path, stream):
+        self.mutations.append(("stream", path))
+        super().write_stream(path, stream)
+    def delete(self, path):
+        self.mutations.append(("delete", path))
+        super().delete(path)
+
+
+class CatalogMetadataDenied(CatalogRemote):
+    """Exercise the real FTP metadata error mapping without a connection."""
+    class DeniedFTP:
+        def cwd(self, path):
+            raise pw_prefix.ftplib.error_perm("550 Permission denied")
+        def size(self, path):
+            raise pw_prefix.ftplib.error_perm("550 Permission denied")
+    def __init__(self, root):
+        super().__init__(root)
+        self.ftp = self.DeniedFTP()
+    def size(self, path):
+        return pw_prefix.FtpRemote.size(self, path) if path.endswith("profiles.lst") else super().size(path)
+    def exists(self, path):
+        return pw_prefix.FtpRemote.exists(self, path) if path.endswith("profiles.lst") else super().exists(path)
+
+
+def check_catalog_preflight(root: Path) -> None:
+    """Refuse unlaunchable catalogs before the actual push mutates the remote."""
+    def entries(count):
+        return b"".join(f"old{i}.profile\n".encode() for i in range(count))
+    malformed = {
+        "full": entries(16),
+        "already_overfull": b"game.profile\n" + entries(16),
+        "duplicate": b"same.profile\n same.profile \t\r\n",
+        "upper": b"Game.profile\n",
+        "path": b"dir/a.profile\n",
+        "nul": b"a.profile\x00\n",
+        "inline_comment": b"a.profile # comment\n",
+        "cr_separator": b"a.profile\rb.profile\n",
+        "leading_cr": b"\r# not a comment\n",
+        "vertical_tab": b"\va.profile\n",
+        "too_long_name": b"a" * 56 + b".profile\n",
+        "at_byte_limit": b"#" + b"x" * 8191,
+        "append_exceeds_byte_limit": b"#" + b"x" * 8190,
+    }
+    for name, original in malformed.items():
+        library, console, common = new_game(root, "catalog-" + name)
+        catalog = console / "data/prospero-win/profiles/profiles.lst"
+        catalog.write_bytes(original)
+        remote = CatalogRemote(console)
+        with contextlib.redirect_stderr(io.StringIO()) as errors, contextlib.redirect_stdout(io.StringIO()):
+            result = pw_prefix.main(["push", "game", "--force", "--delete", *common], remote)
+        assert result == 1, f"catalog {name}: push returned {result} after {len(remote.mutations)} remote mutations"
+        assert "profiles.lst" in errors.getvalue(), errors.getvalue()
+        assert not remote.mutations, (name, remote.mutations)
+        assert catalog.read_bytes() == original and not (console / REMOTE_PREFIX).exists()
+        assert not (library / ".pw/game.json").exists()
+
+    library, console, common = new_game(root, "catalog-directory")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    catalog.unlink(); catalog.mkdir()
+    remote = CatalogRemote(console)
+    with contextlib.redirect_stderr(io.StringIO()) as errors:
+        assert pw_prefix.main(["push", "game", *common], remote) == 1
+    assert "profiles.lst" in errors.getvalue() and not remote.mutations
+    assert catalog.is_dir()
+
+    library, console, common = new_game(root, "catalog-metadata-denied")
+    remote = CatalogMetadataDenied(console)
+    listing = "/data/prospero-win/profiles/profiles.lst"
+    assert remote.size(listing) is None and not remote.exists(listing)
+    assert "profiles.lst" in remote.listdir("/data/prospero-win/profiles")
+    with contextlib.redirect_stderr(io.StringIO()) as errors, contextlib.redirect_stdout(io.StringIO()):
+        result = pw_prefix.main(["push", "game", *common], remote)
+    assert result == 1, f"catalog metadata denied: returned {result} after {len(remote.mutations)} mutations"
+    assert "profiles.lst" in errors.getvalue() and not remote.mutations
+
+    class CatalogListingDenied(CatalogMetadataDenied):
+        def listdir(self, path):
+            if path.endswith("/profiles"):
+                raise pw_prefix.ftplib.error_perm("550 Permission denied")
+            return super().listdir(path)
+    library, console, common = new_game(root, "catalog-listing-denied")
+    remote = CatalogListingDenied(console)
+    with contextlib.redirect_stderr(io.StringIO()) as errors:
+        assert pw_prefix.main(["push", "game", *common], remote) == 1
+    assert "profiles.lst" in errors.getvalue() and not remote.mutations
+
+    # Genuinely absent directories are proved through the nearest readable
+    # ancestor, preserving first-time pushes into a new library directory.
+    for depth in range(3):
+        library, console, common = new_game(root, f"catalog-new-directories-{depth}")
+        (console / "data/prospero-win/profiles/profiles.lst").unlink()
+        (console / "data/prospero-win/profiles").rmdir()
+        if depth >= 1: (console / "data/prospero-win").rmdir()
+        if depth >= 2: (console / "data").rmdir()
+        assert pw_prefix.main(["push", "game", *common], CatalogRemote(console)) == 0
+        assert not (console / "data/prospero-win/profiles/profiles.lst").exists()
+
+    # Exactly 15 names plus comments/trailing whitespace permit one append.
+    library, console, common = new_game(root, "catalog-room")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    original = b"# user order\r\n\t; ignored\n\n" + entries(15).rstrip(b"\n") + b" \t\r"
+    catalog.write_bytes(original); remote = CatalogRemote(console)
+    assert pw_prefix.main(["push", "game", *common], remote) == 0
+    assert catalog.read_bytes() == original + b"\ngame.profile\n"
+    # Updating the already-listed game remains valid at capacity; no index write.
+    remote.mutations.clear(); remote.writes.clear()
+    (library / "profiles/game.profile").write_bytes(b"[application]\nid=game\n; update\n")
+    assert pw_prefix.main(["push", "game", *common], remote) == 0
+    assert not any(path.endswith("profiles.lst") for _, path in remote.mutations)
+    assert catalog.read_bytes() == original + b"\ngame.profile\n"
+    assert (console / "data/prospero-win/profiles/game.profile").read_bytes().endswith(b"; update\n")
+
+    # C splits only on LF: embedded CR/NEL inside a comment do not list a game.
+    library, console, common = new_game(root, "catalog-comment-bytes")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    original = b"# hidden\rgame.profile\x85still-comment"
+    catalog.write_bytes(original)
+    assert pw_prefix.main(["push", "game", *common], CatalogRemote(console)) == 0
+    assert catalog.read_bytes() == original + b"\ngame.profile\n"
+
+    # A valid maximum-length catalog still permits an existing-entry update.
+    library, console, common = new_game(root, "catalog-max-bytes-update")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    original = b"game.profile\n#" + b"x" * (8191 - len(b"game.profile\n#"))
+    catalog.write_bytes(original)
+    assert pw_prefix.main(["push", "game", *common], CatalogRemote(console)) == 0
+    assert catalog.read_bytes() == original
+
+    # Comment-like/whitespace-prefixed slugs must not become ignored index lines.
+    for number, slug in enumerate(("#game", ";game", " game", "\tgame")):
+        library, console, common = new_game(root, f"catalog-invalid-slug-{number}")
+        (library / "prefixes/game").rename(library / "prefixes" / slug)
+        (library / "profiles/game.profile").rename(library / "profiles" / (slug + ".profile"))
+        remote = CatalogRemote(console)
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert pw_prefix.main(["push", slug, *common], remote) == 1
+        assert not remote.mutations
+
+    # A 63-byte name is valid, and comments do not consume catalog slots.
+    library, console, common = new_game(root, "catalog-max-name")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    original = b"a" * 55 + b".profile\n" + b"# ignored\n" * 30
+    catalog.write_bytes(original)
+    assert pw_prefix.main(["push", "game", *common], CatalogRemote(console)) == 0
+    assert catalog.read_bytes() == original + b"game.profile\n"
+
+    # Missing index retains the existing directory-scan behavior; no new list
+    # may hide unrelated profiles. Empty existing index can receive an entry.
+    for missing in (False, True):
+        library, console, common = new_game(root, "catalog-missing-" + str(missing))
+        catalog = console / "data/prospero-win/profiles/profiles.lst"
+        if missing: catalog.unlink()
+        else: catalog.write_bytes(b"")
+        assert pw_prefix.main(["push", "game", *common], CatalogRemote(console)) == 0
+        assert (not catalog.exists()) if missing else catalog.read_bytes() == b"game.profile\n"
+
+    # Recheck before publishing the profile/index. Earlier prefix transfers
+    # are not rolled back, but a concurrent catalog edit is never overwritten.
+    library, console, common = new_game(root, "catalog-changed")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    changed = b"# other editor\nother.profile\n"
+    remote = CatalogRemote(console); remote.catalog_change = changed
+    with contextlib.redirect_stderr(io.StringIO()) as errors:
+        assert pw_prefix.main(["push", "game", *common], remote) == 1
+    assert "profiles.lst" in errors.getvalue() and "changed" in errors.getvalue()
+    assert catalog.read_bytes() == changed
+    assert not any("/profiles/" in path for _, path in remote.mutations)
+
+    # A late edit during the profile upload also cannot be overwritten by
+    # publishing a stale catalog snapshot. The uploaded profile may remain.
+    library, console, common = new_game(root, "catalog-changed-at-profile")
+    catalog = console / "data/prospero-win/profiles/profiles.lst"
+    remote = CatalogRemote(console); remote.catalog_change = changed
+    remote.change_on = "/profiles/game.profile"
+    with contextlib.redirect_stderr(io.StringIO()) as errors:
+        assert pw_prefix.main(["push", "game", *common], remote) == 1
+    assert "profiles.lst" in errors.getvalue() and catalog.read_bytes() == changed
+    assert not any(path.endswith("profiles.lst") for _, path in remote.mutations)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -545,6 +741,7 @@ def main() -> int:
         # Without a console address there is nothing to do.
         assert pw_prefix.main(["status", "game", *common]) == 2 or os.environ.get("PS5_HOST")
 
+        check_catalog_preflight(root)
         check_streaming(root)
         check_resume(root)
         check_trust_size(root)
