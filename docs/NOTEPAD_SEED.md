@@ -78,6 +78,10 @@ registry/INI/timestamp files are allowed. Host paths in generated text, special 
 virtual-link limits are checked. An unknown file fails the job for review;
 the producer must not silently widen the allowlist or ship a raw prefix.
 
+The export includes six matching Wine font files and relocates 18 exact font
+registry paths to their copies under `C:\windows\Fonts`; the original registry
+files and converter source remain unchanged.
+
 Failure diagnostics contain only metadata and at most 128 KiB of the fixed
 sterile initializer's filtered log. Secret, registry-dump or binary patterns
 withhold the log entirely; its size/hash remain available. The raw prefix,

@@ -65,6 +65,26 @@ TEXT_NAMES = {'', 'Path', 'PATH', 'TEMP', 'TMP', 'ProfilesDirectory', 'ProgramDa
 TEXT_CLASSIFICATIONS = {'host-' + name for name in
                         ('home', 'root', 'tmp', 'run', 'opt', 'usr', 'etc', 'mnt', 'workspace', 'github')}
 TEXT_CLASSIFICATIONS |= {'environment-marker', 'nul', 'invalid-utf8', 'invalid-registry-header', 'oversized'}
+FONT_FACES = {'marlett.ttf': 'Marlett', 'symbol.ttf': 'Symbol', 'tahoma.ttf': 'Tahoma',
+              'tahomabd.ttf': 'Tahoma Bold', 'webdings.ttf': 'Webdings', 'wingding.ttf': 'Wingdings'}
+FONT_KEYS = {
+    'system.reg': (r'Software\Microsoft\Windows\CurrentVersion\Fonts',
+                   r'Software\Microsoft\Windows NT\CurrentVersion\Fonts'),
+    'user.reg': (r'Software\Wine\Fonts\External Fonts',),
+    'userdef.reg': (),
+}
+# Exact seven section names reproduced from pinned wineboot/setupapi/ntoskrnl
+# sources and confirmed against every actual host-root key hash in run37875994375.
+# These registry key names are not filesystem paths. No value is exempted.
+ROOT_DEVICE_KEYS = {
+    r'System\ControlSet001\Enum\ROOT\WINE\winebth',
+    r'System\ControlSet001\Enum\ROOT\WINE\winebth\Device Parameters',
+    r'System\ControlSet001\Enum\ROOT\WINE\winebus',
+    r'System\ControlSet001\Enum\ROOT\WINE\winebus\Device Parameters',
+    r'System\ControlSet001\Enum\ROOT\WINE\winebus\Properties\{4340A6C5-93FA-4706-972C-7B648008A5A7}\0009',
+    r'System\ControlSet001\Enum\ROOT\WINE\winebus\Properties\{83DA6326-97A6-4088-9453-A1923F573B29}\0065',
+    r'System\ControlSet001\Enum\ROOT\WINE\wineusb',
+}
 
 
 def require(ok, message):
@@ -260,13 +280,127 @@ def load_converter(root):
 def audit_text(data, name):
     require(len(data) <= 16 << 20, 'oversized generated text: ' + name)
     text = data.decode('utf-8')
+    inspected = text
+    if name == 'system.reg':
+        known = {key.replace('\\', '\\\\') for key in ROOT_DEVICE_KEYS}
+        kept = []
+        for line in text.split('\n'):
+            match = re.fullmatch(r'\[(.*)\] [0-9]{1,10}', line)
+            if not (match and match[1] in known):
+                kept.append(line)
+        inspected = '\n'.join(kept)
     # Registry backslashes are doubled. Normalize solely for inspection.
-    folded = text.replace('\\', '/').lower()
+    folded = inspected.replace('\\', '/').lower()
     folded = re.sub('/+', '/', folded)
     require(not any(x in folded for x in ('/home/', '/root/', '/tmp/', '/run/', '/opt/', '/usr/', '/etc/',
                                           '/mnt/', '/workspace/', '/github/', 'github_token', 'runner_temp')),
             'host path/environment in generated text: ' + name)
     require('\x00' not in text, 'NUL in generated text')
+
+
+def copy_portable_fonts(prefix, host, host_files):
+    """Add only six exact bound fonts to this fresh owned prefix before its audit."""
+    destination = prefix
+    for name in ('drive_c', 'windows', 'Fonts'):
+        require(destination.is_dir() and not destination.is_symlink(), 'unsafe portable-font parent')
+        found = [p for p in destination.iterdir() if p.name.casefold() == name.casefold()]
+        require(len(found) <= 1, 'case-colliding portable-font directory')
+        destination = found[0] if found else destination / name
+        if not found:
+            require(name == 'Fonts', 'missing initialized portable-font parent')
+            destination.mkdir()
+        require(destination.is_dir() and not destination.is_symlink(), 'unsafe portable-font directory')
+    assets = {}
+    for filename in sorted(FONT_FACES):
+        relative = 'share/wine/fonts/' + filename
+        source = host / relative
+        bound = host_files.get('pc/host-wine/usr/' + relative, {})
+        require(source.is_file() and not source.is_symlink() and
+                source.resolve().is_relative_to(host.resolve()) and sha(source) == bound.get('sha256'),
+                'portable font differs from bound runtime')
+        found = [p for p in destination.iterdir() if p.name.casefold() == filename.casefold()]
+        require(len(found) <= 1, 'case-colliding portable-font file')
+        target = found[0] if found else destination / filename
+        if found:
+            resolved = target.resolve(strict=True)
+            require(resolved.is_relative_to(prefix.resolve()) or resolved.is_relative_to(host.resolve()),
+                    'portable-font destination escapes audited sources')
+            require(target.is_file() and sha(target) == bound['sha256'], 'existing portable font differs')
+        else:
+            with source.open('rb') as inp, target.open('xb') as out:
+                shutil.copyfileobj(inp, out, 1 << 20)
+        require(sha(target) == bound['sha256'], 'copied portable font differs')
+        assets[filename] = {'source': relative, 'destination': target.relative_to(prefix).as_posix(),
+                            'sha256': bound['sha256'], 'bytes': source.stat().st_size}
+    return assets
+
+
+def font_registry_line(face, path):
+    # Both fields come only from static source names and a verified owned path.
+    require(not any(c in path for c in '\r\n\x00"'), 'unsupported font source path')
+    return ('"' + face + ' (TrueType)"="' + path.replace('\\', '\\\\') + '"').encode('ascii')
+
+
+def portable_registry(name, data, host):
+    """Relocate exactly the 18 observed source-derived REG_SZ records, in memory."""
+    require(name in REGISTRIES and len(data) <= 16 << 20 and
+            data.startswith(b'WINE REGISTRY Version 2'), 'invalid portable-registry input')
+    keys = {key.replace('\\', '\\\\').encode('ascii') for key in FONT_KEYS[name]}
+    records = {}
+    names = {(face + ' (TrueType)').encode('ascii').lower() for face in FONT_FACES.values()}
+    for filename, face in FONT_FACES.items():
+        source = 'Z:' + str((host / 'share/wine/fonts' / filename).resolve()).replace('/', '\\')
+        original = font_registry_line(face, source)
+        converted = font_registry_line(face, 'C:\\windows\\Fonts\\' + filename)
+        records[original] = (converted, filename)
+    output, rewrites, seen_keys, seen_values = [], [], set(), set()
+    key = None
+    for line in data.splitlines(keepends=True):
+        raw = line[:-1] if line.endswith(b'\n') else line
+        if raw.startswith(b'['):
+            key = None
+            match = re.fullmatch(rb'\[((?:[^\]\\]|\\.)*)\] [0-9]{1,10}', raw)
+            if match:
+                key = match[1]
+                if key in keys:
+                    require(key not in seen_keys, 'duplicate portable-font registry section')
+                    seen_keys.add(key)
+        if key in keys and raw.startswith(b'"'):
+            named = re.match(rb'"([^"\\]*)"=', raw)
+            require(named is not None, 'unsupported portable-font value name')
+            if named[1].lower() in names:
+                require(raw in records, 'unexpected portable-font registry value/type/path')
+        if key in keys and raw in records:
+            converted, filename = records[raw]
+            require((key, filename) not in seen_values, 'duplicate portable-font registry value')
+            seen_values.add((key, filename))
+            output.append(converted + (b'\n' if line.endswith(b'\n') else b''))
+            rewrites.append({'font': filename, 'source_record_sha256': hashlib.sha256(raw).hexdigest(),
+                             'portable_record_sha256': hashlib.sha256(converted).hexdigest()})
+        else:
+            output.append(line)
+    require(seen_keys == keys and len(seen_values) == 6 * len(keys), 'missing exact portable-font registry records')
+    result = b''.join(output)
+    return {'data': result, 'source_sha256': hashlib.sha256(data).hexdigest(),
+            'portable_sha256': hashlib.sha256(result).hexdigest(), 'rewrites': rewrites}
+
+
+def sync_portable_registry(converter, arguments, remote, plans, prefix):
+    """Compose with the isolated original converter so its hashes/sizes stay true."""
+    original = converter.to_console
+    def adapted(name, data):
+        if name in REGISTRIES:
+            plan = plans[name]
+            require(hashlib.sha256(data).hexdigest() == plan['source_sha256'], 'registry changed after source audit')
+            data = plan['data']
+        return original(name, data)
+    converter.to_console = adapted
+    try:
+        return converter.main(arguments, remote)
+    finally:
+        converter.to_console = original
+        for name, plan in plans.items():
+            require(sha(prefix / name) == plan['source_sha256'], 'original registry changed during conversion')
 
 
 def text_classifications(text):
@@ -588,7 +722,19 @@ def generated_module_hashes(host, host_files, source_archive):
                      'dlls/setupapi/dirid.c': '7409a51e12814df2e35b08fce392b4319e4464d26512c599cce68dd4f2966fb2',
                      'dlls/ntdll/unix/file.c': 'bc6c1d35deaa2ee7396ff940aac75ba379a976a72e9b3d5ee6d3619c36db8af4',
                      'dlls/winevulkan/winevulkan.json': VULKAN_JSON_SHA,
-                     'dlls/winevulkan/loader.c': '00669ab341904b567ada54aee7a7f17fd6c3fa21ed051ac90d6bca5ecb166df2'}
+                     'dlls/winevulkan/loader.c': '00669ab341904b567ada54aee7a7f17fd6c3fa21ed051ac90d6bca5ecb166df2',
+                     'programs/wineboot/wineboot.c': 'f60dc3396d6d314aabee35712726c8a4db97c94723929719c62137bd46c0abd2',
+                     'dlls/setupapi/devinst.c': 'ce5bad1bd0c71822039c379e4d2626e25313dec230708cc260a3eb9443f4ddbe',
+                     'dlls/ntoskrnl.exe/pnp.c': '524f6c5df8ad2b4a3c179436a6e87a0c636413c2af5ab21ae378c03f71d75590',
+                     'include/devpkey.h': '55c38bfd0164d16023544780ad581c11925be0b88ff0bfb120a72ebe6990a80e',
+                     'server/registry.c': 'c29125d9590afc0f2d864208a7c681f97657b1a2e925780524e31095de02a0f8',
+                     'dlls/win32u/font.c': '2506cc3a28701f18775eab1bbe6ac829bc0ea958411e5e3ee2eb6a031f1de1a5',
+                     'fonts/marlett.sfd': 'eaaf88567db49cdacac4ec9e61a4ce14648e682f48343d8b9c9056cb5a1d3970',
+                     'fonts/symbol.sfd': 'b146fffd2713a55b7f5101f32b3199b47542c2d5234f61cb5626ce2c886193d6',
+                     'fonts/tahoma.sfd': '0c1a3182a3a6b3d444113421121cbacf87322111aff245ee616109bd47479710',
+                     'fonts/tahomabd.sfd': '90e42b98fc092034e6485a7f8f811195ca2ca148b6704e5d2df56a4c97dfca49',
+                     'fonts/webdings.sfd': '52eea2ba6ea5bb5e5db89ce2a01e578d7bb768e8da04a0e235fa04a1c1821b09',
+                     'fonts/wingding.sfd': '6d8d42e70c405f41d9a9a3c54479cee0b022b5b0509ab8c9ada0402ac3007478'}
     with tarfile.open(source_archive, 'r:gz') as archive:
         for name, digest in source_hashes.items():
             member = archive.getmember(name)
@@ -661,7 +807,8 @@ def generated_module_hashes(host, host_files, source_archive):
     return allowed
 
 
-def audit_source(converter, prefix, host, host_files, resources=None, generated=None, issues=None, text_issues=None):
+def audit_source(converter, prefix, host, host_files, resources=None, generated=None, issues=None, text_issues=None,
+                 registry_plans=None):
     files, directories, links = converter.local_tree(prefix)
     require(len(files) <= MAX_FILES and len(directories) <= MAX_FILES, 'prefix too large')
     approved = {record['sha256'] for name, record in host_files.items() if name.startswith('pc/host-wine/usr/')}
@@ -735,6 +882,11 @@ def audit_source(converter, prefix, host, host_files, resources=None, generated=
         if name in REGISTRIES:
             data = files[name].read_bytes()
             require(data.startswith(b'WINE REGISTRY Version 2'), 'invalid registry header')
+            if registry_plans is not None:
+                plan = registry_plans[name]
+                require(hashlib.sha256(data).hexdigest() == plan['source_sha256'], 'registry changed before audit')
+                data = plan['data']
+                record['font_portability'] = {key: value for key, value in plan.items() if key != 'data'}
             audit_text(data, name)
         elif name == '.update-timestamp':
             # wineboot text-mode output is CRLF; retain the original bytes.
@@ -812,9 +964,18 @@ def export(args):
     issues = {'files': [], 'scan_complete': False}
     text_issues = {'schema': 'pw-seed-text-audit/1', 'files': [], 'scan_complete': False}
     try:
-        audit = audit_source(converter, prefix, host, host_files, resource_hashes(host, host_files),
-                             generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz'),
-                             issues, text_issues)
+        resources = resource_hashes(host, host_files)
+        generated = generated_module_hashes(host, host_files, checkpoint / 'sources/wine.tar.gz')
+        font_assets = copy_portable_fonts(prefix, host, host_files)
+        registry_plans = {}
+        for name in sorted(REGISTRIES):
+            path = prefix / name
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 16 << 20,
+                    'unsafe portable-registry source')
+            registry_plans[name] = portable_registry(name, path.read_bytes(), host)
+        require(sum(len(p['rewrites']) for p in registry_plans.values()) == 18, 'wrong portable-font rewrite count')
+        audit = audit_source(converter, prefix, host, host_files, resources, generated,
+                             issues, text_issues, registry_plans)
     finally:
         if issues['files']:
             with (args.work / 'UNAPPROVED-FILES.json').open('xb') as stream:
@@ -829,11 +990,20 @@ def export(args):
     args.out.mkdir()
     try:
         remote = FilesystemRemote(args.out / 'console')
-        rc = converter.main(['push', SLUG, '--library', str(library), '--cpu-dll', str(kit / 'pc/wowprospero.dll')], remote)
+        rc = sync_portable_registry(converter,
+                ['push', SLUG, '--library', str(library), '--cpu-dll', str(kit / 'pc/wowprospero.dll')],
+                remote, registry_plans, prefix)
         require(rc == 0, 'original conversion failed')
         exported = args.out / 'console/data/prospero-win'
         require(not (exported / 'profiles/profiles.lst').exists(), 'seed must not replace an existing profile index')
         require(sha(exported / 'prefixes' / SLUG / converter.CPU_DLL) == CPU_SHA, 'exported CPU differs')
+        for name, plan in registry_plans.items():
+            expected = converter.to_console(name, plan['data'])
+            require(sha(exported / 'prefixes' / SLUG / name) == hashlib.sha256(expected).hexdigest(),
+                    'exported portable registry differs')
+        for font in font_assets.values():
+            require(sha(exported / 'prefixes' / SLUG / font['destination']) == font['sha256'],
+                    'exported portable font differs')
         for path in exported.rglob('*'):
             require(not path.is_symlink() and (path.is_dir() or path.is_file()), 'nonportable exported object')
         for name in ['LICENSE', 'NOTICE.md', 'LICENSING.md', 'THIRD_PARTY.md']:
@@ -845,13 +1015,15 @@ def export(args):
         shutil.copy2(Path(__file__), args.out / 'sources/export_notepad_seed.py')
         shutil.copy2(args.instructions, args.out / 'README.md')
         (args.out / 'SOURCE-AUDIT.json').write_text(json.dumps(audit, indent=2, sort_keys=True) + '\n')
+        (args.out / 'FONT-ASSETS.json').write_text(json.dumps(font_assets, indent=2, sort_keys=True) + '\n')
         manifest = {'schema': 'pw-clean-notepad-seed/1', 'slug': SLUG,
-                    'origin': 'fresh hosted Wine initialization, then original pw_prefix conversion',
+                    'origin': 'fresh hosted Wine initialization, exact font relocation, original pw_prefix conversion',
                     'on_console_wineboot': False, 'console_execution_verified': False,
                     'vendor_or_account_state': False, 'windows_children_supported': False,
                     'producer_run': RUN, 'project_commit': PROJECT, 'project_tree': TREE, 'wine_commit': WINE,
                     'bound_artifacts': {k: {'id': v[0], 'sha256': v[1]} for k, v in INPUTS.items()},
                     'converter_sha256': BOUND_FILES['pc/tools/pw_prefix.py'], 'cpu_sha256': CPU_SHA,
+                    'portable_font_assets': 6, 'portable_font_registry_rewrites': 18,
                     'exporter_sha256': sha(Path(__file__)), 'copy_mode': 'fresh prefix only; never replace profiles.lst'}
         (args.out / 'SEED-MANIFEST.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
         (args.out / 'EXPORT-COMPLETE').write_text('pw-clean-notepad-seed/1\n')

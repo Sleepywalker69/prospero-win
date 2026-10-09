@@ -455,6 +455,152 @@ class SeedTests(unittest.TestCase):
         self.assertFalse((output / 'TEXT-AUDIT.json').exists())
         self.assertIn('withheld', json.loads((output / 'DIAGNOSTICS.json').read_text())['text_findings'])
 
+    def portable_fixture(self):
+        converter, library, prefix, host, records = self.fixture()
+        for filename in seed.FONT_FACES:
+            font = host / 'share/wine/fonts' / filename
+            font.write_bytes(('original inert font: ' + filename).encode())
+            records['pc/host-wine/usr/share/wine/fonts/' + filename] = {'sha256': seed.sha(font)}
+        originals = {}
+        for name in sorted(seed.REGISTRIES):
+            data = (prefix / name).read_bytes()
+            for key in seed.FONT_KEYS[name]:
+                data += b'\n[' + key.replace('\\', '\\\\').encode() + b'] 123\n'
+                for filename, face in seed.FONT_FACES.items():
+                    source = 'Z:' + str((host / 'share/wine/fonts' / filename).resolve()).replace('/', '\\')
+                    data += seed.font_registry_line(face, source) + b'\n'
+            data += b'\n[Software\\\\OriginalFixture] 123\n"Keep"="C:\\\\portable-unrelated"\n'
+            if name == 'system.reg':
+                for key in sorted(seed.ROOT_DEVICE_KEYS):
+                    data += b'\n[' + key.replace('\\', '\\\\').encode() + b'] 123\n"Keep"=dword:00000001\n'
+            (prefix / name).write_bytes(data)
+            originals[name] = data
+        return converter, library, prefix, host, records, originals
+
+    def test_exact_root_section_headers_only(self):
+        for key in seed.ROOT_DEVICE_KEYS:
+            section = '[' + key.replace('\\', '\\\\') + '] 123'
+            data = ('WINE REGISTRY Version 2\n' + section + '\n"Keep"="C:\\\\portable"\n').encode()
+            seed.audit_text(data, 'system.reg')
+            with self.assertRaisesRegex(ValueError, 'host path/environment'):
+                seed.audit_text(data, 'user.reg')
+            for changed in (section + ' /home/private', section.replace('] 123', '\\\\extra] 123'),
+                            section.replace('] 123', '] bad'), section.replace('] 123', '] 123\r')):
+                with self.subTest(section=changed), self.assertRaisesRegex(ValueError, 'host path/environment'):
+                    seed.audit_text(changed.encode(), 'system.reg')
+            with self.assertRaisesRegex(ValueError, 'host path/environment'):
+                seed.audit_text((section + '\n"Keep"="Z:\\\\root\\\\private"\n').encode(), 'system.reg')
+        with self.assertRaises(ValueError):
+            seed.audit_text(b'[System\\\\ControlSet001\\\\Enum\\\\ROOT\\\\UNKNOWN] 123\n', 'system.reg')
+
+    def test_portable_font_conversion_preserves_originals_and_unrelated_values(self):
+        converter, library, prefix, host, records, originals = self.portable_fixture()
+        assets = seed.copy_portable_fonts(prefix, host, records)
+        self.assertEqual(len(assets), 6)
+        plans = {name: seed.portable_registry(name, data, host) for name, data in originals.items()}
+        self.assertEqual(sum(len(p['rewrites']) for p in plans.values()), 18)
+        self.assertEqual(plans['userdef.reg']['data'], originals['userdef.reg'])
+        issues = {}
+        audit = seed.audit_source(converter, prefix, host, records, registry_plans=plans, text_issues=issues)
+        self.assertEqual(len(audit['system.reg']['font_portability']['rewrites']), 12)
+        self.assertEqual(audit['system.reg']['sha256'], hashlib.sha256(originals['system.reg']).hexdigest())
+        self.assertEqual(audit['user.reg']['font_portability']['portable_sha256'],
+                         hashlib.sha256(plans['user.reg']['data']).hexdigest())
+        self.assertNotIn('data', audit['system.reg']['font_portability'])
+        old_converter = converter.to_console
+        cpu = self.root / 'original-cpu.dll'; cpu.write_bytes(b'original inert CPU fixture')
+        remote = seed.FilesystemRemote(self.root / 'portable-export')
+        args = ['push', seed.SLUG, '--library', str(library), '--cpu-dll', str(cpu)]
+        self.assertEqual(seed.sync_portable_registry(converter, args, remote, plans, prefix), 0)
+        self.assertIs(converter.to_console, old_converter)
+        exported = remote.root / 'data/prospero-win/prefixes' / seed.SLUG
+        for name, plan in plans.items():
+            self.assertEqual((prefix / name).read_bytes(), originals[name])
+            self.assertEqual((exported / name).read_bytes(), converter.to_console(name, plan['data']))
+            self.assertIn(b'"Keep"="C:\\\\portable-unrelated"', plan['data'])
+        for asset in assets.values():
+            self.assertEqual(seed.sha(exported / asset['destination']), asset['sha256'])
+        # The source diagnostic remains raw-input metadata; it is not a success flag.
+        self.assertEqual(sum(len(r['findings']) for r in issues['files']), 25)
+
+    def test_font_asset_mismatch_escape_and_case_collision_refused(self):
+        _, _, prefix, host, records, _ = self.portable_fixture()
+        assets = seed.copy_portable_fonts(prefix, host, records)
+        self.assertEqual(seed.copy_portable_fonts(prefix, host, records), assets)
+        font = prefix / assets['marlett.ttf']['destination']
+        font.write_bytes(b'wrong existing bytes')
+        with self.assertRaisesRegex(ValueError, 'existing portable font differs'):
+            seed.copy_portable_fonts(prefix, host, records)
+        font.write_bytes((host / 'share/wine/fonts/marlett.ttf').read_bytes())
+        outside = self.root / 'outside-font'; outside.write_bytes(font.read_bytes())
+        font.unlink(); font.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, 'destination escapes'):
+            seed.copy_portable_fonts(prefix, host, records)
+        font.unlink(); font.write_bytes(outside.read_bytes())
+        alias = font.with_name('MARLETT.TTF'); alias.write_bytes(font.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'case-colliding portable-font file'):
+            seed.copy_portable_fonts(prefix, host, records)
+        alias.unlink()
+        (host / 'share/wine/fonts/marlett.ttf').write_bytes(b'changed parent')
+        with self.assertRaisesRegex(ValueError, 'differs from bound runtime'):
+            seed.copy_portable_fonts(prefix, host, records)
+
+    def test_font_directory_redirect_refused(self):
+        _, _, prefix, host, records, _ = self.portable_fixture()
+        directory = prefix / 'drive_c/windows/Fonts'
+        (directory / 'original.ttf').unlink(); directory.rmdir()
+        outside = self.root / 'outside-directory'; outside.mkdir()
+        directory.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'unsafe portable-font directory'):
+            seed.copy_portable_fonts(prefix, host, records)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_font_registry_exact_path_type_name_and_count_required(self):
+        _, _, prefix, host, _, originals = self.portable_fixture()
+        original = originals['user.reg']
+        line = next(line for line in original.splitlines() if line.startswith(b'"Tahoma (TrueType)"='))
+        changes = [original.replace(line + b'\n', b''),
+                   original.replace(line, line + b'\n' + line),
+                   original.replace(line, line.replace(b'="', b'=str(2):"')),
+                   original.replace(line, line.replace(b'"Tahoma', b'"tahoma')),
+                   original.replace(line, line.replace(b'tahoma.ttf', b'unknown.ttf')),
+                   original.replace(line, line.replace(b'"Tahoma', b'"T\\x61homa')),
+                   original.replace(line, line + b'\n"Tahoma (TrueType)"="C:\\\\elsewhere.ttf"'),
+                   original + original]
+        for changed in changes:
+            with self.subTest(changed_sha=hashlib.sha256(changed).hexdigest()), self.assertRaises(ValueError):
+                seed.portable_registry('user.reg', changed, host)
+        self.assertEqual((prefix / 'user.reg').read_bytes(), original)
+
+    def test_unrelated_host_path_still_rejected_after_exact_relocation(self):
+        converter, _, prefix, host, records, originals = self.portable_fixture()
+        seed.copy_portable_fonts(prefix, host, records)
+        bad = originals['user.reg'] + b'\n[Software\\\\Unrelated] 123\n"path"="Z:\\\\home\\\\private"\n'
+        (prefix / 'user.reg').write_bytes(bad); originals['user.reg'] = bad
+        plans = {n: seed.portable_registry(n, d, host) for n, d in originals.items()}
+        with self.assertRaisesRegex(ValueError, 'host path/environment'):
+            seed.audit_source(converter, prefix, host, records, registry_plans=plans)
+        self.assertIn(b'Z:\\\\home\\\\private', plans['user.reg']['data'])
+
+    def test_converter_restored_on_push_failure_and_late_registry_change(self):
+        converter, library, prefix, host, records, originals = self.portable_fixture()
+        seed.copy_portable_fonts(prefix, host, records)
+        plans = {n: seed.portable_registry(n, d, host) for n, d in originals.items()}
+        original_converter = converter.to_console
+        cpu = self.root / 'original-cpu.dll'; cpu.write_bytes(b'inert CPU fixture')
+        args = ['push', seed.SLUG, '--library', str(library), '--cpu-dll', str(cpu)]
+        class FailedRemote(seed.FilesystemRemote):
+            def write(self, path, data):
+                raise RuntimeError('original deliberate filesystem write failure')
+        with self.assertRaisesRegex(RuntimeError, 'deliberate filesystem write failure'):
+            seed.sync_portable_registry(converter, args, FailedRemote(self.root / 'failed-export'), plans, prefix)
+        self.assertIs(converter.to_console, original_converter)
+        for name, data in originals.items(): self.assertEqual((prefix / name).read_bytes(), data)
+        (prefix / 'system.reg').write_bytes(originals['system.reg'] + b'\n;late change\n')
+        with self.assertRaisesRegex(ValueError, 'registry changed'):
+            seed.sync_portable_registry(converter, args, seed.FilesystemRemote(self.root / 'late-export'), plans, prefix)
+        self.assertIs(converter.to_console, original_converter)
+
     def test_archive_hash_and_traversal_rejected(self):
         raw = io.BytesIO()
         with tarfile.open(fileobj=raw, mode='w:gz') as tar:
