@@ -11,6 +11,15 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include "native_child_probe_fixture/native-child-build.h"
+#if PW_NATIVE_CHILD_FD_MODE
+#include "../native/pw_native_fd_report.h"
+static int test_mkdir(const char *, mode_t);
+static int test_rmdir(const char *);
+#define mkdir test_mkdir
+#define rmdir test_rmdir
+#endif
 #include "../native/pw_native_child_protocol.h"
 
 static int test_clock_gettime(clockid_t, struct timespec *);
@@ -35,6 +44,10 @@ static int test_pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(vo
 #undef pthread_attr_setdetachstate
 #undef pthread_attr_destroy
 #undef pthread_create
+#if PW_NATIVE_CHILD_FD_MODE
+#undef mkdir
+#undef rmdir
+#endif
 
 const unsigned char pw_native_child_image[PW_NATIVE_CHILD_SELF_BYTES] = {0x50, 0x57};
 const size_t pw_native_child_image_size = sizeof(pw_native_child_image);
@@ -49,10 +62,81 @@ static struct Mock {
     int cancel_connect, cancel_poll, timeout_poll, boundary_on_read, poll_timeout, ticks_per_wait, eof_hup;
     int no_eof, poll_invalid, poll_error, write_hup;
     size_t chunk, input_size, position, output_size;
-    unsigned char input[6 * PW_NC_FRAME_BYTES], output[PW_NATIVE_CHILD_SELF_BYTES + 5 * PW_NC_FRAME_BYTES];
+    unsigned char input[7 * PW_NC_FRAME_BYTES], output[PW_NATIVE_CHILD_SELF_BYTES + 5 * PW_NC_FRAME_BYTES];
     void *(*entry)(void *); void *context;
     char log[4096];
+#if PW_NATIVE_CHILD_FD_MODE
+    int directory, mkdir_calls, rmdir_calls, mkdir_error, rmdir_error;
+    int fd_open_calls, fd_run_calls, fd_dispose_calls, fd_open_error, fd_failure, fd_clock_boundary;
+    int fd_open_cancel, fd_open_expiry;
+#endif
 } mock;
+
+#if PW_NATIVE_CHILD_FD_MODE
+static PwNativeFdResult role_result(int worker)
+{
+    PwNativeFdResult r = {0};
+    r.stage = PW_NATIVE_FD_COMPLETE;
+    r.local_pid = worker ? 42 : 17; r.reported_peer_pid = worker ? 17 : 42;
+    r.observations = PW_NATIVE_FD_CONNECTED | PW_NATIVE_FD_HELLO_OK | PW_NATIVE_FD_QUEUED_RIGHT_OK |
+                     PW_NATIVE_FD_FORWARD_OK | PW_NATIVE_FD_REVERSE_OK | PW_NATIVE_FD_COMPLETED |
+                     (worker ? PW_NATIVE_FD_REVERSE_EOF : PW_NATIVE_FD_FORWARD_EOF);
+    r.peer_observations = worker ? 0 : PW_NATIVE_FD_REVERSE_EOF;
+    return r;
+}
+static int test_mkdir(const char *path, mode_t mode)
+{
+    assert(!mock.directory && mode == 0700 && !strcmp(path, "/data/prospero-win/fd-00000011-0000001150574e27"));
+    ++mock.mkdir_calls;
+    if (mock.mkdir_error) { errno = mock.mkdir_error; return -1; }
+    mock.directory = 1; return 0;
+}
+static int test_rmdir(const char *path)
+{
+    assert(mock.directory && !strcmp(path, probe.directory)); ++mock.rmdir_calls;
+    if (mock.rmdir_error) { errno = mock.rmdir_error; return -1; }
+    mock.directory = 0; return 0;
+}
+int pw_native_fd_parent_open(PwNativeFdListener *l, const char *path,
+                            const PwNativeFdContext *c, PwNativeFdResult *r)
+{
+    uint64_t now;
+    assert(mock.directory && !mock.socket_calls && !strcmp(path, "/data/prospero-win/fd-00000011-0000001150574e27/s"));
+    assert(!c->clock_ms(c->context, &now) && now < c->deadline_ms);
+    ++mock.fd_open_calls;
+    if (mock.fd_open_error) { r->status = PW_NATIVE_FD_OS; return r->status; }
+    l->fd = 79; l->bound = 1; l->last_clock_ms = now;
+    if (mock.fd_open_cancel) pw_native_child_probe_cancel();
+    if (mock.fd_open_expiry) mock.now = c->deadline_ms;
+    return 0;
+}
+void pw_native_fd_dispose(PwNativeFdListener *l, PwNativeFdResult *r)
+{
+    (void)r;
+    if (l->fd >= 0 || l->bound) { assert(l->fd == 79 && l->bound); ++mock.fd_dispose_calls; }
+    l->fd = -1; l->bound = 0;
+}
+int pw_native_fd_parent(PwNativeFdListener *l, uint64_t correlation,
+                       const PwNativeFdContext *c, PwNativeFdResult *r)
+{
+    uint64_t now;
+    assert(mock.directory && l->fd == 79 && l->bound && correlation);
+    assert(mock.position == 4 * PW_NC_FRAME_BYTES); /* report not yet consumed */
+    assert(mock.output_size == PW_NATIVE_CHILD_SELF_BYTES + 3 * PW_NC_FRAME_BYTES); /* no STOP */
+    assert(!c->clock_ms(c->context, &now));
+    assert(c->deadline_ms == probe.io.stage_end - PW_NATIVE_FD_REPORT_RESERVE_MS);
+    ++mock.fd_run_calls; *r = role_result(0);
+    if (mock.fd_failure) { r->status = PW_NATIVE_FD_PROTOCOL; r->stage = PW_NATIVE_FD_FINISH; r->observations &= ~PW_NATIVE_FD_COMPLETED; }
+    if (mock.fd_clock_boundary) mock.now = probe.io.stage_end;
+    pw_native_fd_dispose(l, r);
+    return r->status;
+}
+static void set_worker_report(PwNativeFdResult value)
+{
+    uint64_t correlation = 100 ^ ((uint64_t)17 << 32) ^ UINT64_C(0x50574e43);
+    assert(!pw_native_fd_report_encode(mock.input + 4 * PW_NC_FRAME_BYTES, 17, 42, correlation, &value));
+}
+#endif
 
 static int test_clock_gettime(clockid_t id, struct timespec *out)
 {
@@ -189,6 +273,11 @@ static void reset(void)
     memcpy(value.build_id, PW_NATIVE_CHILD_BUILD_ID, sizeof(PW_NATIVE_CHILD_BUILD_ID)); append(value);
     value.parent_pid = 17; value.correlation = 100 ^ ((uint64_t)17 << 32) ^ UINT64_C(0x50574e43);
     for (unsigned i = 1; i <= PW_NC_ECHO_COUNT + 1; ++i) {
+#if PW_NATIVE_CHILD_FD_MODE
+        if (i == PW_NC_ECHO_COUNT + 1) {
+            set_worker_report(role_result(1)); mock.input_size += PW_NATIVE_FD_REPORT_BYTES;
+        }
+#endif
         value.sequence = i; value.kind = i <= PW_NC_ECHO_COUNT ? PW_NC_ECHO_REPLY : PW_NC_STOP_ACK; append(value);
     }
 }
@@ -291,6 +380,49 @@ static void test_poll_completion_boundary(int stop, int reading)
     else assert(mock.send_calls == 0 && mock.output_size == 0);
     assert(mock.close_calls == 1);
 }
+#if PW_NATIVE_CHILD_FD_MODE
+static void test_fd_results_and_order(void)
+{
+    reset();
+    probe.io.context = &probe; probe.io.clock_ms = clock_ms; probe.io.send = send_bytes; probe.io.receive = receive;
+    probe.io.cancelled = cancelled;
+    assert(!pw_native_child_begin(&probe.io)); atomic_store(&probe.stop, 1);
+    PwNativeChildFrame early = {0};
+    assert(parent_capabilities(&probe, &probe.io, &early) == -1 && errno == ECANCELED && !mock.fd_run_calls);
+    reset(); run(); assert(!probe.status && probe.worker_report && probe.result.capabilities_complete);
+    assert(mock.fd_open_calls == 1 && mock.fd_run_calls == 1 && mock.fd_dispose_calls == 1);
+    assert(mock.mkdir_calls == 1 && mock.rmdir_calls == 1 && !mock.directory);
+    reset(); mock.mkdir_error = EEXIST; run(); expect_failed(EEXIST);
+    assert(!mock.fd_open_calls && !mock.socket_calls && !mock.rmdir_calls);
+    reset(); mock.fd_open_error = 1; run(); expect_failed(EIO);
+    assert(!mock.socket_calls && !mock.fd_run_calls && mock.rmdir_calls == 1);
+    reset(); mock.rmdir_error = EACCES; run(); expect_failed(EIO);
+    assert(probe.worker_report && !probe.result.stop_ack && mock.rmdir_calls == 1);
+    reset(); mock.fd_failure = 1; run(); expect_failed(EIO);
+    assert(probe.worker_report && !probe.result.stop_ack && !probe.result.capabilities_complete);
+    reset(); PwNativeFdResult failed = role_result(1); failed.status = PW_NATIVE_FD_OS;
+    failed.stage = PW_NATIVE_FD_CLEANUP; failed.cleanup_failed = 1; failed.observations &= ~PW_NATIVE_FD_COMPLETED;
+    set_worker_report(failed); run(); expect_failed(EIO); assert(probe.worker_report && !probe.result.stop_ack);
+    reset(); mock.input[4 * PW_NC_FRAME_BYTES + 32] ^= 1; run(); expect_failed(EPROTO);
+    assert(!probe.worker_report && !probe.result.stop_ack);
+    reset(); mock.input_size = 4 * PW_NC_FRAME_BYTES; run(); expect_failed(ECONNRESET);
+    assert(!probe.worker_report && !probe.result.stop_ack);
+    reset(); mock.input_size = 4 * PW_NC_FRAME_BYTES + PW_NATIVE_FD_REPORT_BYTES - 1;
+    run(); expect_failed(ECONNRESET); assert(!probe.worker_report && !probe.result.stop_ack);
+    reset(); memmove(mock.input + 4 * PW_NC_FRAME_BYTES + 2 * PW_NATIVE_FD_REPORT_BYTES,
+                     mock.input + 4 * PW_NC_FRAME_BYTES + PW_NATIVE_FD_REPORT_BYTES, PW_NC_FRAME_BYTES);
+    memcpy(mock.input + 4 * PW_NC_FRAME_BYTES + PW_NATIVE_FD_REPORT_BYTES,
+           mock.input + 4 * PW_NC_FRAME_BYTES, PW_NATIVE_FD_REPORT_BYTES);
+    mock.input_size += PW_NATIVE_FD_REPORT_BYTES; run(); expect_failed(EPROTO);
+    assert(probe.worker_report && !probe.result.stop_ack);
+    reset(); mock.fd_open_cancel = 1; run(); expect_failed(ECANCELED);
+    assert(!mock.send_calls && mock.fd_dispose_calls == 1 && mock.rmdir_calls == 1);
+    reset(); mock.fd_open_expiry = 1; run(); expect_failed(ETIMEDOUT);
+    assert(!mock.send_calls && mock.fd_dispose_calls == 1 && mock.rmdir_calls == 1);
+    reset(); mock.fd_clock_boundary = 1; run(); expect_failed(ETIMEDOUT);
+    assert(mock.position == 4 * PW_NC_FRAME_BYTES && !probe.worker_report && !probe.result.stop_ack);
+}
+#endif
 int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--deadline-control")) test_poll_completion_boundary(0, 0);
@@ -303,6 +435,9 @@ int main(int argc, char **argv)
         if (argc == 1) for (int reading = 0; reading < 2; ++reading)
             for (int stop = 0; stop < 2; ++stop) test_poll_completion_boundary(stop, reading);
     }
+#if PW_NATIVE_CHILD_FD_MODE
+    if (argc == 1) test_fd_results_and_order();
+#endif
     puts("native controller mock-only tests passed; native execution/reaping unverified");
     return 0;
 }

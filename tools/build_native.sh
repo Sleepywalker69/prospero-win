@@ -21,6 +21,7 @@
 #                          two seconds, for diagnosing stalls (default 0)
 #   PW_NATIVE_CHILD_PROBE  1 builds a manual, one-attempt native SELF probe
 #                          instead of a game-launching UI (default 0)
+#   PW_NATIVE_CHILD_MODE hello (default) or synthetic fd capability mode
 #   PW_NATIVE_CHILD_FOUNDATION prepared pinned PRX foundation for that worker
 #   Lapy helper             fetched from the GitHub release pinned below
 #                          (lapy_release, lapy_elf_sha256)
@@ -43,6 +44,7 @@ wine64_seconds=${PW_WINE64_SECONDS:-0}
 wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
+native_child_mode=${PW_NATIVE_CHILD_MODE:-hello}
 title_id=PPSA99995
 
 [[ $native_mode == wine64 ]] || {
@@ -51,6 +53,8 @@ title_id=PPSA99995
     echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2; }
 [[ $native_child_probe == 0 || $native_child_probe == 1 ]] || {
     echo "PW_NATIVE_CHILD_PROBE must be 0 or 1" >&2; exit 2; }
+[[ $native_child_mode == hello || ( $native_child_mode == fd && $native_child_probe == 1 ) ]] || {
+    echo "PW_NATIVE_CHILD_MODE must be hello, or fd with PW_NATIVE_CHILD_PROBE=1" >&2; exit 2; }
 [[ $native_child_probe == 0 || ( $wine64_script == 0 && -n $output_suffix ) ]] || {
     echo "the native child probe requires an isolated PW_OUTPUT_SUFFIX and manual scripting-off mode" >&2; exit 2; }
 [[ $wine64_script == 0 || $wine64_script == 1 ]] && [[ $wine64_seconds =~ ^[0-9]+$ ]] &&
@@ -162,7 +166,7 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-secti
 if [[ $native_child_probe == 1 ]]; then
     probe_foundation=${PW_NATIVE_CHILD_FOUNDATION:-$root/.deps/ps5-native-app-boilerplate-prx}
     python3 "$root/tools/build_native_child_probe.py" --sdk "$sdk" \
-        --foundation "$probe_foundation" --out "$build/child"
+        --foundation "$probe_foundation" --out "$build/child" --mode "$native_child_mode"
     common+=(-DPW_NATIVE_CHILD_PROBE=1 -I"$build/child")
 fi
 
@@ -178,6 +182,9 @@ sources=(
 )
 if [[ $native_child_probe == 1 ]]; then
     sources+=(native/pw_native_child_probe.c native/pw_native_child_protocol.c)
+    if [[ $native_child_mode == fd ]]; then
+        sources+=(native/pw_native_fd_probe.c native/pw_native_fd_report.c)
+    fi
 fi
 objects=()
 for source in "${sources[@]}"; do

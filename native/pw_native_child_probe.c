@@ -3,6 +3,10 @@
 #include "pw_native_child_probe.h"
 #include "pw_native_child_protocol.h"
 #include "native-child-build.h"
+#if PW_NATIVE_CHILD_FD_MODE
+#include "pw_native_fd_report.h"
+#include <sys/stat.h>
+#endif
 #include "pw_diagnostics.h"
 #include "ps5log/ps5log_ps5_net.h"
 #include <errno.h>
@@ -29,6 +33,12 @@ struct native_probe {
     unsigned hello_ticks, closed_ticks;
     PwNativeChildIo io;
     PwNativeChildResult result;
+#if PW_NATIVE_CHILD_FD_MODE
+    PwNativeFdListener listener;
+    PwNativeFdResult fd_local, fd_worker;
+    char directory[PW_NATIVE_FD_PATH_CAP];
+    int directory_owned, directory_cleanup, worker_report;
+#endif
 };
 static struct native_probe probe;
 enum { PROBE_IDLE, PROBE_RUNNING, PROBE_DONE };
@@ -100,6 +110,60 @@ static long send_bytes(void *context, const void *bytes, size_t size, unsigned t
     return transfer(context, (void *)bytes, size, timeout_ms, 1);
 }
 
+#if PW_NATIVE_CHILD_FD_MODE
+static int fd_clock(void *context, uint64_t *value)
+{
+    struct native_probe *p = context;
+    unsigned remaining;
+    if (pw_native_child_remaining(&p->io, &remaining)) return -1;
+    *value = p->io.last_clock;
+    return 0;
+}
+static void fd_directory_cleanup(struct native_probe *p)
+{
+    if (!p->directory_owned) return;
+    p->directory_owned = 0; /* no retry after an uncertain cleanup result */
+    p->directory_cleanup = rmdir(p->directory);
+}
+static int parent_capabilities(void *context, PwNativeChildIo *io, const PwNativeChildFrame *frame)
+{
+    struct native_probe *p = context;
+    PwNativeFdContext fd_context = {p, fd_clock, cancelled, 0};
+    uint8_t wire[PW_NATIVE_FD_REPORT_BYTES];
+    unsigned remaining;
+    if (pw_native_child_remaining(io, &remaining)) return -1;
+    if (remaining <= PW_NATIVE_FD_REPORT_RESERVE_MS) { errno = ETIMEDOUT; return -1; }
+    fd_context.deadline_ms = io->last_clock + remaining - PW_NATIVE_FD_REPORT_RESERVE_MS;
+    (void)pw_native_fd_parent(&p->listener, frame->correlation, &fd_context, &p->fd_local);
+    fd_directory_cleanup(p);
+    /* The worker's control poll expects no inbound bytes until this report
+     * has been consumed. STOP is sent only after both independent results. */
+    if (pw_native_child_receive(io, wire, sizeof(wire))) return -1;
+    if (pw_native_fd_report_decode(&p->fd_worker, wire, frame->parent_pid, frame->child_pid, frame->correlation)) {
+        errno = EPROTO; return -1;
+    }
+    p->worker_report = 1;
+    if (!pw_native_fd_result_matches(&p->fd_local, frame->parent_pid, frame->child_pid, 0) ||
+        !pw_native_fd_result_matches(&p->fd_worker, frame->child_pid, frame->parent_pid, 1) ||
+        p->directory_cleanup) { errno = EIO; return -1; }
+    return 0;
+}
+static int fd_prepare(struct native_probe *p, uint32_t parent, uint64_t correlation)
+{
+    char path[PW_NATIVE_FD_PATH_CAP];
+    PwNativeFdContext context = {p, fd_clock, cancelled, p->io.stage_end};
+    if (pw_native_fd_paths(parent, correlation, p->directory, path)) { errno = EINVAL; return -1; }
+    /* Ordinary creation only. Existing names and access failures stop the run;
+     * no stale path removal, permission changes or alternate namespace. */
+    if (mkdir(p->directory, 0700)) return -1;
+    p->directory_owned = 1;
+    if (pw_native_fd_parent_open(&p->listener, path, &context, &p->fd_local)) {
+        errno = EIO; return -1;
+    }
+    return 0;
+}
+#endif
+
 static void *controller(void *context)
 {
     struct native_probe *p = context;
@@ -114,6 +178,10 @@ static void *controller(void *context)
     unsigned remaining;
     int status = -1, error = EIO;
     p->socket = -1;
+#if PW_NATIVE_CHILD_FD_MODE
+    p->listener.fd = -1;
+    p->io.capabilities = parent_capabilities;
+#endif
     p->io.context = p; p->io.clock_ms = clock_ms;
     p->io.receive = receive; p->io.send = send_bytes;
     p->io.cancelled = cancelled; p->io.wait_ms = pace; p->io.progress = progress;
@@ -122,6 +190,11 @@ static void *controller(void *context)
         pw_native_child_image_size < 32 || pw_native_child_image_size > 4u * 1024u * 1024u) {
         errno = EINVAL; goto done;
     }
+    uint64_t correlation = started ^ ((uint64_t)(uint32_t)getpid() << 32) ^ UINT64_C(0x50574e43);
+    if (!correlation) correlation = 1; /* correlation only, never authentication */
+#if PW_NATIVE_CHILD_FD_MODE
+    if (fd_prepare(p, (uint32_t)getpid(), correlation)) goto done;
+#endif
     p->socket = ps5log_ps5_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (p->socket < 0 || pw_native_child_remaining(&p->io, &remaining)) goto done;
     uint32_t microseconds = remaining * 1000;
@@ -139,18 +212,29 @@ static void *controller(void *context)
         pw_native_child_remaining(&p->io, &remaining) || pw_native_child_stage(&p->io)) goto done;
     /* One upload, no retry/half-close; SELF header extent delimits the image. */
     if (pw_native_child_send(&p->io, pw_native_child_image, pw_native_child_image_size)) goto done;
-    uint64_t correlation = started ^ ((uint64_t)(uint32_t)getpid() << 32) ^ UINT64_C(0x50574e43);
-    if (!correlation) correlation = 1; /* correlation only, never authentication */
     status = pw_native_child_parent(&p->io, (uint32_t)getpid(), correlation, PW_NATIVE_CHILD_BUILD_ID, &p->result);
     if (!status && p->closed_ticks - p->hello_ticks < 2) { status = -1; errno = EDEADLK; }
 done:
     error = status ? (errno ? errno : EIO) : 0;
     if (p->socket >= 0 && ps5log_ps5_close(p->socket)) {
-        status = -1; error = errno ? errno : EIO;
+        status = -1; if (!error) error = errno ? errno : EIO;
     }
+#if PW_NATIVE_CHILD_FD_MODE
+    pw_native_fd_dispose(&p->listener, &p->fd_local);
+    fd_directory_cleanup(p);
+    if (p->fd_local.cleanup_failed || p->directory_cleanup) {
+        status = -1; if (!error) error = EIO;
+    }
+    pw_diagnostics_log("PW_NATIVE_FD directory=%s local_status=%d local_stage=%u local_api=%u local_raw=%lld local_observed=%u local_peer_reported=%u local_cleanup=%u worker_report=%d worker_status=%d worker_stage=%u worker_api=%u worker_raw=%lld worker_observed=%u worker_cleanup=%u directory_cleanup=%d peer_identity_verified=0 wine_endpoint=untested",
+        p->directory, p->fd_local.status, p->fd_local.stage, p->fd_local.api, (long long)p->fd_local.raw_result,
+        p->fd_local.observations, p->fd_local.peer_observations, p->fd_local.cleanup_failed,
+        p->worker_report, p->fd_worker.status, p->fd_worker.stage, p->fd_worker.api,
+        (long long)p->fd_worker.raw_result, p->fd_worker.observations,
+        p->fd_worker.cleanup_failed, p->directory_cleanup);
+#endif
     p->socket = -1; p->status = status; p->error = error;
-    pw_diagnostics_log("PW_NATIVE_CHILD stage=complete status=%d error=%d protocol_stage=%u parent=%u child=%u child_ppid=%u echoes=%u stop_ack=%d eof=%d ui_ticks=%u native_reap=unverified windows_child=unsupported",
-                       status, error, p->result.stage, (unsigned)getpid(), p->result.child_pid,
+    pw_diagnostics_log("PW_NATIVE_CHILD stage=complete status=%d error=%d protocol_stage=%u capability_complete=%d parent=%u child=%u child_ppid=%u echoes=%u stop_ack=%d eof=%d ui_ticks=%u native_reap=unverified windows_child=unsupported",
+                       status, error, p->result.stage, p->result.capabilities_complete, (unsigned)getpid(), p->result.child_pid,
                        p->result.child_ppid, p->result.echoes, p->result.stop_ack, p->result.stream_closed,
                        p->result.stream_closed ? p->closed_ticks - p->hello_ticks : 0);
     atomic_store_explicit(&p->state, PROBE_DONE, memory_order_release);
@@ -184,12 +268,17 @@ void pw_native_child_probe_tick(void)
 {
     atomic_fetch_add_explicit(&probe.ticks, 1, memory_order_relaxed);
 }
+const char *pw_native_child_probe_title(void)
+{
+    return PW_NATIVE_CHILD_FD_MODE ? "NATIVE FD CAPABILITY PROBE" : "NATIVE CHILD PROBE";
+}
 void pw_native_child_probe_status(char *text, size_t capacity)
 {
     switch (atomic_load_explicit(&probe.state, memory_order_acquire)) {
     case PROBE_IDLE: snprintf(text, capacity, "CROSS/ENTER: RUN ONCE. SQUARE/ESC: CANCEL."); break;
     case PROBE_RUNNING: snprintf(text, capacity, "NATIVE PROBE RUNNING. SQUARE/ESC: CANCEL."); break;
     default: snprintf(text, capacity, "%s. GET MATCHING SAVED LOG.",
-                      probe.status ? "NATIVE PROBE FAILED" : "NATIVE ECHO AND EOF OBSERVED"); break;
+                      probe.status ? "NATIVE PROBE FAILED" :
+                      PW_NATIVE_CHILD_FD_MODE ? "NATIVE FD AND EOF OBSERVED" : "NATIVE ECHO AND EOF OBSERVED"); break;
     }
 }

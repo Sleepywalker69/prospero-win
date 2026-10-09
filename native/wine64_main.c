@@ -718,10 +718,13 @@ static void run_launcher(void)
     const size_t frame_bytes = (size_t)PW_LAUNCHER_RENDER_WIDTH * PW_LAUNCHER_RENDER_HEIGHT * 4u;
     uint8_t *frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     PwLauncherScene scene = { items, 0, PW_LAUNCHER_RENDER_NONE,
-        PW_NATIVE_CHILD_PROBE ? "ORIGINAL NATIVE CHILD PROBE" :
+#if PW_NATIVE_CHILD_PROBE
+        pw_native_child_probe_title() };
+#else
         launch.refused ? "THAT GAME IS NOT IN THE LIBRARY" :
         !catalog_count ? "ADD PROFILES TO /DATA/PROSPERO-WIN/PROFILES" :
         launch.cycle ? "WELCOME BACK" : "CHOOSE A GAME" };
+#endif
     static PwHidPs5 hid;
     int video_status = pw_videoout_ps5_open(&video), pad_status = pw_pad_ps5_platform_ops(&pad_ops);
     int hid_status, dirty = 1, chosen = -1;
