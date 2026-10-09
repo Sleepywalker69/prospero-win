@@ -9,5 +9,7 @@ const char *pw_native_child_probe_title(void);
 int pw_native_child_probe_start(void);
 void pw_native_child_probe_cancel(void);
 void pw_native_child_probe_tick(void); /* called after a successful UI-loop present */
+/* Returns a published completion snapshot; never changes protocol acceptance. */
+int pw_native_child_probe_finished(int *status, unsigned *cleanup_uncertain);
 void pw_native_child_probe_status(char *text, size_t capacity);
 #endif

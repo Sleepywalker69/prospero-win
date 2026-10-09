@@ -546,6 +546,35 @@ static void test_peer_results_and_order(void)
     assert(!probe.result.stop_ack && !mock.peer_cooperative && probe.peer_result.exit_observed);
 }
 #endif
+static void test_completion_snapshot(void)
+{
+    int status=123; unsigned uncertain=123;
+    reset(); assert(!pw_native_child_probe_finished(&status,&uncertain));
+    assert(status==123&&uncertain==123);
+    mock.socket_error=EACCES; run();
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&status==-1&&!uncertain&&!probe.upload_possible);
+    reset(); mock.cancel_poll=1; run();
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&status==-1&&!uncertain&&!probe.upload_possible);
+    reset(); run(); assert(probe.upload_possible);
+    int original=probe.status; unsigned observed;
+    assert(pw_native_child_probe_finished(&status,&observed)&&status==original);
+#if PW_NATIVE_CHILD_PEER_MODE
+    probe.peer_result.exit_observed=probe.peer_result.exit_status_match=probe.peer_result.event_tag_matches=1;
+    probe.peer_result.nonce_match=0;
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&uncertain&&status==original);
+    probe.peer_result.receipt_ok=probe.peer_result.nonce_match=1;
+    probe.peer_result.initial_credential.pid=probe.peer_result.post_arm_credential.pid=probe.result.child_pid;
+    probe.peer_result.event_ident=probe.result.child_pid;
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&!uncertain&&status==original);
+    probe.status=-1;
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&uncertain&&status==-1);
+    probe.status=original;probe.peer_result.exit_status_match=0;
+#endif
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&uncertain&&status==original);
+    probe.upload_possible=0;probe.close_uncertain=1;
+    assert(pw_native_child_probe_finished(&status,&uncertain)&&uncertain&&status==original);
+    assert(!pw_native_child_probe_finished(NULL,&uncertain)&&!pw_native_child_probe_finished(&status,NULL));
+}
 int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--deadline-control")) test_poll_completion_boundary(0, 0);
@@ -564,6 +593,7 @@ int main(int argc, char **argv)
 #if PW_NATIVE_CHILD_PEER_MODE
     if (argc == 1) test_peer_results_and_order();
 #endif
+    test_completion_snapshot();
     puts("native controller mock-only tests passed; native execution/reaping unverified");
     return 0;
 }

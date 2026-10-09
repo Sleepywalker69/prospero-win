@@ -40,6 +40,7 @@ extern int *sceNetErrnoLoc(void);
 struct native_probe {
     atomic_uint state, stop, ticks;
     int socket, status, error;
+    unsigned upload_possible, close_uncertain;
     unsigned hello_ticks, closed_ticks;
     PwNativeChildIo io;
     PwNativeChildResult result;
@@ -113,8 +114,10 @@ static long transfer(void *context, void *bytes, size_t size, unsigned timeout_m
         if (item.revents & POLLERR) { errno = EIO; return -1; }
         if (writing && item.revents & (POLLERR | POLLHUP)) { errno = EPIPE; return -1; }
         if (!(item.revents & (writing ? POLLOUT : POLLIN | POLLHUP))) { errno = EIO; return -1; }
-        return writing ? ps5log_ps5_send(p->socket, bytes, size, 0) :
-                         network_result(sceNetRecv(p->socket, bytes, size, 0));
+        if (writing) p->upload_possible = 1; /* negative send cannot prove no side effect */
+        long result = writing ? ps5log_ps5_send(p->socket, bytes, size, 0) :
+                                network_result(sceNetRecv(p->socket, bytes, size, 0));
+        return result;
     }
 }
 static long receive(void *context, void *bytes, size_t size, unsigned timeout_ms)
@@ -278,6 +281,7 @@ static void *controller(void *context)
 done:
     error = status ? (errno ? errno : EIO) : 0;
     if (p->socket >= 0 && ps5log_ps5_close(p->socket)) {
+        p->close_uncertain = 1;
         status = -1; if (!error) error = errno ? errno : EIO;
     }
 #if PW_NATIVE_CHILD_PEER_MODE
@@ -374,4 +378,27 @@ void pw_native_child_probe_status(char *text, size_t capacity)
                       probe.status ? "NATIVE PROBE FAILED" :
                       PW_NATIVE_CHILD_FD_MODE ? "NATIVE FD AND EOF OBSERVED" : "NATIVE ECHO AND EOF OBSERVED"); break;
     }
+}
+
+int pw_native_child_probe_finished(int *status, unsigned *cleanup_uncertain)
+{
+    if (!status || !cleanup_uncertain ||
+        atomic_load_explicit(&probe.state, memory_order_acquire) != PROBE_DONE) return 0;
+    *status = probe.status;
+    *cleanup_uncertain = probe.close_uncertain;
+#if PW_NATIVE_CHILD_PEER_MODE
+    *cleanup_uncertain |= probe.peer_result.cleanup_failed || probe.peer_directory_cleanup ||
+        (probe.upload_possible && !(probe.status == 0 && probe.result.child_pid > 0 &&
+          probe.peer_result.receipt_ok && probe.peer_result.nonce_match &&
+          probe.peer_result.initial_credential.pid == probe.result.child_pid &&
+          probe.peer_result.post_arm_credential.pid == probe.result.child_pid &&
+          probe.peer_result.event_ident == probe.result.child_pid &&
+          probe.peer_result.exit_observed && probe.peer_result.exit_status_match &&
+          probe.peer_result.event_tag_matches));
+#elif PW_NATIVE_CHILD_FD_MODE
+    *cleanup_uncertain |= probe.fd_local.cleanup_failed || probe.directory_cleanup || probe.upload_possible;
+#else
+    *cleanup_uncertain |= probe.upload_possible;
+#endif
+    return 1;
 }
