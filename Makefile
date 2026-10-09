@@ -122,6 +122,9 @@ $(eval $(call test_rule,test_pw_data_mount_native,tests/test_pw_data_mount_nativ
 PW_LAPY_ELEVATION_TEST_FLAGS := -DPW_LAPY_HELPER_PATH='"/tmp/pw_lapy_test_helper"'
 $(eval $(call test_rule,test_pw_native_child_protocol,tests/test_pw_native_child_protocol.c native/pw_native_child_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_protocol,tests/test_pw_native_peer_protocol.c native/pw_native_peer_protocol.c,))
+PW_NATIVE_PEER_TEST_FLAGS := -Itests/native_peer_fixture -MMD -MP -MF $(BUILD)/native-peer-probe-test.d
+-include $(BUILD)/native-peer-probe-test.d
+$(eval $(call test_rule,test_pw_native_peer_probe,native/pw_native_peer_protocol.c tests/test_pw_native_peer_probe.c,$(PW_NATIVE_PEER_TEST_FLAGS)))
 $(eval $(call test_rule,test_native_fd_mock,tests/test_native_fd_mock.c,))
 $(eval $(call test_rule,test_pw_native_fd_report,tests/test_pw_native_fd_report.c native/pw_native_fd_report.c,))
 $(eval $(call test_rule,test_pw_native_child_capabilities,tests/test_pw_native_child_capabilities.c native/pw_native_child_protocol.c native/pw_native_fd_report.c,))
@@ -164,7 +167,7 @@ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_ho
 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle \
 	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount \
-	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe test_native_fd_mock test_pw_native_fd_report test_pw_native_child_capabilities test_pw_native_fd_worker test_pw_native_fd_controller test_pw_native_peer_protocol
+	test_pw_data_mount_native test_pw_lapy_elevation test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe test_native_fd_mock test_pw_native_fd_report test_pw_native_child_capabilities test_pw_native_fd_worker test_pw_native_fd_controller test_pw_native_peer_protocol test_pw_native_peer_probe
 
 # The Python suites drive the built DBT tools and check the contracts the
 # host compiler cannot.
