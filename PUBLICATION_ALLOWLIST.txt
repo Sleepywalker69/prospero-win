@@ -527,4 +527,5 @@ docs/DIAGNOSTIC_KIT.md
 wine/patches/0910-ntdll-private-dispatcher-abi-proposal.patch
 tools/check_private_dispatch_abi.py
 tests/test_private_dispatch_contract.py
+docs/PRIVATE_DISPATCHER_ABI.md
 tests/test_private_dispatch_build.py

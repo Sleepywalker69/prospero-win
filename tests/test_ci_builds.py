@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Keep CI fail-closed, source-backed, read-only, and explicit about its artifacts."""
 from pathlib import Path
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -20,6 +22,7 @@ assert set(workflow["on"]["pull_request"]["types"]) == {"opened", "synchronize",
 assert workflow["on"]["workflow_dispatch"]["inputs"]["build_native_title"]["default"] == "false"
 assert workflow["on"]["workflow_dispatch"]["inputs"]["build_tls_dependencies"]["default"] == "false"
 assert workflow["on"]["workflow_dispatch"]["inputs"]["build_wine_prxs"]["default"] == "false"
+assert workflow["on"]["workflow_dispatch"]["inputs"]["build_private_dispatch"]["default"] == "false"
 assert workflow["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
 assert workflow["concurrency"]["cancel-in-progress"] == "true"
 
@@ -198,6 +201,14 @@ for guard in ("github.event_name == 'workflow_dispatch'", "inputs.build_wine_prx
               "contains(github.event.pull_request.labels.*.name, 'build-wine-prxs')"):
     assert guard in prxs["if"], guard
 assert prxs["needs"] == ["host-contracts", "wine-source-contracts"]
+assert prxs['strategy']['fail-fast'] == 'false'
+selection = prxs['strategy']['matrix']['private_dispatch']
+assert 'inputs.build_private_dispatch' in selection and 'build-private-dispatch' in selection
+assert "'[\"0\",\"1\"]'" in selection and "'[\"0\"]'" in selection
+assert prxs['env']['PW_WINE_PRIVATE_DISPATCH'] == '${{ matrix.private_dispatch }}'
+assert 'inputs.build_private_dispatch' in prxs['if'] and 'build-private-dispatch' in prxs['if']
+assert 'PW_DISPATCH_CLANG=clang-18 python3 tests/test_private_dispatch_contract.py' in source_runs
+
 assert prxs["env"]["LLVM_CONFIG"] == "/usr/bin/llvm-config-18"
 assert prxs["env"]["XDG_CACHE_HOME"].startswith("${{ github.workspace }}/")
 prx_runs = "\n".join(step.get("run", "") for step in prxs["steps"])
@@ -241,4 +252,48 @@ with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
     assert '--dyn-syms -r -W' in (evidence / 'later.shared.elf.log').read_text()
     assert (evidence / 'later.shared.elf-disassembly.log').is_file()
     assert (evidence / 'later.elf.log').is_file()
+retention = next(step for step in prxs['steps'] if step.get('name') ==
+                 'Retain bounded experimental outputs with exact sources on failure')
+assert 'always()' in retention['if'] and "env.PW_DISPATCH_MATRIX == '1'" in retention['if']
+assert 'git -C "$WINE_SOURCE" archive HEAD' in retention['run'] and 'LICENSES/.' in retention['run']
+code = retention['run'].split("<<'PYCODE'\n", 1)[1].split('\nPYCODE', 1)[0]
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory); work = root/'work'; stage = root/'stage'
+    original = work/'build/dlls/ntdll/unix/loader.o'; original.parent.mkdir(parents=True)
+    original.write_bytes(b'original compiler-output fixture')
+    stamp = work/'build/.prospero-stamp'; stamp.write_bytes(b'1'*64+b'\n')
+    stage.mkdir(); (stage/'sources').mkdir()
+    for name in ('wine.tar.gz', 'foundation.tar.gz'):
+        (stage/'sources'/name).write_bytes(b'original source-archive fixture')
+    def retain(mode='1'):
+        return subprocess.run([sys.executable, '-c', code, str(work), str(stage), mode], capture_output=True, text=True)
+    for mode in ('0', '1'):
+        assert retain(mode).returncode == 0
+        record = json.loads((stage/'FILES.json').read_text())
+        assert record['mode'] == mode and record['executed'] is False
+        assert record['files']['build/dlls/ntdll/unix/loader.o']['sha256'] == hashlib.sha256(original.read_bytes()).hexdigest()
+        alias = 'build/prospero-configure-stamp.txt'
+        assert 'build/.prospero-stamp' not in record['files']
+        assert record['files'][alias] == {'source_path': 'build/.prospero-stamp', 'bytes': 65,
+                                           'sha256': hashlib.sha256(stamp.read_bytes()).hexdigest()}
+        # Model upload-artifact's ordinary exclusion of hidden path components.
+        visible = {str(path.relative_to(stage/'outputs')): path for path in (stage/'outputs').rglob('*')
+                   if path.is_file() and not any(part.startswith('.') for part in path.relative_to(stage/'outputs').parts)}
+        assert set(visible) == set(record['files'])
+        for name, value in record['files'].items():
+            assert visible[name].read_bytes() == (work/value['source_path']).read_bytes()
+            assert hashlib.sha256(visible[name].read_bytes()).hexdigest() == value['sha256']
+    hidden = work/'build/dlls/ntdll/.unexpected/loader.o'; hidden.parent.mkdir(parents=True)
+    hidden.write_bytes(b'unexpected hidden output'); assert retain().returncode != 0
+    hidden.unlink(); hidden.parent.rmdir()
+    assert retain('unknown').returncode != 0
+    (stage/'sources/wine.tar.gz').unlink(); assert retain().returncode != 0
+    (stage/'sources/wine.tar.gz').write_bytes(b'original source-archive fixture')
+    original.unlink(); outside = root/'outside'; outside.write_bytes(b'not a selected build output')
+    original.symlink_to(outside); assert retain().returncode != 0
+    original.unlink()
+    with original.open('wb') as stream:
+        stream.truncate(128 * 1024 * 1024 + 1)
+    assert retain().returncode != 0
+
 print("CI build contract passed: preserved gates, source checks, opt-in title, TLS and checked Wine PRX build artifacts")
