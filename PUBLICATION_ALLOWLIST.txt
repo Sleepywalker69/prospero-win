@@ -883,3 +883,5 @@ wine/patches/0911-server-watchdog-local-address-space.patch
 tools/build_windows_child_fixture.ps1
 tests/fixtures/windows_child_process.c
 tests/fixtures/windows_child_process.md
+tests/test_windows_child_fixture.c
+tests/windows_fixture_mock/windows.h
