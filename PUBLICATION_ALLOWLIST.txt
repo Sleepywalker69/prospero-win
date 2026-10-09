@@ -534,3 +534,5 @@ tools/check_radv_prx.py
 tools/prepare_radv_prx.py
 tests/test_radv_prx.py
 docs/RADV_PRX_CI.md
+tests/test_pw_radv_mkstemp.c
+wine/ps5/pw_radv_mkstemp.c
