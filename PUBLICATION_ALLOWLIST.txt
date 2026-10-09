@@ -589,3 +589,7 @@ native/pw_native_service_worker.c
 tests/test_pw_native_service_packet.c
 tests/test_pw_native_service_worker.c
 tests/native_service_fixture/sys/socket.h
+native/pw_native_service_child.c
+native/pw_native_service_child.h
+tests/test_pw_native_service_child.c
+tests/native_service_fixture/native-service-build.h
