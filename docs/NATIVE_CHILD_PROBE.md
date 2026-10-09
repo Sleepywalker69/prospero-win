@@ -236,7 +236,7 @@ same descriptor, followed by the required `SO_NOSIGPIPE` option. In
 `PW_NATIVE_PEER` records, api code 24 identifies `FIOCLEX`, 26 the setter and 27
 identifies its getter. The ioctl, setter and getter must each return zero. The
 getter starts with a zero value and must return exactly `sizeof(int)` bytes
-containing 1; an unwritten, short, oversized, off or otherwise inconsistent
+containing a nonzero integer; an unwritten, short, oversized or off
 readback is a protocol/state failure. In that case `raw=0` records the successful
 getter return, and `native_error` remains zero rather than reporting stale errno.
 The readback value and length are checked but are not separate telemetry fields.
@@ -254,10 +254,15 @@ define the close-on-exec setter's preservation of unrelated descriptor flags.
 The pinned SDK does not declare `SO_NBIO`. Its platform option value `0x1200`
 and ordinary setter/getter calls are documented in a
 [public PS5 caller](https://github.com/blackbearreloaded/ProsperoEden/blob/bf3ee7d8abf54a9709b8ae77d60ecc1855d81f71/headless/update_check/console_curl.c#L73).
-This candidate uses the option with strict error/readback checks; it does not
+That caller treats any nonzero getter value as enabled, including a bitmask;
+requiring the integer to equal 1 was stricter than this source contract. This
+candidate keeps strict return and length checks; it does not
 adopt that caller's ignored errors or fabricated fcntl results. The source
 establishes a testable API candidate, not successful AF_UNIX support in this
-title or firmware, or the cause of an earlier access-denied result.
+title or firmware, or the cause of an earlier access-denied result. A prior
+successful getter failed the exact-one/length predicate without recording its
+value or length; the nonzero correction alone does not establish which
+condition failed on that console.
 
 This candidate follows an observed `F_GETFD` rejection with EINVAL on the
 listener, followed in later diagnostic runs by successful `FIOCLEX` and an
