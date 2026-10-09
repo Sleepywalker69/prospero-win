@@ -518,13 +518,15 @@ wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
 
 tools/check_wine_prx_build.py
 tests/test_check_wine_prx_build.py
-native/pw_native_child_protocol.c
-native/pw_native_child_protocol.h
-tests/test_pw_native_child_protocol.c
-native/pw_native_child_worker.c
-tools/build_native_child_probe.py
-tests/test_build_native_child_probe.py
+.github/workflows/native-child-probe.yml
+docs/NATIVE_CHILD_PROBE.md
 native/pw_native_child_probe.c
 native/pw_native_child_probe.h
+native/pw_native_child_protocol.c
+native/pw_native_child_protocol.h
+native/pw_native_child_worker.c
+tests/test_pw_native_child_protocol.c
+tests/test_build_native_child_probe.py
+tools/build_native_child_probe.py
 tests/test_pw_native_child_probe.c
 tests/native_child_probe_fixture/native-child-build.h
