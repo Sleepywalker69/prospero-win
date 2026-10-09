@@ -23,10 +23,21 @@ ROOT = Path(__file__).resolve().parents[1]
 FOUNDATION = "30597512539e7edfde079cbcaf4a626bc0a948c5"
 SOURCES = ("native/pw_native_child_worker.c", "native/pw_native_child_protocol.c",
            "native/pw_native_child_protocol.h", "tools/build_native_child_probe.py")
+FD_SOURCES = ("native/pw_native_fd_probe.c", "native/pw_native_fd_report.c",
+              "native/pw_native_fd_probe.h", "native/pw_native_fd_report.h")
 WORKER_FLAGS = ("--no-default-config", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                 "-ffreestanding", "-fno-builtin", "-fPIE", "-fasynchronous-unwind-tables")
 IMPORTS = {"_exit", "getpid", "getppid", "clock_gettime", "fcntl", "poll", "read", "write", "setsockopt"}
+FD_IMPORTS = IMPORTS | {"socket", "socketpair", "connect", "close", "sendmsg", "recvmsg", "shutdown"}
 MAX_WORKER = 4 * 1024 * 1024
+
+
+def mode_inputs(mode):
+    require(mode in {"hello", "fd"}, "unknown native probe mode")
+    selected = SOURCES + (FD_SOURCES if mode == "fd" else ())
+    sources = {name: digest(ROOT / name) for name in selected}
+    identity = {"mode": mode, "sources": sources}
+    return sources, hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:40]
 
 
 def entry_mapped(value):
@@ -114,7 +125,9 @@ def verify_reconstruction(converted, recovered):
                                           "original_sha256": hashlib.sha256(original[start:]).hexdigest()}}
 
 
-def validate_link(path, sdk, bindir, commands):
+def validate_link(path, sdk, bindir, commands, mode="hello"):
+    require(mode in {"hello", "fd"}, "unknown native probe mode")
+    expected_imports = FD_IMPORTS if mode == "fd" else IMPORTS
     value, _ = elf(path, 3)
     require(entry_mapped(value), "worker entry is not executable file-backed memory")
     sections = commands.run(bindir / "llvm-readelf", "--section-headers", "-W", path)
@@ -132,7 +145,7 @@ def validate_link(path, sdk, bindir, commands):
             require(fields[3] in {"FUNC", "NOTYPE"} and fields[4:6] == ["GLOBAL", "DEFAULT"],
                     "worker has an unsupported import type/binding")
             names[fields[7]] = fields[3]
-    require(set(names) == IMPORTS, f"unexpected worker imports: {sorted(names)}")
+    require(set(names) == expected_imports, f"unexpected worker imports: {sorted(names)}")
     provider = sdk / "target/lib/libkernel.so"
     require(re.findall(r"Library soname: \[([^\]]+)\]",
                        commands.run(bindir / "llvm-readelf", "-dW", provider)) == ["libkernel.sprx"],
@@ -142,7 +155,7 @@ def validate_link(path, sdk, bindir, commands):
         fields = line.split()
         if len(fields) >= 8 and fields[3:6] == ["FUNC", "GLOBAL", "DEFAULT"] and fields[6] != "UND":
             exports.add(fields[7])
-    require(IMPORTS <= exports, "ordinary kernel provider lacks required function imports")
+    require(expected_imports <= exports, "ordinary kernel provider lacks required function imports")
     disassembly = commands.run(bindir / "llvm-objdump", "-d", "--no-show-raw-insn", path)
     require(re.search(r"^\s*[0-9a-f]+:\s+\S", disassembly, re.M), "worker disassembly is empty")
     require(not re.search(r"^\s*[0-9a-f]+:\s+syscall(?:\s|$)", disassembly, re.M), "worker contains a raw syscall")
@@ -174,8 +187,7 @@ def build(args):
     native = foundation / "tooling/native"
     llvm = llvm_identity(sdk)
     bindir = Path(llvm["bindir"])
-    sources = {name: digest(ROOT / name) for name in SOURCES}
-    build_id = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()[:40]
+    sources, build_id = mode_inputs(args.mode)
     environment = ["env", "-i", "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C",
                    "LLVM_CONFIG=" + llvm["config"], "PS5_PAYLOAD_SDK=" + str(sdk)]
     # Build this exact converter from the checked source. An existing binary
@@ -195,16 +207,17 @@ def build(args):
         require(re.search(r"^#define " + name + r" [1-9][0-9]*$", predefines, re.M),
                 f"worker compiler lacks genuine target macro {name}")
     objects = []
-    for source in SOURCES[:2]:
+    for source in SOURCES[:2] + (FD_SOURCES[:2] if args.mode == "fd" else ()):
         obj = output / (Path(source).stem + ".o")
         commands.run(*environment, sdk / "bin/prospero-clang", *WORKER_FLAGS,
-                     "-DPW_NATIVE_CHILD_FREESTANDING", '-DPW_NATIVE_CHILD_BUILD_ID="' + build_id + '"',
+                     "-DPW_NATIVE_CHILD_FREESTANDING", "-DPW_NATIVE_FD_WORKER_ONLY",
+                     "-DPW_NATIVE_CHILD_FD_MODE=" + str(int(args.mode == "fd")), '-DPW_NATIVE_CHILD_BUILD_ID="' + build_id + '"',
                      "-c", ROOT / source, "-o", obj)
         objects.append(obj)
     linked = output / "worker.linked.elf"
     commands.run(*environment, sdk / "bin/prospero-lld", "-T", native / "ps5-pie.ld", "--eh-frame-hdr",
                  "-e", "_start", "-z", "defs", "-o", linked, *objects, sdk / "target/lib/libkernel.so")
-    graph = validate_link(linked, sdk, bindir, commands)
+    graph = validate_link(linked, sdk, bindir, commands, args.mode)
     converted, original, final = output / "worker.elf", output / "worker.original.self", output / "native-child.self"
     commands.run(tool, "link", "--in", linked, "--out", converted, "--stub", sdk / "target/lib/libkernel.so",
                  "--module-sdk", "0x02000009", "--file-name", "native-child.elf", "--component", "pw_native_child_worker")
@@ -214,7 +227,7 @@ def build(args):
     commands.run(tool, "self", "--sign", "--in", converted, "--out", original, "--magic", "0x1D3D154F")
     framing = streamable_self(original, final, tool, commands)
     reconstruction = verify_reconstruction(converted, final.with_suffix(".after.elf"))
-    manifest = {"schema": "pw-native-child-build/1", "build_id": build_id, "sources": sources,
+    manifest = {"schema": "pw-native-child-build/1", "build_id": build_id, "sources": sources, "mode": args.mode,
                 "foundation_commit": FOUNDATION, "converter_sha256": digest(tool), "host_llvm": llvm,
                 "converter_sources": {path.name: digest(path) for path in sorted(native.iterdir()) if path.is_file()},
                 "layout_sha256": digest(native / "ps5-pie.ld"), "zlib_archive_sha256": digest(archives[0]),
@@ -224,7 +237,8 @@ def build(args):
                 "console_execution_verified": False,
                 "windows_process_support": False, "platform_authentication_verified": False}
     (output / "native-child-build.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
-    (output / "native-child-build.h").write_text('#define PW_NATIVE_CHILD_BUILD_ID "' + build_id + '"\n' +
+    (output / "native-child-build.h").write_text('#define PW_NATIVE_CHILD_FD_MODE ' + str(int(args.mode == "fd")) + '\n' +
+                                               '#define PW_NATIVE_CHILD_BUILD_ID "' + build_id + '"\n' +
                                                 '#define PW_NATIVE_CHILD_SELF_SHA256 "' + framing["sha256"] + '"\n' +
                                                 '#define PW_NATIVE_CHILD_SELF_BYTES ' + str(framing["stream_extent"]) + '\n')
     image = final.read_bytes()
@@ -241,6 +255,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("sdk", "foundation", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--mode", choices=("hello", "fd"), default="hello")
     try:
         build(parser.parse_args())
     except (ValueError, OSError) as error:

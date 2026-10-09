@@ -364,6 +364,8 @@ static int hello(int fd, uint64_t correlation, const PwNativeFdContext *c, PwNat
     return 0;
 }
 
+/* The original SELF worker links no parent listener/path-cleanup code. */
+#ifndef PW_NATIVE_FD_WORKER_ONLY
 void pw_native_fd_dispose(PwNativeFdListener *l, PwNativeFdResult *r)
 {
     int rc;
@@ -466,6 +468,8 @@ done:
     if (!r->status) { r->stage = PW_NATIVE_FD_COMPLETE; r->api = PW_NATIVE_FD_API_NONE; r->observations |= PW_NATIVE_FD_COMPLETED; }
     return r->status;
 }
+
+#endif
 
 int pw_native_fd_worker(const char *path, uint64_t correlation,
                        const PwNativeFdContext *c, PwNativeFdResult *r)
