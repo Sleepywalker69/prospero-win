@@ -9,6 +9,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -275,6 +276,40 @@ int main(void) {
                 (sources/'compiler-runtime/GPL-3').write_text('truncated licence')
                 with self.assertRaisesRegex(ValueError,'licence text changed'):package.verify_runtime_notices(sources,docs,licenses)
 
+    def test_world_writable_installed_licences_round_trip_as_portable_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);sources=root/'sources';sources.mkdir();docs=root/'docs';libraries=root/'libraries';libraries.mkdir();licenses=root/'licenses';licenses.mkdir()
+            for name in package.COMMON_LICENSES:
+                path=licenses/name;path.write_text('original full licence '+name);path.chmod(0o777)
+            for name in package.RUNTIME_PACKAGES:
+                path=docs/name/'copyright';path.parent.mkdir(parents=True);path.write_text('runtime notice '+name)
+            for name in package.RUNTIME_LIBRARIES:(libraries/name).write_bytes(name.encode())
+            def command(argv,**kwargs):
+                if argv[0]=='dpkg-query':return argv[-1]+'\t1\tsource-package\t1\n'
+                return str(libraries/argv[1].split('=',1)[1])+'\n'
+            with patch.object(package.subprocess,'check_output',command):
+                package.collect_runtime_notices(sources,docs,licenses)
+                package.verify_runtime_notices(sources,docs,licenses)
+                for name in package.COMMON_LICENSES:
+                    copied=sources/'compiler-runtime'/name
+                    self.assertEqual(copied.read_bytes(),(licenses/name).read_bytes())
+                    self.assertEqual(stat.S_IMODE(copied.stat().st_mode),0o644)
+                    self.assertEqual(stat.S_IMODE((licenses/name).stat().st_mode),0o777)
+                # Exercise the same two packaging destinations and the standard
+                # data filter that exposed the real artifact's0777 mismatch.
+                artifact=root/'artifact'
+                package.copy_owned_tree(sources,artifact/'sources/dxvk')
+                package.copy_owned_tree(sources/'compiler-runtime',artifact/'LICENSES/compiler-runtime')
+                before=files.inventory(artifact)
+                archive=root/'artifact.tar.gz'
+                with tarfile.open(archive,'w:gz') as tar:tar.add(artifact,arcname='.')
+                restored=root/'restored'
+                package.unpack_tar(archive,restored)
+                self.assertEqual(files.inventory(restored),before)
+                bad=sources/'compiler-runtime/GPL-3';bad.chmod(0o777)
+                with self.assertRaisesRegex(ValueError,'mode changed'):
+                    package.verify_runtime_notices(sources,docs,licenses)
+
     def test_recipe_uses_only_local_hash_bound_files_and_prefix_copy_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
             app=Path(tmp)
@@ -319,6 +354,21 @@ int main(void) {
                 self.assertEqual((root/'library/prefixes/diagnostic-d3d11/drive_c/graphics-smoke'/name).read_bytes(),(app/name).read_bytes())
             with self.assertRaises(pw_install.InstallError):installer.install()
 
+    def test_read_only_bounded_source_producer_and_unchanged_release_pin(self):
+        w=yaml.load((ROOT/'.github/workflows/graphics-overlay.yml').read_text(),Loader=yaml.BaseLoader)
+        self.assertEqual(w['permissions'],{'contents':'read','actions':'read'});self.assertNotIn('pull_request_target',w['on'])
+        job=w['jobs']['graphics-overlay'];self.assertEqual(job['runs-on'],'ubuntu-24.04');self.assertEqual(job['timeout-minutes'],'60')
+        self.assertIn('head.repo.full_name == github.repository',job['if'])
+        runs='\n'.join(s.get('run','') for s in job['steps'])
+        for needed in ('--wrap-mode=nodownload','-j2 install','tools/d3d11_clear_smoke.c','11588549010','11592264803'):
+            self.assertIn(needed,runs)
+        for forbidden in ('wineboot','wineexec','build_wine_ps5.sh','--force','continue-on-error'):
+            self.assertNotIn(forbidden,runs)
+        for step in job['steps']:
+            self.assertNotIn('continue-on-error',step)
+            if 'uses' in step:self.assertRegex(step['uses'],r'^actions/[a-z-]+@[0-9a-f]{40}$')
+        sys.path.insert(0,str(ROOT/'tools'));import pw_install
+        self.assertEqual(pw_install.DXVK_RELEASES['2.6.2'][1],'17761876556afd55736cb895d184f5a1c55d43350f1b1e3b129f8d28706d7992')
 
 
 if __name__ == '__main__':

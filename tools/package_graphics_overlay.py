@@ -190,8 +190,12 @@ def collect_runtime_notices(sources, doc_root=Path('/usr/share/doc'), license_ro
     for name in COMMON_LICENSES:
         source = license_root / name
         require(source.is_file(), 'missing full runtime licence text: ' + name)
-        shutil.copy2(source, folder / name)
-        records['common_licenses'][name] = sha(folder / name)
+        target = folder / name
+        shutil.copy2(source, target)
+        # Installed distribution metadata is not the portable artifact mode.
+        # These are newly copied ordinary text files, never executables.
+        target.chmod(0o644)
+        records['common_licenses'][name] = sha(target)
     for name in RUNTIME_LIBRARIES:
         path = Path(subprocess.check_output(['x86_64-w64-mingw32-g++-posix', '-print-file-name=' + name], text=True).strip())
         require(path.is_absolute() and path.is_file(), 'selected compiler runtime library is missing: ' + name)
@@ -209,7 +213,10 @@ def verify_runtime_notices(sources, doc_root=Path('/usr/share/doc'), license_roo
                 sha(folder / entry['notice']) == entry['sha256'] == sha(doc_root / name / 'copyright'),
                 'compiler/runtime notice changed')
     for name, digest in value['common_licenses'].items():
-        require(sha(folder / name) == digest == sha(license_root / name), 'full runtime licence text changed')
+        target = folder / name
+        require(not target.is_symlink() and stat.S_IMODE(target.stat().st_mode) == 0o644,
+                'full runtime licence text mode changed')
+        require(sha(target) == digest == sha(license_root / name), 'full runtime licence text changed')
     for name, entry in value['libraries'].items():
         current = Path(subprocess.check_output(['x86_64-w64-mingw32-g++-posix', '-print-file-name=' + name], text=True).strip())
         require(str(current.resolve()) == entry['file'] and sha(current) == entry['sha256'],
