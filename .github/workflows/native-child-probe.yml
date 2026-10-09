@@ -6,7 +6,7 @@ on:
       mode:
         description: Original native diagnostic mode
         type: choice
-        options: [hello, fd]
+        options: [hello, fd, peer-exit]
         default: hello
   pull_request:
     types: [opened, synchronize, reopened, labeled]
@@ -27,11 +27,12 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event.pull_request.head.repo.full_name == github.repository &&
            (contains(github.event.pull_request.labels.*.name, 'build-native-child-probe') ||
-            contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe'))) }}
+            contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe') ||
+            contains(github.event.pull_request.labels.*.name, 'build-native-peer-exit-probe'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      PW_NATIVE_CHILD_MODE: ${{ (inputs.mode == 'fd' || contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe')) && 'fd' || 'hello' }}
+      PW_NATIVE_CHILD_MODE: ${{ (inputs.mode == 'peer-exit' || contains(github.event.pull_request.labels.*.name, 'build-native-peer-exit-probe')) && 'peer-exit' || (inputs.mode == 'fd' || contains(github.event.pull_request.labels.*.name, 'build-native-fd-probe')) && 'fd' || 'hello' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -44,6 +45,7 @@ jobs:
           case "$PW_NATIVE_CHILD_MODE" in
             hello) suffix=-native-child ;;
             fd) suffix=-native-fd ;;
+            peer-exit) suffix=-native-peer-exit ;;
             *) exit 2 ;;
           esac
           printf 'PW_OUTPUT_SUFFIX=%s\n' "$suffix" >> "$GITHUB_ENV"
@@ -65,6 +67,11 @@ jobs:
             build/host/test_pw_native_fd_report
             build/host/test_pw_native_child_capabilities
             build/host/test_pw_native_fd_worker
+            make build/host/test_pw_native_peer_protocol build/host/test_pw_native_peer_controller build/host/test_pw_native_peer_worker build/host/test_pw_native_peer_probe
+            build/host/test_pw_native_peer_protocol
+            build/host/test_pw_native_peer_controller
+            build/host/test_pw_native_peer_worker
+            build/host/test_pw_native_peer_probe
             python3 tests/test_build_native_child_probe.py
           } 2>&1 | tee "$RUNNER_TEMP/native-child-evidence/host-controls.log"
       - name: Prepare exact public worker converter dependencies
@@ -116,6 +123,7 @@ jobs:
             printf 'Original native two-process probe; compile/link/conversion evidence only.\n'
             printf 'Mode: %s\n' "$PW_NATIVE_CHILD_MODE"
             printf 'FD mode exchanges synthetic descriptors only; peer identity and Wine endpoint transfer are unverified.\n'
+            printf 'Peer/exit mode compiles a separate credential, post-arm challenge and kernel-event diagnostic; console capability is unverified.\n'
             printf 'Console execution, platform authentication, native reaping and Windows children are unverified.\n'
             printf 'This native-only package is not a complete Wine/runtime/installer kit.\n'
             printf 'Repository: %s\nCommit: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$(git rev-parse HEAD)"

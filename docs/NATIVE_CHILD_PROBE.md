@@ -21,7 +21,9 @@ Its title says **NATIVE FD CAPABILITY PROBE**. The mode and every linked source
 are part of the worker build ID and manifest; a HELLO worker cannot satisfy an
 FD-mode run. The hosted workflow accepts a manual `hello`/`fd` choice, or the
 same-repository opt-in label `build-native-child-probe`/`build-native-fd-probe`.
-The two modes produce separately named artifacts. The successful earlier
+The separate `peer-exit` choice and `build-native-peer-exit-probe` label select
+the credential/event diagnostic described below.
+Each mode produces a separately named artifact. The successful earlier
 HELLO-only checkpoint remains a distinct first test.
 
 The normal native title remains the default. A probe build requires an
@@ -170,6 +172,73 @@ explicit even on success: these PIDs and correlations do not authenticate a
 peer. The title and worker use different startup/security contexts, so this
 finite capability test is necessary before designing an authenticated channel.
 No Windows-child or cross-process-section support is enabled by this mode.
+
+## Optional kernel peer and exit observation mode
+
+Use `PW_NATIVE_CHILD_MODE=peer-exit` with `PW_OUTPUT_SUFFIX=-native-peer-exit`.
+Its tile says **NATIVE PEER AND EXIT PROBE**. This mode has its own worker
+identity and artifact; retain the earlier HELLO and FD packages as separate
+checkpoints. It performs a credential-only exchange, without transferring
+SCM_RIGHTS or a Wine endpoint. The existing 0550 refusal remains unchanged.
+
+After the three HELLO/control echoes, the parent and worker exchange fixed
+128-byte records with the SDK's `SCM_CREDS` / `cmsgcred`. Each receiver requires
+the kernel-supplied PID to match the current reported session PID. The sender
+submits zeroed credential storage. No equal-UID assumption, permission change,
+Linux credential substitution or alternate observer is used. Ordinary access
+to the fresh directory and credential delivery remain console capability gates.
+
+The parent registers that child PID once with `EVFILT_PROC`, `NOTE_EXIT` and
+`EV_RECEIPT`. A matching `EV_ERROR` receipt with data zero confirms registration;
+it is not an exit event. Its `fflags` retains the requested `NOTE_EXIT` value.
+An immediate empty-queue check must pass before one read-only, exact 32-byte
+`CTL_KERN/KERN_ARND` request. There is no fallback, retry or logged nonce. A
+successful call/count does not by itself measure entropy quality.
+
+That fresh post-registration challenge is sent only through the existing TCP
+control stream. The worker echoes it through AF_UNIX with a new `SCM_CREDS`.
+The parent checks the same kernel-reported PID, current session/build and exact
+challenge. This can observe sender PID and possession of the current control
+channel. It cannot establish exclusive ownership, signed image identity or
+platform authentication; possession can be delegated.
+
+The worker closes its rendezvous descriptor and sends its independent result
+before STOP. The parent settles its listener/socket/path/directory ownership,
+then checks for an early event again. Any early event fails this sequence and
+is retained. The existing protocol still requires exact STOP_ACK and TCP EOF.
+Only then may a matching event from the same registration satisfy the final
+check: `NOTE_EXIT`, `EV_EOF`, no `EV_ERROR`, matching PID/filter/local tag and
+`W_EXITCODE(37, 0)`. The original worker uses success exit 37 only in this mode;
+its failure exits remain 2, 3 or 4. Raw 37 is not accepted as the event status.
+
+The callback reserves 750 ms of its existing effective stage/total budget for
+the result. Restoring that original stage bound does not renew either deadline.
+Event waits use at most 25 ms per call and only the remainder of the existing
+STOP stage and fifteen-second session. Stop, clock reversal, deadline expiry,
+missing/partial credentials, malformed ancillary data, entropy or registration
+failure, absent ACK, unexpected status and cleanup failure all prevent success.
+Delivered unexpected descriptors are closed and never used. Parent API failures
+retain the immediate native errno when available; the freestanding worker never
+reads errno. No failure triggers a new observer, worker, signal or permission
+change. A valid event after an earlier failure stays a separate observation.
+
+Collect all `PW_NATIVE_PEER` records plus the matching `PW_NATIVE_CHILD` record.
+They separate initial/post-arm kernel PIDs, registration receipt, entropy
+return/count, nonce equality (never its bytes), independent worker report,
+pre-STOP queue state, actual event flags/data, cleanup and launcher progress.
+An ESRCH/EPERM result, TCP EOF or an expired deadline does not establish death.
+Even a valid exit event does not establish native reaping or complete resource
+reclamation. The existing loader-owned temporary file remains outside cleanup.
+
+The reviewed public source establishes the interface and ordering, not the
+PS5 title's permission to observe a loader-owned worker. Pure mocked SDK-ABI
+controls and cross-compilation are distinct from a later operator run. This
+mode neither authenticates the older FD transfer nor admits Windows children.
+
+Public references: [SDK credential ABI](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/include/freebsd/sys/socket.h),
+[SDK event ABI](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/include/freebsd/sys/event.h),
+[SDK RNG interface](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/include/freebsd/sys/sysctl.h),
+[reference receipt/process filter](https://github.com/freebsd/freebsd-src/blob/d106002967eff712894ab8b5337bbbff106ce5e0/sys/kern/kern_event.c).
 
 ## Remaining Windows-child gates
 

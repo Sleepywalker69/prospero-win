@@ -243,15 +243,16 @@ with tempfile.TemporaryDirectory(prefix="pw-ci-module-evidence-") as directory:
     assert (evidence / 'later.elf.log').is_file()
 native_probe = yaml.load((ROOT / '.github/workflows/native-child-probe.yml').read_text(), Loader=yaml.BaseLoader)
 probe_job = native_probe['jobs']['native-child-probe']
-assert native_probe['on']['workflow_dispatch']['inputs']['mode']['options'] == ['hello', 'fd']
+assert native_probe['on']['workflow_dispatch']['inputs']['mode']['options'] == ['hello', 'fd', 'peer-exit']
 assert native_probe['on']['workflow_dispatch']['inputs']['mode']['default'] == 'hello'
 assert 'build-native-fd-probe' in probe_job['if']
+assert 'build-native-peer-exit-probe' in probe_job['if']
 assert 'github.event.pull_request.head.repo.full_name == github.repository' in probe_job['if']
 selection = next(step['run'] for step in probe_job['steps'] if step.get('name') ==
                  'Select isolated original diagnostic mode')
 with tempfile.TemporaryDirectory() as tmp:
     result_file = Path(tmp) / 'environment'
-    for mode, expected in (('hello', '-native-child'), ('fd', '-native-fd'), ('unexpected', None)):
+    for mode, expected in (('hello', '-native-child'), ('fd', '-native-fd'), ('peer-exit', '-native-peer-exit'), ('unexpected', None)):
         result_file.write_text('')
         result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', selection], capture_output=True, text=True,
                                 env={**os.environ, 'PW_NATIVE_CHILD_MODE': mode, 'GITHUB_ENV': str(result_file)})
@@ -259,6 +260,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert result_file.read_text() == (f'PW_OUTPUT_SUFFIX={expected}\n' if expected else '')
 probe_runs = '\n'.join(step.get('run', '') for step in probe_job['steps'])
 assert 'build/host/test_pw_native_fd_controller' in probe_runs and 'build/host/test_pw_native_fd_report' in probe_runs
+assert 'build/host/test_pw_native_peer_controller' in probe_runs and 'build/host/test_pw_native_peer_protocol' in probe_runs
 for step in probe_job['steps']:
     if step.get('uses', '').startswith('actions/upload-artifact@'):
         assert '${{ env.PW_NATIVE_CHILD_MODE }}' in step['with']['name']
