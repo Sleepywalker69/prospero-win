@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Original inert bytes/filesystem controls; no Wine, socket or target execution."""
+from contextlib import ExitStack
 import copy
 import gzip
 import hashlib
@@ -10,6 +11,7 @@ import os
 from pathlib import Path
 import stat
 import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -495,6 +497,405 @@ class ArchiveControls(unittest.TestCase):
         self.json('provenance/title.json', value); self.finish()
         with self.assertRaisesRegex(ValueError, 'title provenance differs'):
             package.verify_directory(self.root)
+
+
+class SourceRetentionFlow(unittest.TestCase):
+    """Real Git/files/tar/manifest flow; only SDK and TLS authorities are modeled."""
+    def setUp(self):
+        import subprocess
+        self.subprocess = subprocess
+        temp = tempfile.TemporaryDirectory(prefix='retained source flow ')
+        self.addCleanup(temp.cleanup); self.base = Path(temp.name)
+        self.paths = {name: self.base / name for name in ('repo', 'wine_source', 'title_foundation',
+            'foundation', 'tls_work', 'wine_work', 'title_build')}
+        for path in self.paths.values(): path.mkdir()
+        def write(path, data):
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+        self.write = write
+        def archive(name, prefix=''):
+            path = self.base / name
+            mode = 'w:xz' if name.endswith('.xz') else 'w:gz'
+            with tarfile.open(path, mode) as stream:
+                value = ('Original inert notice for ' + name).encode()
+                item = tarfile.TarInfo(prefix + 'LICENSE'); item.size = len(value); item.mode = 0o644
+                stream.addfile(item, io.BytesIO(value))
+            return path
+        self.archive = archive
+        ft = archive('freetype.tar.xz', 'freetype/'); zlib = archive('zlib.tar.gz', 'zlib/')
+        sdk = archive('sdk.tar.gz')
+        tls = {'inputs': {'sources': {}}}
+        for role, extension in (('gnutls', 'xz'), ('nettle', 'gz')):
+            path = archive(role + '-1.tar.' + extension, role + '/')
+            (self.paths['tls_work'] / path.name).write_bytes(path.read_bytes())
+            tls['inputs']['sources'][role] = {'version': '1', 'url': 'https://example.invalid/' + role,
+                                            'sha256': package.digest_file(path)}
+        ca = self.paths['tls_work'] / 'root/ca-certificates.crt'; write(ca, b'original inert CA bytes')
+        tls['inputs']['sources']['ca_bundle'] = {'date': '2026-10-09', 'url': 'https://example.invalid/ca',
+                                                'sha256': package.digest_file(ca)}
+        self.tls = tls
+        def commit(name):
+            path = self.paths[name]; write(path / 'LICENSE', ('Original test licence for ' + name).encode())
+            subprocess.run(['git', '-C', str(path), 'init', '-q'], check=True)
+            subprocess.run(['git', '-C', str(path), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(path), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                            'commit', '-qm', 'original inert source'], check=True)
+            return package.prefix.git(path, 'rev-parse', 'HEAD')
+        self.wine = commit('wine_source'); self.title = commit('title_foundation')
+        self.assertNotEqual(self.wine, self.title)
+        write(self.paths['foundation'] / 'tools/setup-native-dependencies.sh',
+              ('zlib_version=1\nzlib_url=https://example.invalid/zlib\nzlib_hash=' + package.digest_file(zlib) + '\n').encode())
+        self.foundation = commit('foundation')
+        repo = self.paths['repo']
+        write(repo / 'tools/build_wine_ps5.sh', ('MODULE_EXPORTS_COMMIT=' + self.foundation +
+            '\nFREETYPE_VERSION=1\nFREETYPE_URL=https://example.invalid/freetype\nFREETYPE_SHA256=' + package.digest_file(ft) + '\n').encode())
+        write(repo / 'tools/build_native.sh', ('pin=' + self.title + '\nlapy_release=v-test\nlapy_elf_sha256=' + 'b'*64 + '\n').encode())
+        for name in ('MPL-2.0.txt', 'Lapy-MIT.txt'): write(repo / 'LICENSES' / name, b'Original inert notice')
+        commit('repo')
+        wine_archive = self.base / 'wine.tar.gz'
+        wine_archive.write_bytes(gzip.compress(subprocess.check_output(['git', '-C', str(self.paths['wine_source']), 'archive', self.wine]), mtime=0))
+        self.paths.update(wine_archive=wine_archive, sdk_source_archive=sdk, freetype_archive=ft, zlib_archive=zlib)
+        write(self.paths['wine_work'] / 'report.json', package.json_bytes({'wine_commit': self.wine,
+              'sources': {'prx_foundation': self.foundation}, 'tls': {'build': tls}}))
+        write(self.paths['title_build'] / 'lapy-helper-release.json', package.json_bytes({'tag_name': 'v-test',
+              'repository': 'mpereiraesaa/PS5-Lapy-JB-Daemon',
+              'release_url': 'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/v-test'}))
+        write(self.paths['title_build'] / 'lapy-helper-manifest.json', package.json_bytes({'elf_sha256': 'b'*64}))
+        self.config = {'schema': 'pw-windows-child-source-inputs/1', 'paths': {k: str(v) for k,v in self.paths.items()}}
+        self.sdk_record = {'commit': 'a'*40, 'sha256': package.digest_file(sdk)}
+        self.sdk_patch = patch('check_native_suite.source_archive', return_value=self.sdk_record)
+        self.sdk_patch.start(); self.addCleanup(self.sdk_patch.stop)
+        tls_patch = patch.object(package.prefix, 'load_tool', return_value=SimpleNamespace(verify=lambda root: self.tls))
+        tls_patch.start(); self.addCleanup(tls_patch.stop)
+        wine_patch = patch.object(package.prefix, 'WINE', self.wine); wine_patch.start(); self.addCleanup(wine_patch.stop)
+
+    def test_complete_source_retention_and_replay(self):
+        out, report = self.base / 'retained-sources', self.base / 'retained-sources.json'
+        result = package.retain_sources(self.config, out, report)
+        self.assertEqual(result, package.read_json(report))
+        self.assertEqual(len(result['roles']), 11)
+        self.assertEqual(result['inventory'], package.prefix.inventory(out))
+        service = {'title_foundation': self.title, 'converter_foundation': self.title, 'prx_foundation': self.foundation}
+        self.assertEqual(package.retained_sources(self.paths['repo'], out, report, package.prefix.project(self.paths['repo']),
+            self.paths['wine_archive'], service, self.paths['title_foundation'] / '.deps/native/ps5-payload-sdk',
+            self.paths['foundation'], self.paths['wine_work']), result)
+        title_archive = out / result['roles']['title-foundation']['path']
+        title_bytes = title_archive.read_bytes()
+        title_archive.write_bytes((out / result['roles']['prx-foundation']['path']).read_bytes())
+        altered = copy.deepcopy(result); altered['inventory'] = package.prefix.inventory(out)
+        report.write_bytes(package.json_bytes(altered))
+        with self.assertRaisesRegex(ValueError, 'foundation archive differs'):
+            package.retained_sources(self.paths['repo'], out, report, package.prefix.project(self.paths['repo']),
+                self.paths['wine_archive'], service, self.paths['title_foundation'] / '.deps/native/ps5-payload-sdk',
+                self.paths['foundation'], self.paths['wine_work'])
+        title_archive.write_bytes(title_bytes); report.write_bytes(package.json_bytes(result))
+        with self.assertRaises(ValueError): package.retain_sources(self.config, out, self.base / 'another.json')
+        changed = out / result['roles']['nettle']['path']; changed.write_bytes(b'changed source')
+        with self.assertRaises(ValueError): package.retained_sources(self.paths['repo'], out, report,
+            package.prefix.project(self.paths['repo']), self.paths['wine_archive'], service,
+            self.paths['title_foundation'] / '.deps/native/ps5-payload-sdk', self.paths['foundation'], self.paths['wine_work'])
+
+    def test_source_outputs_refuse_aliases_existing_and_symlink_paths(self):
+        alias = self.base / 'alias'; alias.mkdir()
+        cases = [('equal', self.base / 'same', self.base / 'same'),
+                 ('spelling-alias', self.base / 'same', alias / '../same'),
+                 ('nested-report', self.base / 'outer', self.base / 'outer/report.json'),
+                 ('nested-output', self.base / 'outer/inner', self.base / 'outer')]
+        for name, out, report in cases:
+            with self.subTest(name=name), self.assertRaises((ValueError, FileNotFoundError)):
+                package.retain_sources(self.config, out, report)
+            self.assertFalse(out.exists()); self.assertFalse(report.exists())
+        for name in ('existing', 'symlink'):
+            report = self.base / name
+            if name == 'existing': report.write_bytes(b'keep')
+            else: report.symlink_to(self.base / 'missing')
+            out = self.base / ('out-' + name)
+            with self.subTest(name=name), self.assertRaises(ValueError): package.retain_sources(self.config, out, report)
+            self.assertFalse(out.exists())
+        parent_alias = self.base / 'parent-link'; parent_alias.symlink_to(self.base, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            package.retain_sources(self.config, parent_alias / 'out', self.base / 'fresh-report.json')
+        output_alias = self.base / 'output-link'; output_alias.symlink_to(self.base / 'missing-output')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            package.retain_sources(self.config, output_alias, self.base / 'fresh-report.json')
+        internal = self.paths['tls_work'] / 'inner'; internal.mkdir()
+        with self.assertRaisesRegex(ValueError, 'overlaps input'):
+            package.retain_sources(self.config, internal / '../../tls_work/new-output', self.base / 'fresh-report.json')
+        self.assertFalse((self.paths['tls_work'] / 'new-output').exists())
+        missing = self.paths['wine_archive']; missing.unlink()
+        with self.assertRaises(FileNotFoundError): package.retain_sources(self.config, self.base / 'out', self.base / 'report')
+
+
+
+class FullAssembleControls(unittest.TestCase):
+    """Real assembly/retention consistency/manifest/tar paths with inert inputs.
+
+    Only external compiled-artifact validators and Git/SDK provenance are
+    mocked. No Wine, PE, native program, target compiler or network is run.
+    """
+    def setup_inputs(self, battle):
+        helper = ArchiveControls()
+        helper.setUp(); self.addCleanup(helper.doCleanups)
+        self.temp, self.seed, self.project = helper.temp, helper.root, helper.project
+        (helper.prepared_battle if battle else helper.prepared)()
+        inputs = self.temp / 'inputs'; inputs.mkdir()
+        names = {'repo', 'host_work', 'wine_work', 'prefix', 'fixture', 'service_work',
+                 'title', 'title_build', 'sources_root', 'foundation', 'llvm_bindir'}
+        if battle: names |= {'battlenet_prefix', 'cpu_output'}
+        self.p = {n: inputs / n for n in names}
+        for p in self.p.values(): p.mkdir()
+        self.title_foundation = inputs / 'title-foundation'
+        self.p['sdk'] = self.title_foundation / '.deps/native/ps5-payload-sdk'
+        self.p['sdk'].mkdir(parents=True)
+        for n in ('cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive', 'sdk_source_archive'):
+            self.p[n] = inputs / (n + '.json')
+        if battle: self.p['battlenet_prefix_report'] = inputs / 'battlenet-prefix.json'
+        self.out = self.temp / 'fresh-output'
+        self.config = {'schema': 'pw-windows-child-package-inputs/1', 'run_url': helper.run_url,
+                       'battlenet_enabled': battle, 'paths': {k: str(v) for k,v in self.p.items()}}
+        self.abi = package.read_json(self.seed / package.ABI_REPORT)
+        self.prepared = package.read_json(self.seed / 'provenance/prefix.json')
+        self.checked = package.read_json(self.seed / 'provenance/wine-prx-checks.json')
+        self.build = package.read_json(self.seed / 'provenance/wine-build.json')
+        self.pair = package.read_json(self.seed / 'provenance/fixture-source.json')
+        self.compiler = {'name': 'explicitly mocked target compiler validation'}
+        self.service = package.read_json(self.seed / 'PPSA99995/native-wine-child-build.json')
+        self.service.update(host_llvm=self.compiler, title_foundation='3'*40, converter_foundation='3'*40, prx_foundation='4'*40)
+        self.service['runtime']['abi_check'] = self.abi
+        self.put(self.p['repo'] / 'tests/fixtures/windows_child_process.c', b'original inert source')
+        self.pair['source_sha256'] = package.digest_file(self.p['repo'] / 'tests/fixtures/windows_child_process.c')
+        (self.p['repo'] / 'wine/patches').mkdir(parents=True)
+        self.put(self.p['repo'] / 'src/pw_game_profile.c', b'original generator input marker')
+        for n in ('LICENSE', 'THIRD_PARTY.md', 'LICENSES/original.txt'):
+            self.put(self.p['repo'] / n, b'original inert licence notice')
+        for n in ('parent.exe', 'child.exe'):
+            self.put(self.p['fixture'] / n, (self.seed / package.FIXTURE / n).read_bytes())
+        self.host = self.p['host_work'] / 'install/usr'; self.host.mkdir(parents=True)
+        for name in self.build['pe']:
+            data = (self.seed / package.LIB / name).read_bytes()
+            self.put(self.p['wine_work'] / 'pe' / name, data)
+            self.put(self.host / 'lib/wine' / name, b'original host input overwritten by exact cohort')
+        self.put(self.host / 'share/wine/nls/original.nls', b'original inert NLS')
+        self.put(self.host / 'lib/wine/x86_64-windows/extra.dll', b'original retained host PE')
+        for name in MODULES:
+            self.put(self.p['wine_work'] / 'prx/sce_module' / (name+'.prx'),
+                     (self.seed / package.LIB / 'x86_64-unix' / (name+'.prx')).read_bytes())
+        for name in ('LICENSE','COPYING.LIB','AUTHORS','NOTICES.md','libs/original/LICENSE'):
+            self.put(self.p['wine_work'] / 'source' / name, b'original inert source notice')
+        self.put(self.p['wine_work'] / 'source/fonts/original.ttf', b'original inert font')
+        self.put(self.p['wine_work'] / 'prx/fonts/original.ttf', b'original inert font')
+        self.put(self.p['wine_work'] / 'prx/ca-certificates.crt', b'original inert trust input')
+        for name in ('LICENSE.TXT','docs/FTL.TXT'):
+            self.put(self.p['wine_work'] / 'freetype/src' / name, b'original inert font licence')
+        for name in ('gnutls','nettle'):
+            self.put(self.p['wine_work'] / 'prx/licenses' / name / 'LICENSE', b'original inert TLS notice')
+        self.prepared.update(wine_commit=package.prefix.WINE,host_stamp='inert-stamp',
+                             console_execution_verified=False,fixture=self.pair)
+        self.materialize_inventory(self.p['prefix'], self.prepared['inventory'], self.seed / 'console')
+        self.save(self.p['prefix_report'], self.prepared)
+        self.save(self.p['cohort'], {'ps5_source': {'inert.c': 'external source-cohort validator mock'}})
+        self.put(self.p['title'] / 'eboot.bin', b'original inert title', 0o755)
+        self.put(self.p['title'] / 'sce_module/libc.prx', b'original inert libc', 0o755)
+        self.service['libc_companion'] = package.record(self.p['title'] / 'sce_module/libc.prx')
+        for n in ('title','service_work'):
+            self.put(self.p[n] / 'native-wine-child.self', (self.seed / 'PPSA99995/native-wine-child.self').read_bytes(), 0o755)
+            self.save(self.p[n] / 'native-wine-child-build.json', self.service)
+        self.title = {'schema':'pw-windows-child-title/1','project':self.project,
+            'fixture_child_sha256':self.pair['files']['child.exe']['sha256'],
+            'service_manifest_sha256':package.digest_file(self.p['service_work'] / 'native-wine-child-build.json'),
+            'runtime':self.service['runtime'],'compiler':self.compiler,'console_execution_verified':False,
+            'files':package.title_files(package.prefix.inventory(self.p['title']))}
+        self.save(self.p['title_report'],self.title)
+        if battle:
+            self.battle = package.read_json(self.seed / package.BATTLE_REPORT)
+            self.battle['host_stamp']='inert-stamp'
+            self.runtime = package.read_json(self.seed / package.BATTLE_CAPABILITY)['runtime_check']
+            self.materialize_inventory(self.p['battlenet_prefix'],self.battle['inventory'],self.seed/'console')
+            self.save(self.p['battlenet_prefix_report'],self.battle)
+            self.save(self.p['cpu_output'] / 'cpu-build.json', self.prepared['cpu'])
+        self.prepare_retained_sources()
+        self.refresh_host_identity()
+
+    @staticmethod
+    def put(path, value, mode=0o644):
+        path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value);path.chmod(mode)
+
+    def save(self,path,value): self.put(path,package.json_bytes(value))
+
+    def materialize_inventory(self,root,inventory,source):
+        for name, entry in inventory.items():
+            path=root if name=='.' else root/name
+            if entry['type']=='directory':path.mkdir(parents=True,exist_ok=True);path.chmod(entry['mode'])
+            else:self.put(path,(source/name).read_bytes(),entry['mode'])
+
+    def prepare_retained_sources(self):
+        # Real tiny tar bytes; external Git and SDK identity analyzers are the
+        # explicit mock boundary, while retained_sources checks all real bytes.
+        raw=io.BytesIO()
+        with tarfile.open(fileobj=raw,mode='w') as archive:
+            item=tarfile.TarInfo('LICENSE');value=b'Original synthetic source notice\n';item.size=len(value)
+            archive.addfile(item,io.BytesIO(value))
+        self.archive_bytes=raw.getvalue();data=gzip.compress(self.archive_bytes,mtime=0)
+        revisions={'project':self.project['commit'],'wine':package.prefix.WINE,
+                   'title-foundation':self.service['title_foundation'],'prx-foundation':self.service['prx_foundation']}
+        roles={}
+        for name in ('project','wine','title-foundation','prx-foundation','sdk','freetype','gnutls','nettle','zlib','ca-bundle','lapy'):
+            path=name+'.tar.gz';self.put(self.p['sources_root']/path,data)
+            notice='notices/'+name+'/LICENSE';self.put(self.p['sources_root']/notice,b'Original synthetic notice')
+            roles[name]={'path':path,'revision':revisions.get(name,'original-test-revision'),
+                         'url':'https://example.invalid/original-inert-test','notices':[notice]}
+        self.put(self.p['wine_archive'],data);self.put(self.p['sdk_source_archive'],data)
+        self.sdk_identity={'commit':'5'*40,'tree':'6'*40,'sha256':package.digest_file(self.p['sdk_source_archive'])}
+        self.sources={'schema':'pw-windows-child-retained-sources/1','project':self.project,'roles':roles,
+                      'inventory':package.prefix.inventory(self.p['sources_root']),'sdk_source':self.sdk_identity}
+        self.save(self.p['sources_manifest'],self.sources)
+        self.put(self.p['repo']/'tools/build_wine_ps5.sh',
+            ('MODULE_EXPORTS_COMMIT='+'4'*40+'\nFREETYPE_SHA256='+package.digest_file(self.p['sources_root']/'freetype.tar.gz')+'\n').encode())
+        self.put(self.p['foundation']/'tools/setup-native-dependencies.sh',
+            ('zlib_hash='+package.digest_file(self.p['sources_root']/'zlib.tar.gz')+'\n').encode())
+        self.build['tls']={'build':{'inputs':{'host_llvm':self.compiler,'sources':{k:{'sha256':package.digest_file(self.p['sources_root']/ (v+'.tar.gz'))} for k,v in [('gnutls','gnutls'),('nettle','nettle'),('ca_bundle','ca-bundle')]}}}}
+        self.save(self.p['wine_work']/'report.json',self.build)
+
+    def refresh_host_identity(self):
+        self.host_identity={'stamp':'inert-stamp','files':package.prefix.inventory(self.host,True),'host_files':{}}
+        for f in self.host.rglob('*'):
+            if f.is_file():self.host_identity['host_files']['pc/host-wine/usr/'+f.relative_to(self.host).as_posix()]=package.record(f)
+
+    def external_validators(self):
+        stack=ExitStack();self.addCleanup(stack.close)
+        abi_mock=SimpleNamespace(check_build=lambda *a,**kw:copy.deepcopy(self.abi))
+        prx_mock=SimpleNamespace(MODULES=MODULES,PE=PE,validate=lambda *a,**kw:copy.deepcopy(self.checked))
+        def load_tool(root,name):
+            self.assertEqual(root,self.p['repo'])
+            return {'check_private_dispatch_abi':abi_mock,'check_wine_prx_build':prx_mock}[name]
+        def git(root,*args):
+            if args[:2]==('rev-parse','HEAD'):
+                return self.service['title_foundation'] if root==self.title_foundation else self.service['prx_foundation']
+            self.assertEqual(args,('show','-s','--format=%P',self.project['commit']));return '0'*40
+        def run(command,**kwargs):
+            if command[:1]==['git']:
+                self.assertEqual(command[1],'-C');self.assertEqual(command[3],'archive')
+                return subprocess.CompletedProcess(command,0,stdout=self.archive_bytes)
+            self.assertEqual(command,[sys.executable,str(self.p['repo']/'tools/tls_manifest.py'),'verify-runtime','--root',str(self.p['wine_work'])])
+            return subprocess.CompletedProcess(command,0)
+        # No assembly, archive writer/verifier, manifest or filesystem helper is mocked.
+        stack.enter_context(patch.object(package.prefix,'project',return_value=self.project))
+        stack.enter_context(patch.object(package.prefix,'host_identity',side_effect=lambda *a:(copy.deepcopy(self.host_identity),self.host)))
+        stack.enter_context(patch.object(package.prefix,'verify_source_snapshot'))
+        stack.enter_context(patch.object(package.prefix,'validate_pair',return_value=self.pair))
+        stack.enter_context(patch.object(package.prefix,'load_tool',side_effect=load_tool))
+        stack.enter_context(patch.object(package.prefix,'git',side_effect=git))
+        stack.enter_context(patch.object(package,'validate_service',return_value=self.service))
+        stack.enter_context(patch.object(package,'validate_title',return_value=self.title))
+        stack.enter_context(patch.object(package.subprocess,'run',side_effect=run))
+        stack.enter_context(patch('check_native_suite.source_archive',return_value=self.sdk_identity))
+        if self.config['battlenet_enabled']:
+            stack.enter_context(patch.object(package.prefix,'check_battlenet_runtime',return_value=self.runtime))
+        return stack
+
+    def test_complete_assembly_real_directory_and_archive_both_modes(self):
+        for battle in (False,True):
+            with self.subTest(battle=battle):
+                self.setup_inputs(battle)
+                before=package.prefix.inventory(self.temp/'inputs')
+                with self.external_validators():result=package.assemble(self.config,self.out)
+                directory=self.out/'windows-child-fixture';archive=self.out/'windows-child-fixture.tar.gz'
+                actual=package.verify_directory(directory)
+                self.assertEqual(package.verify_archive(archive),actual)
+                self.assertEqual(actual['inventory'],{n:v for n,v in package.inventory(directory).items() if n not in (package.MANIFEST,package.SUMS)})
+                self.assertEqual(result['archive'],package.record(archive));self.assertEqual(result['battlenet_enabled'],battle)
+                self.assertEqual(package.prefix.inventory(self.temp/'inputs'),before)
+                self.assertFalse((directory/package.BATTLE_INSTALLER).exists())
+                self.assertEqual((directory/package.BATTLE_CAPABILITY).exists(),battle)
+                self.assertEqual(package.prefix.inventory(directory/'sources'),self.sources['inventory'])
+
+    def test_existing_output_and_duplicate_runtime_destination_fail(self):
+        self.setup_inputs(False);self.out.mkdir();self.put(self.out/'keep',b'keep')
+        with self.external_validators(),self.assertRaisesRegex(ValueError,'output already exists'):
+            package.assemble(self.config,self.out)
+        self.assertEqual((self.out/'keep').read_bytes(),b'keep')
+        self.out=self.temp/'fresh-second-output'
+        self.put(self.host/'lib/wine/x86_64-windows/wowprospero.dll',b'duplicate original CPU');self.refresh_host_identity()
+        with self.external_validators(),self.assertRaisesRegex(ValueError,'duplicate package destination'):
+            package.assemble(self.config,self.out)
+        self.assertFalse((self.out/'windows-child-fixture.tar.gz').exists())
+
+    def test_changed_retained_sources_fail_inside_real_validator(self):
+        self.setup_inputs(False)
+        self.put(self.p['sources_root']/'project.tar.gz',b'changed original bytes')
+        with self.external_validators(),self.assertRaisesRegex(ValueError,'retained source inventory differs'):
+            package.assemble(self.config,self.out)
+        self.assertFalse((self.out/'windows-child-fixture.tar.gz').exists())
+
+    def test_battle_profile_and_capability_remain_real_checks(self):
+        self.setup_inputs(True)
+        profile=self.p['battlenet_prefix']/package.BATTLE_PROFILE.removeprefix('console/')
+        profile.write_text(profile.read_text().replace('cpu = translator','cpu = native'))
+        self.battle['inventory']=package.prefix.inventory(self.p['battlenet_prefix']);self.save(self.p['battlenet_prefix_report'],self.battle)
+        with self.external_validators(),self.assertRaisesRegex(ValueError,'Battle profile differs'):
+            package.assemble(self.config,self.out)
+        self.assertFalse((self.out/'windows-child-fixture.tar.gz').exists())
+
+    def reseal_inventory(self, directory):
+        manifest = package.read_json(directory / package.MANIFEST)
+        manifest['inventory'] = {n: v for n, v in package.inventory(directory).items()
+                                 if n not in (package.MANIFEST, package.SUMS)}
+        self.save(directory / package.MANIFEST, manifest)
+        self.put(directory / package.SUMS, package.checksums(package.inventory(directory)))
+
+    def test_assembled_battle_capability_is_required_and_cannot_claim_execution(self):
+        self.setup_inputs(True)
+        with self.external_validators(): package.assemble(self.config, self.out)
+        directory = self.out / 'windows-child-fixture'
+        target = directory / package.BATTLE_CAPABILITY
+        original = target.read_bytes()
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                if missing:
+                    target.unlink()
+                    error = 'Battle capability/prefix/profile/CPU report missing'
+                else:
+                    value = package.decode_json(original); value['runtime_validated'] = True
+                    self.save(target, value)
+                    error = 'Battle capability scope/profile/installer identity differs'
+                self.reseal_inventory(directory)
+                with self.assertRaisesRegex(ValueError, error): package.verify_directory(directory)
+                archive = self.temp / ('bad-capability-' + str(missing) + '.tar.gz')
+                package.write_archive(directory, archive)
+                with self.assertRaisesRegex(ValueError, error): package.verify_archive(archive)
+
+    def test_assembled_exact_manifest_and_duplicate_archive_path(self):
+        self.setup_inputs(False)
+        with self.external_validators(): package.assemble(self.config, self.out)
+        directory = self.out / 'windows-child-fixture'
+        manifest = package.read_json(directory / package.MANIFEST)
+        del manifest['inventory']['sources/project.tar.gz']
+        self.save(directory / package.MANIFEST, manifest)
+        self.put(directory / package.SUMS, package.checksums(package.inventory(directory)))
+        with self.assertRaisesRegex(ValueError, 'complete package inventory differs'):
+            package.verify_directory(directory)
+        incomplete = self.temp / 'incomplete-manifest.tar.gz'
+        package.write_archive(directory, incomplete)
+        with self.assertRaisesRegex(ValueError, 'complete package inventory differs'):
+            package.verify_archive(incomplete)
+        duplicate = self.temp / 'duplicate-member.tar.gz'
+        with tarfile.open(self.out / 'windows-child-fixture.tar.gz', 'r:gz') as original:
+            with tarfile.open(duplicate, 'w:gz', format=tarfile.PAX_FORMAT) as changed:
+                for member in original:
+                    changed.addfile(member, original.extractfile(member) if member.isfile() else None)
+                member = original.getmember('BUILD-INFO.txt')
+                changed.addfile(member, original.extractfile(member))
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            package.verify_archive(duplicate)
+
+    def test_assembled_manifest_false_claim_rejected_after_rehash(self):
+        self.setup_inputs(False)
+        with self.external_validators():package.assemble(self.config,self.out)
+        directory=self.out/'windows-child-fixture';manifest=package.read_json(directory/package.MANIFEST)
+        manifest['console_validated']=True;self.save(directory/package.MANIFEST,manifest)
+        self.put(directory/package.SUMS,package.checksums(package.inventory(directory)))
+        with self.assertRaisesRegex(ValueError,'schema/scope'):package.verify_directory(directory)
+        archive=self.temp/'false-claim.tar.gz';package.write_archive(directory,archive)
+        with self.assertRaisesRegex(ValueError,'schema/scope'):package.verify_archive(archive)
 
 
 if __name__ == '__main__':

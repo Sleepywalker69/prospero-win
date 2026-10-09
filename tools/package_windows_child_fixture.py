@@ -643,7 +643,15 @@ def retain_sources(config, output, report):
             'runtime source pins differ')
     tls = prefix.load_tool(p['repo'], 'tls_manifest').verify(p['tls_work'] / 'root')
     require(runtime['tls']['build'] == tls, 'runtime TLS source identity differs')
-    out = prefix.absent(output, tuple(p.values())); prefix.absent(report, (*p.values(), out))
+    planned = []
+    for path in (output, report):
+        path = Path(path).absolute()
+        require(not path.is_symlink(), 'source output is a symlink')
+        prefix.ordinary(path.parent, True)
+        planned.append(prefix.absent(path.resolve(strict=False), tuple(p.values())))
+    out, report = planned
+    require(not out.is_relative_to(report) and not report.is_relative_to(out),
+            'source output and report overlap')
     out.mkdir(mode=0o755)
     roles = {}
 
