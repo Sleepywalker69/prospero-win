@@ -3,6 +3,7 @@
  * reach wine/ps5/pw_ws2_32_libc.c and not glibc's resolver. */
 #include <arpa/inet.h>
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -108,6 +109,10 @@ static void test_resolver_backend(void)
     assert(getaddrinfo("example.com", "80", &hints, &info) == EAI_NONAME && !info);
     assert(!getaddrinfo("127.0.0.1", "80", NULL, &info)); freeaddrinfo(info);
     assert(!getaddrinfo("localhost", "80", NULL, &info)); freeaddrinfo(info);
+    assert(!getaddrinfo("PS5", "80", NULL, &info)); freeaddrinfo(info);
+    assert(!getaddrinfo("pS5", "80", NULL, &info)); freeaddrinfo(info);
+    host = gethostbyname("PS5");
+    assert(host && !memcmp(host->h_addr_list[0], "\x7f\0\0\x01", 4));
     assert(backend_calls == 4);
     /* A single-label name never reaches the backend: not found at once,
      * through getaddrinfo and gethostbyname alike (the PC's computer name
@@ -311,17 +316,38 @@ static void test_local_names(void)
     assert(!strcmp(info->ai_canonname, "LocalHost") && !info->ai_next->ai_canonname);
     freeaddrinfo(info);
 
-    assert(!gethostname(own, sizeof(own)) && own[0]);
+    assert(!gethostname(own, sizeof(own)) && !strcmp(own, "PS5"));
+    /* A too-small result must fail without writing past the supplied size. */
+    for (size_t n = 0; n < 4; ++n) {
+        char small[5] = "xxxx";
+        errno = 0;
+        assert(gethostname(small, n) == -1 && errno == ENAMETOOLONG);
+        assert(!memcmp(small, "xxxx", sizeof(small)));
+    }
+    char exact[5] = {'x', 'x', 'x', 'x', '!'};
+    assert(!gethostname(exact, 4) && !memcmp(exact, "PS5\0", 4) && exact[4] == '!');
     hints = hints_of(AF_INET, SOCK_STREAM, 0, 0);
     assert(!getaddrinfo(own, "1", &hints, &info));
     assert(count(info) == 1 && !strcmp(text(info), "127.0.0.1"));
+    freeaddrinfo(info);
+
+    assert(!getaddrinfo("pS5", NULL, &hints, &info));
+    assert(count(info) == 1 && !strcmp(text(info), "127.0.0.1"));
+    freeaddrinfo(info);
+
+    /* GTA IV's local-address probe: hostname, AF_INET, no service or type. */
+    hints = hints_of(AF_INET, 0, 0, 0);
+    assert(!getaddrinfo(own, NULL, &hints, &info));
+    assert(count(info) == 2 && !strcmp(text(info), "127.0.0.1"));
     freeaddrinfo(info);
 
     /* Other single-label names are not this machine: a prefix made on a PC
      * asks for the PC's computer name, and the game must see that fail. */
     assert(getaddrinfo("some-pc", "1", &hints, &info) == EAI_NONAME && !info);
 
-    /* Names are not resolved by number only, or at all otherwise. */
+    /* Numeric-only names reject text. This phase has no DNS backend;
+     * dotted-name success is checked in test_resolver_backend(). */
+    assert(!pw_ws2_32_resolve);
     hints = hints_of(AF_UNSPEC, 0, 0, AI_NUMERICHOST);
     assert(getaddrinfo("localhost", NULL, &hints, &info) == EAI_NONAME && !info);
     assert(getaddrinfo("example.com", "80", NULL, &info) == EAI_NONAME && !info);
@@ -433,6 +459,10 @@ static void test_hostent(void)
     host = gethostbyname("localhost");
     assert(host && !strcmp(host->h_name, "localhost") && host->h_addrtype == AF_INET);
     assert(host->h_length == 4 && host->h_addr_list[0] && !host->h_addr_list[1] && !host->h_aliases[0]);
+    assert(!memcmp(host->h_addr_list[0], "\x7f\0\0\x01", 4));
+
+    host = gethostbyname("PS5");
+    assert(host && !strcmp(host->h_name, "PS5"));
     assert(!memcmp(host->h_addr_list[0], "\x7f\0\0\x01", 4));
 
     host = gethostbyname("11.22.33.44");

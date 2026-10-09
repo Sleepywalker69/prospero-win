@@ -8,7 +8,7 @@
  *
  * These answer what needs no name server themselves: numeric addresses,
  * the wildcard and loopback addresses, and "localhost" and the console's
- * own host name, both loopback. A name with a dot in it goes to the
+ * stable host name "PS5", both loopback. A name with a dot in it goes to the
  * console's own resolver, libSceNet's, the way the payload SDK's libc does
  * it (a pool and a resolver per lookup; libSceNet is the title's, which
  * ps5log already uses for its sockets), with explicit timeout and retry
@@ -16,7 +16,7 @@
  * ("Could not resolve host:
  * account.battle.net"). A name without a dot is EAI_NONAME at once, as
  * every name was before: the computer name a prefix made on a PC carries is
- * single-label and is not the console's (gethostname reports the console's),
+ * single-label and is not the stable local name returned by gethostname;
  * GTA IV looks it up tens of thousands of times a minute, and resolving it,
  * which a home router that answers for DHCP host names would, made the game
  * believe it was online and wait forever on "Starting a new game"
@@ -26,12 +26,14 @@
  * so repeated calls do not block on the same outage. Native lookup errors
  * remain retryable: without a verified native NXDOMAIN mapping, a timeout
  * must not tell Winsock that the host does not exist. There is no services
- * database, so a service must be a port number. gethostname, inet_pton and
- * inet_ntop are the title's own.
+ * database, so a service must be a port number. inet_pton and inet_ntop
+ * are the title's own. A successful local-address probe still needs game
+ * loading checks as well as resolver unit tests.
  *
  * The host test builds this file with these names prefixed (Makefile), so
  * glibc's stay in place. */
 #include <arpa/inet.h>
+#include <errno.h>
 #include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -216,17 +218,24 @@ static socklen_t pw_sockaddr(struct sockaddr_storage *storage, const struct pw_a
     return sizeof(*in6);
 }
 
-/* "localhost" or the name gethostname reports. */
+/* The title's gethostname may return an empty name. Wine then substitutes
+ * the PC prefix's registry name for an empty lookup, which is not resolvable
+ * here. Keep the name returned by Winsock and our local resolver identical. */
+static const char pw_hostname[] = "PS5";
+
+int gethostname(char *name, size_t size)
+{
+    if (size < sizeof(pw_hostname)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(name, pw_hostname, sizeof(pw_hostname));
+    return 0;
+}
+
 static int pw_is_local_name(const char *name)
 {
-    char own[256];
-
-    if (!strcasecmp(name, "localhost"))
-        return 1;
-    if (gethostname(own, sizeof(own)))
-        return 0;
-    own[sizeof(own) - 1] = 0;
-    return own[0] && !strcasecmp(name, own);
+    return !strcasecmp(name, "localhost") || !strcasecmp(name, pw_hostname);
 }
 
 /* The addresses NODE stands for in FAMILY, IPv4 first: that is what a
