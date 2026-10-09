@@ -159,6 +159,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_icon.py
 	python3 tests/test_docs_links.py
 	python3 tests/test_native_contract.py
+	python3 tests/test_build_native_child_probe.py
 	python3 tests/test_fetch_lapy_helper.py
 	python3 tests/test_package_release.py
 	python3 tests/test_publish_release.py
