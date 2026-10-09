@@ -51,6 +51,66 @@ class FixturePackage(unittest.TestCase):
         prefix.json_out(source / 'fixture-source.json', metadata)
         return source, project
 
+    def test_host_source_cohort_includes_bridge_units(self):
+        repo, wine, out = self.root / 'repo', self.root / 'wine', self.root / 'cohort'
+        repo.mkdir(); wine.mkdir()
+        files = {'wine/ps5/time/pw_qpc_clock.h': 'dlls/ntdll/pw_qpc_clock.h',
+                 'wine/ps5/input/pw_key_shared.h': 'dlls/win32u/pw_key_shared.h'}
+        for name in ('pw_d3d9_window.c', 'pw_d3d9_window.h',
+                     'pw_d3d9_window_driver.c', 'pw_d3d9_window_driver.h'):
+            files['wine/ps5/' + name] = 'dlls/win32u/' + name
+        for original in files:
+            path = repo / original
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(('original ' + original).encode())
+        def command(argv, **kwargs):
+            if argv[:2] == ['git', 'clone']:
+                for directory in ('dlls/ntdll', 'dlls/win32u'):
+                    (out / 'source' / directory).mkdir(parents=True, exist_ok=True)
+        def snapshot(source):
+            for original, target in files.items():
+                self.assertTrue((source / target).is_file(), 'missing host cohort input: ' + target)
+                self.assertEqual((source / target).read_bytes(), (repo / original).read_bytes())
+            return {target: {'sha256': prefix.sha(source / target)} for target in files.values()}
+        args = argparse.Namespace(repo=repo, wine_source=wine, out=out, report=self.root / 'cohort.json')
+        with (mock.patch.object(prefix, 'git', return_value=prefix.WINE),
+              mock.patch.object(prefix, 'project', return_value={'commit': '1' * 40, 'tree': '2' * 40}),
+              mock.patch.object(prefix.subprocess, 'run', side_effect=command),
+              mock.patch.object(prefix, 'source_snapshot', side_effect=snapshot)):
+            prefix.stage_reference(args)
+        report = json.loads(args.report.read_text())
+        self.assertEqual(report['host_source'], report['ps5_source'])
+
+    def test_host_stamp_matches_shell_and_binds_each_bridge_input(self):
+        repo = self.root / 'repo'; directory = repo / 'wine/ps5'
+        directory.mkdir(parents=True)
+        names = ('pw_d3d9_window.c', 'pw_d3d9_window.h',
+                 'pw_d3d9_window_driver.c', 'pw_d3d9_window_driver.h')
+        for name in names:
+            (directory / name).write_bytes(name.encode())
+        patches = repo / 'wine/patches'; patches.mkdir()
+        patch = patches / '0100-inert.patch'; patch.write_bytes(b'original patch bytes')
+        text = (ROOT / 'tools/build_host_wine.sh').read_text()
+        block = text[text.index('stamp=$('):text.index('build=$work/build')]
+        environment = dict(os.environ, root=str(repo), commit=prefix.WINE,
+                           configure_args='--prefix=/usr --enable-archs=i386,x86_64 --disable-tests',
+                           ordered=patch.name, patches=str(patches))
+        def stamp():
+            result = subprocess.run(['sh'], input='set -eu\n' + block + '\nprintf "%s\n" "$stamp"\n',
+                                    env=environment, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), prefix.host_stamp(repo, [patch]))
+            return result.stdout.strip()
+        baseline = stamp()
+        for name in names:
+            path = directory / name; original = path.read_bytes()
+            path.write_bytes(original + b' changed')
+            self.assertNotEqual(stamp(), baseline)
+            path.write_bytes(original)
+            self.assertEqual(stamp(), baseline)
+        (directory / names[0]).unlink()
+        with self.assertRaises(FileNotFoundError):
+            prefix.host_stamp(repo, [patch])
+
     def test_pair_identity_and_machine(self):
         source, project = self.pair()
         self.assertEqual(prefix.validate_pair(source, project)['architecture'], 'x64')

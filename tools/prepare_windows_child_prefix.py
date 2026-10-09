@@ -84,9 +84,9 @@ def stage_reference(args):
     for original, target in [('wine/ps5/time/pw_qpc_clock.h', 'dlls/ntdll/pw_qpc_clock.h'),
                              ('wine/ps5/input/pw_key_shared.h', 'dlls/win32u/pw_key_shared.h')]:
         shutil.copyfile(root / original, source / target)
-    host = source_snapshot(source)
     for name in ('pw_d3d9_window.c', 'pw_d3d9_window.h', 'pw_d3d9_window_driver.c', 'pw_d3d9_window_driver.h'):
         shutil.copyfile(root / 'wine/ps5' / name, source / 'dlls/win32u' / name)
+    host = source_snapshot(source)
     ps5 = source_snapshot(source)
     json_out(args.report, {'schema': 'pw-windows-child-source-cohort/1', 'project': project(root),
                           'wine_commit': WINE, 'patches': {p.name: sha(p) for p in patches},
@@ -141,6 +141,14 @@ def json_out(path, data):
         stream.write('\n')
 
 
+def host_stamp(root, patches):
+    units = ('pw_d3d9_window.c', 'pw_d3d9_window.h',
+             'pw_d3d9_window_driver.c', 'pw_d3d9_window_driver.h')
+    return hashlib.sha256((WINE + '\n--prefix=/usr --enable-archs=i386,x86_64 --disable-tests\n').encode() +
+                          b''.join(p.read_bytes() for p in patches) +
+                          b''.join((root / 'wine/ps5' / n).read_bytes() for n in units)).hexdigest()
+
+
 def host_identity(root, host_work, cohort):
     source, build, host = host_work / 'source', host_work / 'build', host_work / 'install/usr'
     require(git(source, 'rev-parse', 'HEAD') == WINE, 'wrong host Wine source')
@@ -150,8 +158,7 @@ def host_identity(root, host_work, cohort):
             reference['project'] == project(root) and reference['wine_commit'] == WINE and
             reference['patches'] == {p.name: sha(p) for p in patches}, 'wrong independently staged source cohort')
     verify_source_snapshot(source, reference['host_source'])
-    stamp = hashlib.sha256((WINE + '\n--prefix=/usr --enable-archs=i386,x86_64 --disable-tests\n').encode() +
-                           b''.join(p.read_bytes() for p in patches)).hexdigest()
+    stamp = host_stamp(root, patches)
     require((build / '.prospero-stamp').read_text().strip() == stamp, 'stale host Wine build cohort')
     files = inventory(host, allow_internal_links=True)
     # The accepted auditor resolves internal file links and binds their bytes.
