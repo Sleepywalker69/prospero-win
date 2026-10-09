@@ -144,17 +144,14 @@ out:
     return result;
 }
 
-void pw_diagnostics_log(const char *format, ...)
+static void diagnostics_vlog(int network, const char *format, va_list arguments)
 {
     /* The same capacity as ps5log's own records; a longer message is cut and
      * says so, in the saved file and on the network alike. */
     static const char marker[] = " [truncated]";
     char message[PS5LOG_MAX_LINE], line[PS5LOG_MAX_LINE + 96];
     struct timespec clock;
-    va_list arguments;
-    va_start(arguments, format);
     int length = vsnprintf(message, sizeof(message), format, arguments);
-    va_end(arguments);
     if (length < 0) message[0] = 0;
     else if ((size_t)length >= sizeof(message))
         memcpy(message + sizeof(message) - sizeof(marker), marker, sizeof(marker));
@@ -166,11 +163,27 @@ void pw_diagnostics_log(const char *format, ...)
     if (used + size > sizeof(pending) || bytes + used + size > PW_DIAGNOSTICS_CHUNK - 128u) flush();
     if (used + size <= sizeof(pending)) { memcpy(pending + used, line, size); used += size; }
     pthread_mutex_unlock(&lock);
-    if (!__atomic_load_n(&reconnecting, __ATOMIC_ACQUIRE)) {
+    if (network && !__atomic_load_n(&reconnecting, __ATOMIC_ACQUIRE)) {
         pthread_mutex_lock(&net_lock);
         (void)ps5log_line(PS5LOG_INFO, message);
         pthread_mutex_unlock(&net_lock);
     }
+}
+
+void pw_diagnostics_log(const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    diagnostics_vlog(1, format, arguments);
+    va_end(arguments);
+}
+
+void pw_diagnostics_log_local(const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    diagnostics_vlog(0, format, arguments);
+    va_end(arguments);
 }
 
 void pw_diagnostics_tick(uint64_t now)

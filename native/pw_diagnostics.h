@@ -12,6 +12,9 @@ enum { PW_DIAGNOSTICS_SESSIONS = 8 };
 int pw_diagnostics_open(const char *root, const char *build, const char *profile,
                         uint32_t cycle);
 void pw_diagnostics_log(const char *format, ...);
+/* Same bounded formatting and local retention; no network send, network lock
+ * or reconnect. Local file writes can still wait for storage. */
+void pw_diagnostics_log_local(const char *format, ...);
 /* Writes buffered records to the session file; never waits for the network
  * (a background thread brings a dropped channel back). */
 void pw_diagnostics_tick(uint64_t now_ns);
