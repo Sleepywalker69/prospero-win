@@ -58,6 +58,13 @@
 #define pw_native_child_probe_tick pw_native_suite_tick
 #endif
 #endif
+#ifndef PW_WINE_CHILD_FIXTURE_MODE
+#define PW_WINE_CHILD_FIXTURE_MODE 0
+#endif
+#if PW_WINE_CHILD_FIXTURE_MODE
+#include "pw_wine_child_title.h"
+#include "wine-child-title-config.h"
+#endif
 #include "../include/prospero_win.h"
 
 #include <pthread.h>
@@ -623,6 +630,12 @@ static PwWineLaunch launch;
  * sandbox's view of the same eboot is tried next. Returns only on failure. */
 static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reason)
 {
+#if PW_WINE_CHILD_FIXTURE_MODE
+    if (!pw_wine_child_title_restart_ready()) {
+        pw_diagnostics_log_local("PW_WINE_CHILD restart_held reason=%s", reason);
+        return;
+    }
+#endif
     static const char *const eboots[] = { "/app0/eboot.bin", PW_SANDBOX_APP0 "/eboot.bin" };
     static char storage[2 * PW_WINE_LAUNCH_PATH_MAX + 64];
     char *next[PW_WINE_LAUNCH_ARGS];
@@ -641,11 +654,52 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
     }
 }
 
+#if PW_WINE_CHILD_FIXTURE_MODE
+/* No replacement or native exit can bypass uncertain owned lifetime. The
+ * supervisor remains independent of this thread and of Wine client calls. */
+static void child_hold_for_release(PwVideoOutPs5 *video, const char *reason)
+{
+    Loading held = { 0 };
+    uint64_t began = now_ns();
+    if (pw_wine_child_title_restart_ready()) return;
+    pw_diagnostics_log_local("PW_WINE_CHILD host_held reason=%s", reason);
+    pw_wine_child_title_cancel();
+    while (!pw_wine_child_title_restart_ready()) {
+        uint64_t now = now_ns();
+        PwPresentFrame frame;
+        const PwPresentFrame *next;
+        pw_diagnostics_tick(now);
+        if (video && !__atomic_load_n(&display_closed, __ATOMIC_ACQUIRE) &&
+            (next = loading_frame(&held, now, began, &frame)))
+            (void)pw_videoout_ps5_present_scaled(video, next, PW_PRESENT_SCALE_FIT, 0);
+        usleep(PW_WINE64_TICK_US);
+    }
+}
+static int child_environment(PwWineStart *start, const PwWineStartConfig *config,
+                              const PwWineStartOps *ops)
+{
+    int status = pw_wine_start_environment(start, config, ops);
+    if (status != PW_OK) return status;
+    const PwWineStartEnv fixed[] = {
+        { "WINE_PRX_DIR", config->ntdll_dir }, { "WINE_PS5_SERVER_DIRECT", "0" },
+        { "WINE_PS5_MUTEX_FAST", "0" }, { "WINE_PS5_MUTEX_SHARED", "0" },
+        { "WINE_PS5_SYNC_SHARED", "0" }, { "WINE_PS5_SCHED", "0" }
+    };
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++)
+        if ((status = ops->set_env(fixed[i].name, fixed[i].value)) != 0)
+            return status < 0 ? status : PW_ERR_STATE;
+    return PW_OK;
+}
+#endif
+
 /* Wine ends the process with exit() when its last program ends: go back to
  * the launcher. */
 static void on_exit_report(void)
 {
     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
+#if PW_WINE_CHILD_FIXTURE_MODE
+    child_hold_for_release(NULL, "wine-exit");
+#endif
     restart_title(NULL, launch.cycle + 1u, "wine-exit");
     pw_diagnostics_close("wine64-exit");
 }
@@ -676,6 +730,12 @@ static int open_library(void)
             continue;
         }
         const PwGameProfile *game = &entry->profile;
+#if PW_WINE_CHILD_FIXTURE_MODE
+        if (!pw_wine_child_title_profile(game)) {
+            pw_diagnostics_log_local("PW_WINE_CHILD profile_refused id=%s", game->app.id);
+            continue;
+        }
+#endif
         if (game->display.width)
             snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s  %ux%u",
                      game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
@@ -1006,6 +1066,10 @@ int main(int argc, char **argv)
     static PwHidPs5 hid;
     static PwGameInput game_input;
     const PwGameProfile *game = NULL;
+#if PW_WINE_CHILD_FIXTURE_MODE
+    unsigned child_profile = 0;
+    const char *child_hold_reason = "main-completion";
+#endif
     int scaling = PW_PRESENT_SCALE_FIT;
     PwWinePointer pointer = { 0, 0 };
     int (*post_input)(const PwWineInput *) = NULL;
@@ -1042,6 +1106,16 @@ int main(int argc, char **argv)
      * path= runs in the default prefix with nothing bound. */
     pw_game_input_init(&game_input);
     game = launch.app ? pw_wine_library_find(&library, launch.app->id) : NULL;
+#if PW_WINE_CHILD_FIXTURE_MODE
+    child_profile = pw_wine_child_title_profile(game);
+    if (!child_profile || strcmp(launch.executable, game->app.executable)) {
+        pw_diagnostics_log_local("PW_WINE_CHILD selection_refused profile=%s", launch.app ? launch.app->id : "-");
+        restart_title(NULL, launch.cycle + 1u, "profile-refused");
+        return 1;
+    }
+    pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_gui=unsupported",
+                             pw_wine_child_title_marker, child_profile, game->app.id);
+#endif
     if (game && strcmp(game->app.prefix, "default"))
         snprintf(prefix, sizeof(prefix), "%s/prefixes/%s", library_root, game->app.prefix);
     else
@@ -1205,6 +1279,11 @@ int main(int argc, char **argv)
         if (status != 0) PS5LOG_LOG("PW_WINE64 fd1_capture=failed status=%d", status);
     }
 
+#if PW_WINE_CHILD_FIXTURE_MODE
+    status = child_environment(&start, &config, &ops);
+    pw_diagnostics_log_local("PW_WINE_CHILD environment_before_load status=%d", status);
+    if (status == PW_OK)
+#endif
     status = pw_wine_start_load(&start, &config, &ops);
     PS5LOG_LOG("PW_WINE64 load status=%d stage=%d module=0x%x segments=%u module_start=%d "
                "adopted=%d stats=%d", status, start.stage, (unsigned)start.module,
@@ -1283,13 +1362,33 @@ int main(int argc, char **argv)
             int cwd_status = set_cwd && mapped == 0 ? set_cwd(host_dir) : -1;
             PS5LOG_LOG("PW_WINE64 cwd=%s host=%s status=%d", game->app.working_directory,
                        mapped == 0 ? host_dir : "-", cwd_status);
+#if PW_WINE_CHILD_FIXTURE_MODE
+            if (cwd_status) status = PW_ERR_STATE;
+#endif
         }
+#if PW_WINE_CHILD_FIXTURE_MODE
+        if (status == PW_OK) {
+            status = pw_wine_child_title_prepare(child_profile,
+                child_profile == 1 ? PW_WINE_FIXTURE_CHILD_SHA256 : NULL);
+            pw_diagnostics_log_local("PW_WINE_CHILD owner_prepare status=%d", status);
+            if (status != PW_OK) child_hold_reason = "pre-guest-owner-prepare-failed";
+        }
+        if (status == PW_OK) {
+            status = pw_wine_child_title_install(start.descriptor);
+            pw_diagnostics_log_local("PW_WINE_CHILD provider_install status=%d", status);
+            if (status != PW_OK) child_hold_reason = "pre-guest-provider-install-failed";
+        }
+#else
         status = pw_wine_start_environment(&start, &config, &ops);
         PS5LOG_LOG("PW_WINE64 environment status=%d", status);
+#endif
     }
     if (status == PW_OK) {
         status = pw_wine_start_run(&start, &config, &ops);
         PS5LOG_LOG("PW_WINE64 run status=%d", status);
+#if PW_WINE_CHILD_FIXTURE_MODE
+        if (status != PW_OK) child_hold_reason = "pre-guest-thread-start-failed";
+#endif
     }
 #if PW_WINE64_SCRIPT
     const uint64_t script_start_ns = now_ns();
@@ -1449,15 +1548,24 @@ int main(int argc, char **argv)
                 { PW_WINE_INPUT_KEY, 0x73, 0, 0, 0 }, { PW_WINE_INPUT_KEY, 0x12, 0, 0, 0 },
             };
             close_requested = now;
+#if PW_WINE_CHILD_FIXTURE_MODE
+            pw_wine_child_title_cancel();
+#endif
             if (rumble && pad_status == PW_OK) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
             for (size_t i = 0; post_input && i < sizeof(alt_f4) / sizeof(alt_f4[0]); i++)
                 (void)post_input(&alt_f4[i]);
             PS5LOG_LOG("PW_WINE64 close requested by=%s", combo_ticks ? "combo" : "deadline");
         }
         if (close_requested && now - close_requested >= (uint64_t)PW_WINE64_CLOSE_WAIT_S * 1000000000u) {
-            PS5LOG_LOG("PW_WINE64 close timeout: leaving the game");
-            restart_title(NULL, launch.cycle + 1u, "close-timeout");
-            break;
+#if PW_WINE_CHILD_FIXTURE_MODE
+            if (pw_wine_child_title_restart_ready()) {
+#endif
+                PS5LOG_LOG("PW_WINE64 close timeout: leaving the game");
+                restart_title(NULL, launch.cycle + 1u, "close-timeout");
+                break;
+#if PW_WINE_CHILD_FIXTURE_MODE
+            }
+#endif
         }
         if (tick % 60 == 0) {
             uint64_t v[16] = { 0 };
@@ -1526,6 +1634,9 @@ int main(int argc, char **argv)
         }
     }
     PS5LOG_LOG("PW_WINE64 done status=%d stage=%d", status, start.stage);
+#if PW_WINE_CHILD_FIXTURE_MODE
+    child_hold_for_release(video_status == PW_OK ? &video : NULL, child_hold_reason);
+#endif
     if (status != PW_OK) restart_title(NULL, launch.cycle + 1u, "start-failed");
     pw_diagnostics_close(status == PW_OK ? "wine64-restart-failed" : "wine64-start-failed");
     _exit(1);

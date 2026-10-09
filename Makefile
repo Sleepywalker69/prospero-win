@@ -285,6 +285,12 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_private_dispatch_wow64_build.py
 	python3 tests/test_private_dispatch_wow64_contract.py
 	python3 tests/test_wine_fixture_build.py
+	python3 tests/test_wine_child_integration.py
+	python3 tests/test_windows_child_package.py
+	python3 tests/test_battlenet_prefix.py
+	python3 tests/test_wine_service_child_build.py
+	python3 tests/test_windows_child_failure_retention.py
+	python3 tests/test_package_windows_child_fixture.py
 	python3 tests/test_publish_release.py
 	python3 tests/test_x86_differential.py
 	$(BUILD)/dbt_differential < tests/fixtures/dbt_differential_forms.txt
