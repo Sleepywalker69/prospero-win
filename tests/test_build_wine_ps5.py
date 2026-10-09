@@ -3,6 +3,8 @@
 """The PS5 Wine patch series is well-formed and applied in numeric order."""
 from __future__ import annotations
 import os
+import json
+import hashlib
 import re
 import subprocess
 import sys
@@ -44,6 +46,7 @@ build=$PW_PE_BUILD
 work=$PW_PE_WORK
 jobs=1
 status=0
+private_dispatch=0
 make() {
     for target in "$@"; do :; done
     printf '%s\n' "$target" >> "$work/requests"
@@ -136,7 +139,7 @@ def check_tls_reporting() -> None:
             path.write_text(value)
 
         llvm_config = make_toolchain_fixture(sdk, base / "host-llvm")
-        for name in ("llvm-nm",):
+        for name in ("llvm-nm", "llvm-readelf"):
             path = sdk / "bin" / name
             write(path, "#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -159,6 +162,20 @@ def check_tls_reporting() -> None:
 
         result = run()
         assert result.returncode == 0, result.stderr
+        # ON requires actual staged PE metadata and records the native bytes.
+        env["PW_PRIVATE_DISPATCH"] = "1"
+        result = run()
+        assert result.returncode != 0, "missing experimental identity must fail report generation"
+        native = build / "dlls/ntdll/ntdll.so"
+        write(native, "original native-ELF report fixture")
+        identity = {"abi": 1, "executed": False, "scope": "PE thunk bytes only", "modules": {}}
+        write(base / "private-dispatch-pe.json", json.dumps(identity))
+        result = run()
+        assert result.returncode == 0, result.stderr
+        declaration = json.loads(report.read_text())["private_dispatcher"]
+        assert declaration["pe_identity"] == identity and declaration["runtime_validated"] is False
+        assert declaration["native_elf_sha256"] == hashlib.sha256(native.read_bytes()).hexdigest()
+        env.pop("PW_PRIVATE_DISPATCH")
         # Deleting a runtime module must fail the build report itself,
         # before the separate packaging check has an opportunity to run.
         (prx / tls_manifest.MODULES[0]).unlink()

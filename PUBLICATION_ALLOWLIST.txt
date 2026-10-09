@@ -875,3 +875,5 @@ tests/lab/d3d9_native_gamma.py
 docs/d3d9-native-gamma.md
 tools/check_private_dispatch_abi.py
 tests/test_private_dispatch_build.py
+tests/test_private_dispatch_contract.py
+wine/patches/0910-ntdll-private-dispatcher-abi-proposal.patch

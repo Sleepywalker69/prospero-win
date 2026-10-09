@@ -297,13 +297,26 @@ done
 # The PS5 OpenGL SDK is optional. When supplied, Wine's generic EGL/WGL
 # frontend binds directly to its static EGL symbols and the win32u PRX links
 # the SDK into the runtime.
+# Private dispatcher ABI is a separate experimental runtime build, not a
+# profile switch and not a process provider. Never infer it from parent ISA.
+case " ${CFLAGS:-} ${CPPFLAGS:-} ${CROSSCFLAGS:-} ${x86_64_CFLAGS:-} ${i386_CFLAGS:-} " in
+    *WINE_PS5_PRIVATE_DISPATCH*) fail "use PW_WINE_PRIVATE_DISPATCH, not a manual compiler definition" ;;
+esac
+private_dispatch=${PW_WINE_PRIVATE_DISPATCH:-0}
+case "$private_dispatch" in 0|1) ;; *) fail "PW_WINE_PRIVATE_DISPATCH must be 0 or 1" ;; esac
 opengl_cflags=${CFLAGS:--g -O2}
+if [ "$private_dispatch" = 1 ]; then
+    opengl_cflags="$opengl_cflags -DWINE_PS5_PRIVATE_DISPATCH=1"
+    x86_64_CFLAGS="${x86_64_CFLAGS:-${CROSSCFLAGS:--g -O2}} -DWINE_PS5_PRIVATE_DISPATCH=1"
+    export x86_64_CFLAGS
+fi
 if [ -n "$ps5opengl_sdk" ]; then opengl_cflags="$opengl_cflags -DWINE_PS5_OPENGL"; fi
 
 # Reconfigure whenever the patches, staged Vulkan sources or arguments change.
 stamp=$(
     { printf '%s\n' "$WINE_COMMIT" "$CONFIGURE_ARGS" "$sdk" "$FREETYPE_SHA256" \
         "$ps5opengl_sdk" "$opengl_cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" "$tls_stamp"
+      [ "$private_dispatch" = 0 ] || printf '%s\n' "private-dispatch-abi=1" "$x86_64_CFLAGS"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" "$root"/wine/ps5/pw_d3d9_window*.[ch]; } | sha256sum | cut -c1-64)
@@ -347,8 +360,14 @@ done
 # ntdll's anonymous memory comes from direct memory (patch 0600).
 dmem=""
 for unit in pw_wine_dmem pw_wine_dmem_ps5; do
-    "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
-        -c "$root/wine/ps5/$unit.c" -o "$work/heap/$unit.o" || fail "cannot compile $unit.c"
+    if [ "$private_dispatch" = 1 ]; then
+        "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
+            -DWINE_PS5_PRIVATE_DISPATCH=1 -I"$tree/include" \
+            -c "$root/wine/ps5/$unit.c" -o "$work/heap/$unit.o" || fail "cannot compile $unit.c"
+    else
+        "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
+            -c "$root/wine/ps5/$unit.c" -o "$work/heap/$unit.o" || fail "cannot compile $unit.c"
+    fi
     dmem="$dmem $work/heap/$unit.o"
 done
 base="-L$work/ps5lib -lunwind -Wl,--warn-unresolved-symbols"
@@ -376,6 +395,16 @@ for arch in i386 x86_64; do
         [ ! -f "$build/$target" ] || cp "$build/$target" "$work/pe/$arch-windows/"
     done
 done
+
+# A report of actual PE operands is mandatory for this experimental runtime.
+# OFF keeps its existing build path. The standalone validator also accepts
+# --mode 0 for an explicit legacy artifact audit; it executes no module.
+if [ "$private_dispatch" = 1 ]; then
+    python3 "$root/tools/check_private_dispatch_abi.py" --mode 1 \
+        --ntdll "$work/pe/x86_64-windows/ntdll.dll" \
+        --win32u "$work/pe/x86_64-windows/win32u.dll" \
+        --output "$work/private-dispatch-pe.json" || fail "private dispatcher PE ABI mismatch"
+fi
 
 # The PRX link. Each module takes the objects of its ELF link (read back
 # from make.log), the shims, and a descriptor naming what its loader
@@ -499,7 +528,12 @@ if [ "$prx_status" = 0 ]; then
         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
         --optional-from "$build/dlls/ntdll/ntdll.so" --nm "$sdk/bin/prospero-nm" \
-        --optional-export __wine_prospero_native_wow64_caps
+        --optional-export __wine_prospero_native_wow64_caps \
+        --optional-export __wine_ps5_private_dispatch_abi
+    if [ "$private_dispatch" = 1 ]; then
+        grep -q '"__wine_ps5_private_dispatch_abi"' "$prx/obj/ntdll_desc.c" ||
+            fail "native ntdll lacks the private dispatcher ABI export"
+    fi
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/win32u_desc.c" __wine_unix_lib_init
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/wineserver_desc.c" \
         pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
@@ -697,6 +731,7 @@ if PW_SOURCE_PRX_FOUNDATION=${source_prx_foundation:-} PW_SOURCE_PS5_MESA=${sour
     PW_SOURCE_PS5_VULKAN=${source_ps5_vulkan:-} PW_SOURCE_RADV_PAYLOAD_SDK=${source_radv_payload_sdk:-} \
     PW_SOURCE_PS5VK=${source_ps5vk:-} PW_SOURCE_PS5_OPENGL_SDK=${source_ps5_opengl_sdk:-} \
     PW_SOURCE_PS5_OPENGL=${source_ps5_opengl:-} PW_SOURCE_CA_BUNDLE=${source_ca_bundle:-} \
+    PW_PRIVATE_DISPATCH="$private_dispatch" \
     PW_TLS_ROOT="$tls" PW_TOOLS_ROOT="$root/tools" PW_TLS_ENABLED="$([ "$tls_stamp" = disabled ] && echo 0 || echo 1)" \
     python3 - "$build" "$work/make.log" "$work/report.json" "$sdk" "$WINE_COMMIT" "$prx" "$prx_status" \
     $ordered <<'PY'
@@ -811,6 +846,14 @@ result["sources"] = {key: os.environ.get(f"PW_SOURCE_{key.upper()}") or None
                      for key in ("prx_foundation", "ps5_mesa", "ps5_vulkan", "radv_payload_sdk", "ps5vk",
                                  "ps5_opengl_sdk", "ps5_opengl", "ca_bundle")}
 result["tls_configured"] = os.environ.get("PW_TLS_ENABLED") == "1"
+if os.environ.get("PW_PRIVATE_DISPATCH") == "1":
+    result["private_dispatcher"] = {
+        "abi": 1, "scope": "per-runtime native AMD64 only; no child provider",
+        "pe_identity": json.loads((Path(build).parent / "private-dispatch-pe.json").read_text()),
+        "native_elf_sha256": hashlib.sha256((Path(build) / "dlls/ntdll/ntdll.so").read_bytes()).hexdigest(),
+        "native_abi_export": "__wine_ps5_private_dispatch_abi",
+        "runtime_validated": False,
+    }
 if (result["tls_configured"] and not prx_status.startswith("skipped")) or any(
         (Path(prx) / "sce_module" / f"{name}.prx").exists() for name in ("libgnutls", "secur32")):
     sys.path.insert(0, os.environ["PW_TOOLS_ROOT"])
