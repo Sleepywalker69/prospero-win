@@ -447,3 +447,70 @@ or mocked host controls do not establish them for a service child.
 | Wine startup | Bound ntdll bytes/descriptor, inherited server stream, successful Windows initialization | BOOTSTRAP_ACK alone is insufficient. |
 | Guest networking | Actual ws2_32 resolver/pool calls and TLS with the packaged CA roots | The helper's seven calls do not prove DNS, TLS or repeated guest Net initialization. |
 | Further processes and presentation | Separately checked descendant creation and child-window evidence | The original leaf fixture does not prove grandchildren or GUI presentation. |
+
+## Experimental descendant creation
+
+The Battle experimental profile can submit one further level of Windows process
+creation through the existing embedded Wine server. The explicit limit is a
+root, a direct child, and a grandchild (depth 2), within the existing sixteen
+lifetime native generations and absolute attempt limit. Both AMD64 and I386
+images use the effective Windows machine request. This is a bounded experiment;
+it does not establish general Battle.net, Agent, Retail WoW, GUI, input, or
+arbitrary descendant compatibility. The original MSVC fixture and reference
+recipe remain unchanged and exercise only their existing direct children.
+
+A service child installs a creation/join identity before Wine entry. It does not
+receive the root's full process-owner callbacks. Creation uses ordinary Wine
+requests and the existing process descriptor socket; the native bootstrap and
+signal stream remains version 2 with its existing 136-byte frames. The matched
+runtime adds creation ABI 1 and Wine protocol 962. The root title, worker builder,
+prefix check and offline package verifier require the same creation declaration,
+actual PRX descriptors and marker bodies. A previous private-ABI 1-only runtime
+cannot satisfy those checks.
+
+The server retains the actual calling thread object before replying to prepare.
+A caller key, server lease, original deadline, exact counted startup image and
+effective machine identify the request. Sixteen nonrecycled request records
+retain tombstones and object references for the native host lifetime; logical
+thread death revokes authority independently of object destruction. A server
+timer revokes an incomplete request even if its prepare reply was lost and the
+caller remains alive. These rules preserve ordinary Wine pathname reopening;
+they do not pin immutable executable file contents.
+
+A distinct negative descriptor tag binds the one transferred right to that
+thread and reservation. Transfer uses one nonblocking send; the server performs
+at most one receive progress step per spawn request. Accepted ownership clears
+the sender's owned-reference slot. Late, cancelled or duplicate references are
+closed once, without replacing an unrelated descriptor by its reusable integer.
+A reserved first thread must perform its exact, one-use first-thread join before
+any ordinary request handler can run. The server checks the pinned thread,
+generation and expected Wine IDs before changing native identity or exposing
+startup data. The child also checks the returned IDs.
+
+Broker callbacks only submit or inspect bounded state. The native supervisor
+performs policy checks and advances HELLO/BOOTSTRAP/ACK with zero-timeout wire
+steps, so another generation can progress while a child starts. A child may join
+and submit a pending creation before the supervisor observes its ACK; native
+descendant dispatch waits for that validated ACK. The platform service-launch
+call itself remains synchronous and is not claimed to be deadline-preemptible.
+
+Normal Windows root exit closes root-origin admission and retains the existing
+native exit barrier while descendants settle. It does not invoke the title's
+cancelling hold path. Stop and the attempt deadline close whole-tree admission.
+A possibly active helper transaction still prevents Kill, retirement and native
+release until its established settlement condition; no join or descendant event
+clears that uncertainty. A lost Windows startup result remains recorded as
+missing even if native retirement later becomes safe.
+
+Validation is layered. Portable actual-source controls cover immutable role
+installation, owner submission/hold transitions, wire steps and the complete
+Unix startup cleanup tail. Inert ELF/SELF fixtures exercise the real capability
+and package readers, including complete directory/archive assembly. These are
+mocked boundary and static-byte checks, not nested guest execution. The final
+server implementation still requires its supported complete translation-unit
+build and current-source reservation integration controls. Two planned server
+controls (restricted-access handles and short startup-data parsing) were
+interrupted by a platform content check and remain unperformed. Historical
+server-module results do not certify later source changes. A matched target
+build and a separately scoped nested reference/console proof are required before
+claiming descendant execution or clean whole-tree retirement.

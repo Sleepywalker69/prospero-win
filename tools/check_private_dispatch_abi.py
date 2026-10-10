@@ -151,6 +151,11 @@ def check_build(work, mode, readelf, *, require_wow64=False):
         compiler = os.environ.get('PW_DISPATCH_CLANG') or shutil.which('clang-18') or shutil.which('cc')
         need(compiler, 'host C compiler is required for the inert I386 byte validator')
         result['wow64'] = check_runtime(work, report, compiler)
+    if mode and 'service_fixture' in report:
+        from wine_creation_abi import check_runtime as check_creation
+        result['creation'] = check_creation(work, report)
+    else:
+        need('creation' not in report, 'non-service report contains a creation declaration')
     return result
 
 

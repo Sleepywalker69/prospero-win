@@ -74,7 +74,7 @@ static struct {
     unsigned first_failures,first_index,release_index,inside_callback,reenter_failure;
     int64_t first_api,first_raw,first_errno;
     int extra_right,wire_uncertain,auto_present,prepare_cancel,prepare_expire;
-    int record_action,step_result,root_during_send,wire_cancelled;
+    int record_action,step_result,root_during_send,wire_cancelled,async_idle;
     int add_cancel,add_partial_failure;
     int helper_open_error[2],helper_mismatch[2],fd_helper[128];
     unsigned helper_matches,launch_paths;
@@ -184,7 +184,9 @@ int sceSystemServiceAddLocalProcess(int app,const char *path,const char *const *
     CHECK(app==8216&&!strcmp(path,helpers[0])&&args[0]==path&&!args[1]);
     const ServiceOptions *o=opaque;CHECK(o->size==72&&o->fd==81&&o->crash==0&&o->other[0]==UINT_MAX);
     uint64_t preload;memcpy(&preload,&o->other[3],8);CHECK(preload==UINT64_C(0x8000000000000002));
-    CHECK(owner.generations[0].launch_possible&&atomic_load(&owner.generations[0].state)==G_STARTING);
+    Generation *launched=NULL;
+    for(unsigned i=0;i<atomic_load(&owner.count);i++)if(opaque==&owner.generations[i].options)launched=&owner.generations[i];
+    CHECK(launched&&launched->launch_possible&&atomic_load(&launched->state)==G_STARTING);
     m.adds++;
     if(m.add_cancel)pw_wine_fixture_owner_cancel(&owner);
     if(m.add_partial_failure){
@@ -228,6 +230,17 @@ int pw_wine_child_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineC
 }
 int pw_wine_child_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
 {CHECK(io&&fd==80&&kinds&&out&&*right==-1&&r);if(m.step_result==PW_WC_RECORD){*out=m.sent;out->kind=PW_WC_SIGNAL_ACK;}return m.step_result;}
+/* Legacy controls model transport; real zero-timeout ownership is separately
+ * exercised by test_pw_wine_child_wire. No native service is executed. */
+int pw_wine_child_wire_send_step(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
+{return pw_wine_child_wire_send(io,fd,f,right,r)?PW_WC_ERROR:PW_WC_RECORD;}
+int pw_wine_child_wire_receive_nowait(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
+{
+    if(m.async_idle&&(kinds&PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)))return PW_WC_IDLE;
+    if(kinds&(PW_WC_KIND(PW_WC_HELLO)|PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)))
+        return pw_wine_child_wire_receive(io,fd,kinds,out,right,r);
+    return pw_wine_child_wire_receive_step(io,fd,kinds,out,right,r);
+}
 static PwWineFixtureOwnerConfig config(unsigned profile)
 {
     PwWineFixtureOwnerConfig c={.session=0x123400,.profile=profile,.child_unix_path="/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe",.child_sha256=hash64,.helper_image=helper_bytes,.helper_bytes=4,.build_id=build40,.context=&m,.clock_ms=clock_cb,.cancelled=cancel_cb,.record=record_cb};return c;
@@ -703,8 +716,118 @@ static void launch_path_callback_tests(void)
     }
 }
 
+static void creation_queue_tests(void)
+{
+    Generation *origin=bound(2);PwWineCreationProvider creation;
+    CHECK(!pw_wine_fixture_owner_creation(&owner,&creation));
+    origin->wine_tid=47;origin->session.child_pid=600;
+    atomic_store_explicit(&origin->identity_ready,1,memory_order_release);
+    atomic_store(&origin->state,G_STARTING);
+    CHECK(!creation.join(&owner,origin->generation,46,47,600));
+    PwWineCreationRequest q={.origin=origin->generation,.lease=1,.key=1,.now=m.now,.deadline=m.now+30000,
+        .caller_pid=46,.caller_tid=47,.machine=PW_WINE_FIXTURE_AMD64,.image_bytes=2};
+    q.image[0]='x';strcpy(q.path,"/data/prospero-win/prefixes/battlenet-experimental-v1/drive_c/Battle.net/Wow.exe");
+    q.path_bytes=(uint32_t)strlen(q.path)+1;
+    uint64_t id=0;unsigned opens=m.opens,lists=m.lists,sleeps=m.sleeps,adds=m.adds;
+    CHECK(!creation.prepare(&owner,&q,&id)&&id!=origin->generation);
+    CHECK(m.opens==opens&&m.lists==lists&&m.sleeps==sleeps&&m.adds==adds&&!m.mutex_locked);
+    Generation *g=find(&owner,id);CHECK(g&&g->depth==2&&atomic_load(&g->remote_lease)==1);
+    PwWineCreationStatus status;CHECK(!creation.query(&owner,id,1,m.now,&status)&&status.phase==PW_WCR_PENDING);
+    /* The queue waits for supervisor-observed ACK, not merely the valid join. */
+    supervise(&owner,g);CHECK(atomic_load(&g->state)==G_REQUESTED);
+    origin->ack=1;atomic_store_explicit(&origin->state,G_RUNNING,memory_order_release);
+    supervise(&owner,g);CHECK(atomic_load(&g->state)==G_ADMITTED);
+    CHECK(!creation.query(&owner,id,1,m.now,&status)&&status.phase==PW_WCR_ADMITTED&&status.deadline==q.deadline);
+    unsigned char wrong[2]={'y',0};
+    CHECK(creation.bind(&owner,id,1,m.now,48,q.machine,wrong,2));
+    CHECK(atomic_load(&g->state)==G_ADMITTED);
+    CHECK(!creation.bind(&owner,id,1,m.now,48,q.machine,q.image,2));
+    int stream=0;CHECK(!creation.submit(&owner,id,1,m.now,48,49,&stream)&&stream==-1);
+    CHECK(g->stream_fd==0&&g->wine_tid==49&&atomic_load(&g->state)==G_LAUNCH);
+    stream=72;CHECK(creation.submit(&owner,id,1,m.now,48,49,&stream)&&stream==72&&!m.closes[72]);
+    CHECK(!report_root_exit(&owner,0)&&!atomic_load(&owner.admission_closed));
+    uint64_t rejected=0;CHECK(provider.admit(&owner,44,55,q.machine,q.path,&rejected));
+    q.lease=2;q.key=2;CHECK(!creation.prepare(&owner,&q,&rejected));
+    Generation *pending=find(&owner,rejected);CHECK(pending&&atomic_load(&pending->state)==G_REQUESTED);
+    q.origin=g->generation;q.caller_pid=48;q.caller_tid=49;q.lease=3;q.key=3;
+    g->ack=1;atomic_store(&g->identity_ready,1);atomic_store(&g->state,G_RUNNING);
+    CHECK(creation.prepare(&owner,&q,&rejected)); /* explicit depth 2 limit */
+    creation.origin_dead(&owner,origin->generation,46);
+    q.origin=origin->generation;q.caller_pid=46;q.caller_tid=47;
+    CHECK(creation.prepare(&owner,&q,&rejected));
+    creation.abandon(&owner,pending->generation,2);
+    supervise(&owner,pending);
+    CHECK(atomic_load(&pending->state)==G_RETIRED&&!atomic_load(&pending->remote_lease));
+    CHECK(pending->missing_reported&&!atomic_load(&pending->startup_done));
+    unsigned missing=m.missing_result;supervise(&owner,pending);CHECK(m.missing_result==missing);
+    CHECK(!pw_wine_fixture_owner_release_ready(&owner));
+}
+
+static void creation_status_tests(void)
+{
+    for(unsigned scenario=0;scenario<12;scenario++){
+        Generation *origin=bound(2);PwWineCreationProvider creation;
+        CHECK(!pw_wine_fixture_owner_creation(&owner,&creation));
+        origin->wine_tid=47;origin->ack=1;atomic_store(&origin->identity_ready,1);atomic_store(&origin->state,G_RUNNING);
+        PwWineCreationRequest q={.origin=origin->generation,.lease=1,.key=1,.now=m.now,.deadline=m.now+30000,
+            .caller_pid=46,.caller_tid=47,.machine=PW_WINE_FIXTURE_AMD64,.image_bytes=2};
+        q.image[0]='x';strcpy(q.path,"/data/prospero-win/prefixes/battlenet-experimental-v1/drive_c/Wow.exe");
+        q.path_bytes=(uint32_t)strlen(q.path)+1;uint64_t id=0;
+        CHECK(!creation.prepare(&owner,&q,&id));Generation *g=find(&owner,id);CHECK(g);
+        uint64_t now=m.now;uint32_t expected=WF_BAD;
+        if(scenario<3){
+            supervise(&owner,g);CHECK(atomic_load(&g->state)==G_ADMITTED);
+            CHECK(!creation.bind(&owner,id,1,now,48,q.machine,q.image,2));
+            int fd=71;CHECK(!creation.submit(&owner,id,1,now,48,49,&fd)&&fd==-1);
+            m.add_result=scenario?-2147352574:0;m.add_partial_failure=scenario==1;m.add_cancel=scenario==2;
+            supervise(&owner,g);CHECK(m.adds==1&&atomic_load(&g->launch_failed)&&!m.kills);
+            if(scenario==2)expected=WF_CANCELLED;
+            if(scenario==1)CHECK(atomic_load(&owner.failure_state)==1);
+        }else if(scenario==3){pw_wine_fixture_owner_cancel(&owner);expected=WF_CANCELLED;}
+        else if(scenario==4){now=g->startup_end;expected=WF_TIMEOUT;}
+        else if(scenario==5)now=g->started-1;
+        else if(scenario==6){atomic_store(&owner.blocked,1);atomic_store(&owner.failure_state,1);}
+        else if(scenario==7)creation.origin_dead(&owner,origin->generation,46);
+        else if(scenario==8)creation.abandon(&owner,id,1);
+        else {
+            if(scenario>=10)supervise(&owner,g);
+            if(scenario==11)CHECK(!creation.bind(&owner,id,1,now,48,q.machine,q.image,2));
+            now=m.now=g->startup_end;expected=WF_TIMEOUT;supervise(&owner,g);
+            CHECK(atomic_load(&g->state)==G_RETIRED);
+        }
+        PwWineCreationStatus out;CHECK(!creation.query(&owner,id,1,now,&out)&&out.phase==PW_WCR_FAILED);
+        printf("creation query scenario=%u status=%08x expected=%08x\n",scenario,out.status,expected);fflush(stdout);
+        CHECK(out.status==expected);
+    }
+}
+
+static void asynchronous_helper_hold(void)
+{
+    Generation *g=bound(2);PwWineCreationProvider creation;
+    CHECK(!pw_wine_fixture_owner_creation(&owner,&creation));
+    g->stream_fd=71;g->wine_tid=47;atomic_store(&g->state,G_LAUNCH);
+    CHECK(!pw_wine_fixture_owner_pump(&owner));
+    CHECK(g->start_phase==1&&m.adds==1&&!m.sends&&!m.receives);
+    CHECK(!pw_wine_fixture_owner_pump(&owner));
+    CHECK(g->start_phase==2&&g->hello&&!g->helper_possible);
+    CHECK(!pw_wine_fixture_owner_pump(&owner));
+    CHECK(g->start_phase==3&&g->helper_possible&&!g->ack&&m.sends==1);
+    unsigned lists=m.lists;m.async_idle=1;m.auto_present=0;m.now+=101;
+    CHECK(!pw_wine_fixture_owner_pump(&owner));
+    CHECK(atomic_load(&g->state)==G_STARTING&&g->helper_possible&&m.lists==lists&&!m.kills);
+    pw_wine_fixture_owner_cancel(&owner);
+    pw_wine_fixture_owner_pump(&owner);
+    CHECK(atomic_load(&g->state)==G_UNCERTAIN&&g->helper_possible&&m.lists==lists&&!m.kills);
+    CHECK(atomic_load(&owner.uncertain)&&!pw_wine_fixture_owner_release_ready(&owner));
+    retire(&owner,g);
+    CHECK(atomic_load(&g->state)==G_UNCERTAIN&&!m.kills);
+}
+
 int main(int argc,char **argv)
 {
+    if(argc==2&&!strcmp(argv[1],"creation-status")){creation_status_tests();return 0;}
+    if(argc==2&&!strcmp(argv[1],"creation-queue")){creation_queue_tests();return 0;}
+    if(argc==2&&!strcmp(argv[1],"async-helper-hold")){asynchronous_helper_hold();return 0;}
     if(argc==2&&!strcmp(argv[1],"helper-alias")){helper_alias_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"helper-identity")){helper_identity_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"launch-path-stop")){launch_path_callback_tests();return 0;}
@@ -716,6 +839,6 @@ int main(int argc,char **argv)
     if(argc==2&&!strcmp(argv[1],"retired-missing")){retired_missing_result();return 0;}
     if(argc==2&&!strcmp(argv[1],"wire-root-closure")){wire_root_closure();return 0;}
     if(argc==2&&!strcmp(argv[1],"seal-race")){seal_race_test();return 0;}
-    init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();helper_alias_tests();helper_identity_tests();launch_path_callback_tests();
+    creation_status_tests();creation_queue_tests();asynchronous_helper_hold();init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();helper_alias_tests();helper_identity_tests();launch_path_callback_tests();
     printf("Actual Wine owner with mocked native/transport boundaries: %u checks passed\n",checks);return 0;
 }

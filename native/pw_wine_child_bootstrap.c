@@ -20,6 +20,9 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
     if((profile!=PW_WC_PROFILE_FIXTURE&&profile!=PW_WC_PROFILE_BATTLENET)||
        (machine!=PW_WC_MACHINE_AMD64&&machine!=PW_WC_MACHINE_I386)||
        (profile==PW_WC_PROFILE_FIXTURE&&machine!=PW_WC_MACHINE_AMD64))return -1;
+    if(o->child.abi!=PW_WINE_CREATION_ABI||o->child.bytes!=sizeof(o->child)||
+       !o->child.generation||!o->child.wine_pid||!o->child.wine_tid||
+       o->child.profile!=profile||o->child.machine!=machine)return -1;
     const char *prefix=profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_PREFIX:PW_WINE_CHILD_BATTLENET_PREFIX;
     const char *logical_cwd=profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_CWD:PW_WINE_CHILD_BATTLENET_CWD;
     const char *placeholder=profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_IMAGE:PW_WINE_CHILD_BATTLENET_IMAGE;
@@ -53,6 +56,10 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
     if(step(b,io,o,PW_WCB_LOAD,rc))return -1;
     unsigned(*private_abi)(void)=(unsigned(*)(void))(uintptr_t)pw_prx_lookup(b->start.descriptor,"__wine_ps5_private_dispatch_abi");
     unsigned(*wow64_abi)(void)=(unsigned(*)(void))(uintptr_t)pw_prx_lookup(b->start.descriptor,"__wine_ps5_private_dispatch_wow64_abi");
+    unsigned(*creation_abi)(void)=(unsigned(*)(void))(uintptr_t)pw_prx_lookup(b->start.descriptor,"__wine_ps5_creation_abi");
+    unsigned(*creation_protocol)(void)=(unsigned(*)(void))(uintptr_t)pw_prx_lookup(b->start.descriptor,"__wine_ps5_creation_protocol");
+    int(*creation_install)(const PwWineCreationChild*)=(int(*)(const PwWineCreationChild*))(uintptr_t)
+        pw_prx_lookup(b->start.descriptor,"pw_wine_creation_child_install");
     int(*local_threads)(int(*)(long,pthread_t),void(*)(long))=
         (int(*)(int(*)(long,pthread_t),void(*)(long)))(uintptr_t)pw_prx_lookup(b->start.descriptor,"pw_wine_fixture_local_threads");
     int(*cwd)(const char*)=(int(*)(const char*))(uintptr_t)pw_prx_lookup(b->start.descriptor,"pw_cwd_set");
@@ -62,11 +69,15 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
         pw_prx_lookup(b->start.descriptor,"pw_wine_fixture_socket_set_sink");
     b->socket_failure=(int(*)(PwWineFixtureSocketResult*))(uintptr_t)
         pw_prx_lookup(b->start.descriptor,"pw_wine_fixture_socket_failure");
-    if((profile==PW_WC_PROFILE_BATTLENET&&!wow64_abi)||!private_abi||!local_threads||!cwd||!sink||!socket_sink||!b->socket_failure||!b->start.adopted||
+    if(!creation_abi||!creation_protocol||!creation_install||
+       (profile==PW_WC_PROFILE_BATTLENET&&!wow64_abi)||!private_abi||!local_threads||!cwd||!sink||!socket_sink||!b->socket_failure||!b->start.adopted||
        !pw_prx_lookup(b->start.descriptor,"module_start"))return step(b,io,o,PW_WCB_EXPORTS,-1);
     if(step(b,io,o,PW_WCB_EXPORTS,0))return -1;
     if(step(b,io,o,PW_WCB_ABI,private_abi()==abi?0:-1))return -1;
     if(profile==PW_WC_PROFILE_BATTLENET&&step(b,io,o,PW_WCB_ABI,wow64_abi()==1?0:-1))return -1;
+    if(step(b,io,o,PW_WCB_ABI,creation_abi()==PW_WINE_CREATION_ABI?0:-1)||
+       step(b,io,o,PW_WCB_ABI,creation_protocol()==PW_WINE_CREATION_PROTOCOL?0:-1))return -1;
+    if(step(b,io,o,PW_WCB_REGISTRY,creation_install(&o->child)))return -1;
     sink(o->output);
     if(step(b,io,o,PW_WCB_CWD,cwd(logical_cwd)))return -1;
     if(step(b,io,o,PW_WCB_REGISTRY,local_threads(o->register_thread,o->unregister_thread)))return -1;

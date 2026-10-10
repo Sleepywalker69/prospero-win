@@ -21,9 +21,9 @@ class WineFixtureBuild(unittest.TestCase):
         source = (ROOT / 'tools/build_wine_ps5.sh').read_text()
         block = source.split('# Compile complete experimental units', 1)[1].split("# The SDK's libc", 1)[0]
         block = block.split("\n", 1)[1]
-        objects = ['dlls/ntdll/unix/' + n + '.o' for n in ('loader','process','server','signal_x86_64','thread','virtual')]
+        objects = ['dlls/ntdll/unix/' + n + '.o' for n in ('creation','loader','process','server','signal_x86_64','thread','virtual')]
         objects += ['dlls/wow64/x86_64-windows/syscall.o']
-        objects += ['server/' + n + '.o' for n in ('process','ptrace','request','thread')]
+        objects += ['server/' + n + '.o' for n in ('creation','trace','process','ptrace','request','thread')]
         with tempfile.TemporaryDirectory(prefix='real gate routing ') as temporary:
             root = Path(temporary); sdk = root / 'sdk'; (sdk / 'bin').mkdir(parents=True)
             compiler = sdk / 'bin/prospero-clang'
@@ -50,8 +50,8 @@ class WineFixtureBuild(unittest.TestCase):
                     self.assertFalse((work/'make-args').exists()); self.assertFalse(calls.exists())
                     self.assertIn('FULL_CONTINUATION', result.stdout); continue
                 args = (work/'make-args').read_text().splitlines()
-                self.assertEqual(args[-11:], objects)
-                self.assertEqual(args.count('-W'), 11)
+                self.assertEqual(args[-14:], objects)
+                self.assertEqual(args.count('-W'), 14)
                 expected_sources = [str(work/'source'/name.replace('x86_64-windows/', '')).removesuffix('.o') + '.c' for name in objects]
                 self.assertEqual([args[i+1] for i, arg in enumerate(args) if arg == '-W'], expected_sources)
                 self.assertIn('-k', args)

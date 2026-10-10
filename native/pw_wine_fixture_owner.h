@@ -2,6 +2,7 @@
 #ifndef PW_WINE_FIXTURE_OWNER_H
 #define PW_WINE_FIXTURE_OWNER_H
 #include "../wine/ps5/pw_wine_fixture_provider.h"
+#include "../wine/ps5/pw_wine_creation.h"
 #include "../wine/ps5/pw_wine_fixture_socket.h"
 #include <stdint.h>
 
@@ -35,9 +36,13 @@ unsigned pw_wine_fixture_owner_bytes(void);
 int pw_wine_fixture_owner_init(void *storage,unsigned bytes,
                                const PwWineFixtureOwnerConfig *,PwWineFixtureProvider *out);
 int pw_wine_fixture_owner_pump(PwWineFixtureOwner *);
+/* Install once before Wine entry; only Battle profile admission uses this
+ * separately versioned, nonblocking server callback table. */
+int pw_wine_fixture_owner_creation(PwWineFixtureOwner *, PwWineCreationProvider *);
 void pw_wine_fixture_owner_cancel(PwWineFixtureOwner *);
-/* Root-only ordinary exit closes admission and preserves the full Windows
- * DWORD. Safe release is separate from a successful experiment: settled failed
+/* Root-only ordinary exit closes root-origin admission; Battle descendants
+ * remain eligible until tree settlement. Preserve the full Windows DWORD.
+ * Safe release is separate from a successful experiment: settled failed
  * runs may release, while unknown descriptor/service ownership never does.
  * Active callbacks must settle. Server object release is a separate later
  * observation: a retained root handle must not deadlock this barrier. Records

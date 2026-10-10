@@ -80,6 +80,13 @@ int pw_wine_child_wire_send(PwNativeChildIo *io, int fd, const PwWineChildFrame 
 int pw_wine_child_wire_receive_step(PwNativeChildIo *io, int fd, uint32_t allowed_kinds,
                                    PwWineChildFrame *frame, int *right_fd,
                                    PwWineChildWireResult *result);
+/* Zero-timeout poll, at most one transfer, unchanged original clock/lease.
+ * send_step returns RECORD on full delivery, IDLE if no writable readiness. */
+int pw_wine_child_wire_send_step(PwNativeChildIo *io, int fd, const PwWineChildFrame *frame,
+                               int right_fd, PwWineChildWireResult *result);
+int pw_wine_child_wire_receive_nowait(PwNativeChildIo *io, int fd, uint32_t allowed_kinds,
+                                    PwWineChildFrame *frame, int *right_fd,
+                                    PwWineChildWireResult *result);
 int pw_wine_child_wire_receive(PwNativeChildIo *io, int fd, uint32_t allowed_kinds,
                               PwWineChildFrame *frame, int *right_fd,
                               PwWineChildWireResult *result);

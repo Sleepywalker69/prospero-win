@@ -396,6 +396,12 @@ def validate_manifest(manifest, values, read):
             'packaged prefix provenance differs')
     validate_console_scope(prepared['inventory'])
     build = decode_json(read('provenance/wine-build.json'))
+    from wine_creation_abi import check_package as check_creation_package
+    check_creation_package(abi.get('creation'), build,
+                           lambda name: read(LIB + '/x86_64-unix/' + name + '.prx'))
+    require(worker['runtime'].get('creation_abi') == 1 and worker['runtime'].get('creation_protocol') == 962 and
+            worker['runtime'].get('abi_check', {}).get('creation') == abi['creation'],
+            'worker/package creation cohort differs')
     expected_pe = {arch + '/' + name + '.dll' for arch in ('i386-windows', 'x86_64-windows') for name in PE}
     expected_pe |= {'x86_64-windows/wow64.dll', 'x86_64-windows/wow64win.dll'}
     require(set(build.get('pe', {})) == expected_pe and len(expected_pe) == 22 and
@@ -487,7 +493,8 @@ def verify_archive(path):
                     name in (MANIFEST, SUMS, ABI_REPORT, BATTLE_PROFILE, 'BUILD-INFO.txt', APP + '/native-wine-child-build.json') or \
                     name in (LIB + '/x86_64-windows/ntdll.dll', LIB + '/x86_64-windows/win32u.dll',
                              LIB + '/x86_64-windows/wow64.dll', LIB + '/i386-windows/ntdll.dll',
-                             LIB + '/i386-windows/win32u.dll')
+                             LIB + '/i386-windows/win32u.dll', LIB + '/x86_64-unix/ntdll.prx',
+                             LIB + '/x86_64-unix/wineserver.prx')
                 if retain:
                     require(item.size <= MAX_JSON, 'oversized inspection input')
                 stream = archive.extractfile(item)

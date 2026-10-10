@@ -55,14 +55,22 @@ static struct { unsigned success,exit_code; int self; } response;
 static unsigned wine_server_obj_handle(void *h) { CHECK(h==(void *)(uintptr_t)42 || h==(void *)(uintptr_t)UINT32_C(0xfffffffe));return (unsigned)(uintptr_t)h; }
 static unsigned wine_server_call(void *req)
 { if(request_kind!=op_get_new_process_info)return root_server_call(req);CHECK(req==&request && request.info==42);++m.query_calls;response.success=m.reply_success;response.exit_code=m.reply_exit;return m.query_status; }
+/* The existing direct-root excerpt controls keep the creation client mocked.
+ * The complete target TU gate checks its production declaration separately. */
+static uint32_t pw_creation_client_remaining(void *call)
+{ CHECK(call);return remaining(&m,UINT64_C(0x123456789abcdef0)); }
+static uint32_t pw_creation_client_result(void *call,uint32_t success,uint32_t status)
+{ CHECK(call);terminal(&m,UINT64_C(0x123456789abcdef0),success,status);return 0; }
 static unsigned startup(void)
 {
     const PwWineFixtureProvider *fixture=&provider;uint64_t fixture_generation=UINT64_C(0x123456789abcdef0);
     void *process_info=(void *)(uintptr_t)42;unsigned status=0;int success=FALSE;
+    unsigned creation_call=0,creation_result_error=0;
 #include "startup.inc"
     /* Reaching the original output-attribute boundary permits publication. */
     ++m.published;status=0;
 #include "startup-result.inc"
+    CHECK(!creation_result_error);
     return status;
 }
 const PwWineFixtureProvider *pw_wine_fixture_get(void) { return m.fixture_absent?NULL:&provider; }
@@ -304,6 +312,7 @@ static struct {
     unsigned expected_terminal, expected_handles, expected_descriptors;
     unsigned expected_success, expected_status, recorded_success, recorded_status;
     int masked, mask_error, reported_error, old_mask;
+    unsigned creation_mode, result_error;
     char order[32];
 } tail;
 static jmp_buf tail_jump;
@@ -339,7 +348,10 @@ static int tail_sigmask(int how,const int *set,void *old)
 }
 static void tail_err(const char *format,int error)
 {
-    CHECK(strstr(format,"%d")&&tail.restores==1&&!tail.errors&&error==tail.mask_error);
+    CHECK(!tail.errors&&tail.frees==4);
+    if(strstr(format,"%d"))CHECK(tail.restores==1&&error==tail.mask_error);
+    else CHECK(strstr(format,"%08x")&&tail.restores==(unsigned)tail.masked&&
+               (uint32_t)error==tail.result_error);
     ++tail.errors;tail.reported_error=error;tail_event('E');errno=EDOM;
 }
 static void tail_abort(int status) __attribute__((noreturn));
@@ -348,7 +360,10 @@ static void tail_abort(int status)
     CHECK(status==1&&tail.errors==1&&tail.frees==4&&!tail.aborts&&!tail.returns);
     ++tail.aborts;tail_event('A');longjmp(tail_jump,1);
 }
+static uint32_t tail_creation_result(void *call,uint32_t success,uint32_t status)
+{ CHECK(call);tail_terminal(&tail,UINT64_C(0x123456789abcdef0),success,status);return tail.result_error; }
 #undef ERR
+#define pw_creation_client_result tail_creation_result
 #define ERR tail_err
 #define NtClose tail_handle
 #define close tail_close
@@ -359,10 +374,11 @@ static void tail_abort(int status)
 static unsigned actual_startup_tail(unsigned generation_present,unsigned resources)
 {
     PwWineFixtureProvider f={.context=&tail,.startup_result=tail_terminal};
-    const PwWineFixtureProvider *fixture=&f;
+    const PwWineFixtureProvider *fixture=tail.creation_mode?NULL:&f;
     uint64_t fixture_generation=generation_present?UINT64_C(0x123456789abcdef0):0;
     unsigned success=tail.expected_success,status=tail.expected_status;
     int fixture_masked=tail.masked;
+    unsigned creation_call=0,creation_result_error=0;
     /* The production variable is a sigset_t; the boundary mock only checks its
      * address. No claim about the host or target signal-set representation. */
 #define fixture_old_mask tail.old_mask
@@ -376,6 +392,7 @@ static unsigned actual_startup_tail(unsigned generation_present,unsigned resourc
 #undef fixture_old_mask
 }
 #undef abort_thread
+#undef pw_creation_client_result
 #undef SIG_SETMASK
 #undef pthread_sigmask
 #undef free
@@ -412,8 +429,26 @@ static void mask_tail_tests(void)
     }
 }
 
+static void result_cleanup_tests(void)
+{
+    const unsigned errors[]={0,0xc0000008u,UINT32_MAX};
+    for(unsigned masked=0;masked<2;masked++)for(unsigned success=0;success<2;success++)
+    for(unsigned e=0;e<3;e++) {
+        memset(&tail,0,sizeof(tail));tail.creation_mode=1;tail.result_error=errors[e];
+        tail.expected_success=success;tail.expected_status=success?0:STATUS_INTERNAL_ERROR;
+        tail.expected_terminal=1;tail.expected_handles=4;tail.expected_descriptors=2;tail.masked=(int)masked;
+        int escaped=setjmp(tail_jump);
+        if(!escaped) { unsigned status=actual_startup_tail(1,1);++tail.returns;CHECK(status==tail.expected_status); }
+        CHECK(tail.terminals==1&&tail.recorded_success==success&&tail.recorded_status==tail.expected_status);
+        CHECK(tail.handles==4&&tail.descriptors==2&&tail.frees==4&&tail.restores==masked);
+        CHECK(escaped==(errors[e]?1:0)&&tail.aborts==(errors[e]?1u:0u)&&tail.returns==!errors[e]);
+        char expected[32]="THHHHDDFFFF";if(masked)strcat(expected,"M");if(errors[e])strcat(expected,"EA");
+        CHECK(!strcmp(tail.order,expected));
+    }
+}
+
 int main(void)
 {
-    startup_tests();signal_tests();timer_tests();local_tests();root_exit_tests();mask_tail_tests();
+    startup_tests();signal_tests();timer_tests();local_tests();root_exit_tests();mask_tail_tests();result_cleanup_tests();
     printf("composed Wine fixture consumer bodies: %u checks passed; no native operations\n",checks);return 0;
 }

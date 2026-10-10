@@ -354,7 +354,7 @@ stamp=$(
       [ "$private_dispatch" = 0 ] || printf '%s\n' "private-dispatch-abi=1" "private-dispatch-wow64-abi=1" "$x86_64_CFLAGS" "$i386_CFLAGS"
       if [ "$service_fixture" = 1 ]; then
           printf '%s\n' "service-fixture-abi=1"
-          cat "$root"/wine/ps5/pw_wine_fixture_provider.[ch] "$root"/wine/ps5/pw_wine_fixture_socket.[ch] "$root/wine/ps5/pw_wine_compat.c"
+          cat "$root/wine/ps5/pw_wine_creation.h" "$root"/wine/ps5/pw_wine_fixture_provider.[ch] "$root"/wine/ps5/pw_wine_fixture_socket.[ch] "$root/wine/ps5/pw_wine_compat.c"
       fi
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
@@ -382,10 +382,11 @@ fi
 # Compile complete experimental units with the actual generated target rules.
 if [ "$service_fixture" = 1 ]; then
     set -- -C "$build" -k -j"$jobs"
-    for source in dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c server/process.c server/ptrace.c server/request.c server/thread.c; do
+    for source in dlls/ntdll/unix/creation.c dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c server/creation.c server/trace.c server/process.c server/ptrace.c server/request.c server/thread.c; do
         set -- "$@" -W "$tree/$source"
     done
     make "$@" \
+        dlls/ntdll/unix/creation.o \
         dlls/ntdll/unix/loader.o \
         dlls/ntdll/unix/process.o \
         dlls/ntdll/unix/server.o \
@@ -393,6 +394,8 @@ if [ "$service_fixture" = 1 ]; then
         dlls/ntdll/unix/thread.o \
         dlls/ntdll/unix/virtual.o \
         dlls/wow64/x86_64-windows/syscall.o \
+        server/creation.o \
+        server/trace.o \
         server/process.o \
         server/ptrace.o \
         server/request.o \
@@ -592,8 +595,8 @@ if [ "$prx_status" = 0 ]; then
                 -c "$root/wine/ps5/$unit.c" -o "$prx/obj/$unit.o" || fail "cannot compile $unit.c"
             service_objects="$service_objects $prx/obj/$unit.o"
         done
-        service_ntdll_exports="pw_wine_fixture_install pw_wine_fixture_local_threads pw_wine_fixture_socket_set_sink pw_wine_fixture_socket_failure"
-        service_server_exports="pw_wineserver_fixture_install pw_wine_fixture_socket_set_sink"
+        service_ntdll_exports="__wine_ps5_creation_abi __wine_ps5_creation_protocol pw_wine_creation_install pw_wine_creation_child_install pw_wine_fixture_install pw_wine_fixture_local_threads pw_wine_fixture_socket_set_sink pw_wine_fixture_socket_failure"
+        service_server_exports="__wine_ps5_creation_abi __wine_ps5_creation_protocol pw_wineserver_creation_install pw_wineserver_fixture_install pw_wine_fixture_socket_set_sink"
     fi
     # ntdll: the loader, compat, and the title's present and input sink; the
     # thread registry belongs to the server alone.
@@ -941,6 +944,7 @@ result["sources"] = {key: os.environ.get(f"PW_SOURCE_{key.upper()}") or None
                                  "ps5_opengl_sdk", "ps5_opengl", "ca_bundle")}
 result["tls_configured"] = os.environ.get("PW_TLS_ENABLED") == "1"
 if os.environ.get("PW_SERVICE_FIXTURE") == "1":
+    result["creation"] = {"abi": 1, "protocol": 962, "profile": 2, "maximum_depth": 2, "runtime_validated": False}
     result["service_fixture"] = {"enabled": True, "unix_define": "PW_WINE_SERVICE_FIXTURE=1",
                                  "abi": 1, "runtime_validated": False}
 if os.environ.get("PW_PRIVATE_DISPATCH") == "1":

@@ -41,6 +41,9 @@ static void root_detached(void *c,uint32_t ok,int32_t raw,int32_t error) { (void
 static void reset(void)
 {
     static int context;
+    /* Independent included-C cases reset test-local immutable role state. */
+    atomic_init(&process_role,0);atomic_init(&creation_ready,0);atomic_init(&child_ready,0);
+    memset(&creation_provider,0,sizeof(creation_provider));memset(&creation_child,0,sizeof(creation_child));
     atomic_init(&ready, 0); memset(&installed, 0, sizeof(installed)); reentrant=0;
     candidate=(PwWineFixtureProvider){PW_WINE_FIXTURE_ABI,sizeof(candidate),&context,
         admit,bind_process,release_process,spawn,remaining,startup_result,signal_submit,state,root_exit,root_detached};
@@ -80,7 +83,8 @@ int main(void)
         CHECK(pw_wine_fixture_install(&candidate)==-1);CHECK(pw_wine_fixture_get()==p);
     }
     reset();CHECK(pw_wineserver_fixture_install(&candidate)==0);CHECK(pw_wine_fixture_get()!=NULL);
-    CHECK(publication_checks==16);
+    /* Each installation now publishes its exclusive role, then its table. */
+    CHECK(publication_checks==32);
     const PwWineFixtureProvider *p=pw_wine_fixture_get();
     CHECK(p->root_exit(p->context,UINT32_C(0x80000100))==UINT32_C(0x80000100));
     printf("fixture provider installer: %u checks passed; incomplete publication/rebind/caller mutation rejected\n",checks);

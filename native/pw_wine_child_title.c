@@ -19,6 +19,8 @@ extern const unsigned char pw_wine_child_image[];
 extern const size_t pw_wine_child_image_size;
 _Static_assert(PW_WINE_CHILD_PRIVATE_DISPATCH_ABI == 1, "private dispatcher ABI");
 _Static_assert(PW_WINE_CHILD_WOW64_ABI == 1, "translated dispatcher ABI");
+_Static_assert(PW_WINE_CHILD_CREATION_ABI==PW_WINE_CREATION_ABI,"creation broker cohort");
+_Static_assert(PW_WINE_CHILD_CREATION_PROTOCOL==PW_WINE_CREATION_PROTOCOL,"creation protocol cohort");
 
 enum { TITLE_UNUSED, TITLE_PREPARING, TITLE_INACTIVE_FAILURE, TITLE_ACTIVE };
 typedef struct Title {
@@ -26,6 +28,7 @@ typedef struct Title {
     PwWineFixtureSocketResult socket_failure;
     PwWineFixtureOwner *owner;
     PwWineFixtureProvider provider;
+    PwWineCreationProvider creation;
     pthread_t supervisor;
     unsigned profile;
     uint64_t session;
@@ -183,6 +186,8 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
     };
     status = pw_wine_fixture_owner_init(title.owner, bytes, &config, &title.provider);
     if (status) goto failure;
+    status = pw_wine_fixture_owner_creation(title.owner, &title.creation);
+    if (status) goto failure;
     status = pthread_create(&title.supervisor, NULL, supervisor, &title);
     if (status) goto failure;
     atomic_store_explicit(&title.state, TITLE_ACTIVE, memory_order_release);
@@ -206,11 +211,15 @@ int pw_wine_child_title_install(const PwPrxDescriptor *d)
         !d->count || d->count > PW_PRX_MAX_EXPORTS) goto failure;
     unsigned (*abi)(void) = (unsigned (*)(void))(uintptr_t)unique_export(d, "__wine_ps5_private_dispatch_abi");
     unsigned (*wow64)(void) = (unsigned (*)(void))(uintptr_t)unique_export(d, "__wine_ps5_private_dispatch_wow64_abi");
+    unsigned (*creation_abi)(void) = (unsigned (*)(void))(uintptr_t)unique_export(d, "__wine_ps5_creation_abi");
+    unsigned (*creation_protocol)(void) = (unsigned (*)(void))(uintptr_t)unique_export(d, "__wine_ps5_creation_protocol");
+    int (*creation_install)(const PwWineCreationProvider *) =
+        (int (*)(const PwWineCreationProvider *))(uintptr_t)unique_export(d, "pw_wine_creation_install");
     int (*install)(const PwWineFixtureProvider *) =
         (int (*)(const PwWineFixtureProvider *))(uintptr_t)unique_export(d, "pw_wine_fixture_install");
     int (*sink)(PwWineFixtureSocketSink, void *) =
         (int (*)(PwWineFixtureSocketSink, void *))(uintptr_t)unique_export(d, "pw_wine_fixture_socket_set_sink");
-    if (!abi || !install || !sink || (title.profile == 2 && !wow64)) goto failure;
+    if (!creation_abi || !creation_protocol || !creation_install || !abi || !install || !sink || (title.profile == 2 && !wow64)) goto failure;
     stage = 2; raw = (int)abi();
     if (raw != PW_WINE_CHILD_PRIVATE_DISPATCH_ABI) goto failure;
     if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
@@ -219,10 +228,19 @@ int pw_wine_child_title_install(const PwPrxDescriptor *d)
         if (raw != PW_WINE_CHILD_WOW64_ABI) goto failure;
     }
     if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
+    stage = 7; raw = (int)creation_abi();
+    if (raw != PW_WINE_CREATION_ABI) goto failure;
+    if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
+    stage = 8; raw = (int)creation_protocol();
+    if (raw != PW_WINE_CREATION_PROTOCOL) goto failure;
+    if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
     stage = 4; raw = sink(socket_sink, &title);
     if (raw) goto failure;
     if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
     stage = 5; raw = install(&title.provider);
+    if (raw) goto failure;
+    if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
+    stage = 9; raw = creation_install(&title.creation);
     if (raw) goto failure;
     if (cancelled(&title)) { stage = 6; raw = -1; goto failure; }
     atomic_store_explicit(&title.installed, 1, memory_order_release);

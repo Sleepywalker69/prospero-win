@@ -154,12 +154,15 @@ static int fake_attr_stack(pthread_attr_t*a,size_t n){(void)a;assert(n==(16u<<20
 static int fake_attr_destroy(pthread_attr_t*a){(void)a;return m.attr_destroy_rc;}
 static int fake_thread_create(pthread_t*t,const pthread_attr_t*a,void*(*f)(void*),void*p){(void)t;(void)a;(void)f;assert(!p);m.thread_calls++;return m.thread_rc;}
 static int fake_trylock(pthread_mutex_t*p){assert(p==&log_lock);return m.trylock_rc;}static int fake_unlock(pthread_mutex_t*p){assert(p==&log_lock);return m.unlock_rc;}
-enum{EXPORTS=10};
+enum{EXPORTS=13};
 _Alignas(PW_PRX_ALIGN) static struct{struct{uint64_t magic;uint32_t version,count;PwPrxExport exports[EXPORTS];}d;char names[EXPORTS][64];}module;
 static void mock_wine_main(int argc,char **argv){assert(argc==2&&argv);}
 static int module_start(size_t n,const void *p){assert(!n&&!p);return 0;}
 static void *adopt(const char*p,int32_t h){assert(strstr(p,"ntdll.prx")&&h==7);return &module;}
 static unsigned abi(void){return 1;}
+static unsigned creation_protocol(void){return PW_WINE_CREATION_PROTOCOL;}
+static int creation_install(const PwWineCreationChild *p)
+{assert(p&&p->abi==1&&p->bytes==sizeof(*p)&&p->generation==active_session.generation&&p->wine_pid==active_session.wine_pid&&p->wine_tid==active_session.wine_tid&&p->profile==active_session.profile&&p->machine==active_session.machine);return 0;}
 static int cwd(const char*p){assert(p&&strstr(p,"drive_c"));return 0;}
 static void set_sink(void(*fn)(const char*,size_t)){assert(fn==output);}
 static int threads(int(*add)(long,pthread_t),void(*remove)(long)){assert(add&&remove);return 0;}
@@ -168,8 +171,8 @@ static int socket_failed(PwWineFixtureSocketResult *r){(void)r;return 0;}
 static int32_t fake_load(const char*p,size_t n,const void*a,uint32_t f,const void*o,int*r)
 {
  assert(m.envs==16&&p&&strstr(p,"ntdll.prx")&&!n&&!a&&!f&&!o);*r=0;m.loads++;
- const char *names[]={"__wine_main","module_start","pw_wine_dl_adopt","__wine_ps5_private_dispatch_abi","pw_cwd_set","__wine_ps5_set_output_sink","pw_wine_fixture_local_threads","pw_wine_fixture_socket_set_sink","pw_wine_fixture_socket_failure","__wine_ps5_private_dispatch_wow64_abi"};
- const void *functions[]={(void*)mock_wine_main,(void*)module_start,(void*)adopt,(void*)abi,(void*)cwd,(void*)set_sink,(void*)threads,(void*)install_socket_sink,(void*)socket_failed,(void*)abi};
+ const char *names[]={"__wine_main","module_start","pw_wine_dl_adopt","__wine_ps5_private_dispatch_abi","pw_cwd_set","__wine_ps5_set_output_sink","pw_wine_fixture_local_threads","pw_wine_fixture_socket_set_sink","pw_wine_fixture_socket_failure","__wine_ps5_private_dispatch_wow64_abi","__wine_ps5_creation_abi","__wine_ps5_creation_protocol","pw_wine_creation_child_install"};
+ const void *functions[]={(void*)mock_wine_main,(void*)module_start,(void*)adopt,(void*)abi,(void*)cwd,(void*)set_sink,(void*)threads,(void*)install_socket_sink,(void*)socket_failed,(void*)abi,(void*)abi,(void*)creation_protocol,(void*)creation_install};
  memset(&module,0,sizeof(module));module.d.magic=PW_PRX_MAGIC;module.d.version=PW_PRX_VERSION;module.d.count=EXPORTS;
  for(unsigned i=0;i<EXPORTS;i++){strcpy(module.names[i],names[i]);module.d.exports[i]=(PwPrxExport){module.names[i],functions[i]};}
  return 7;

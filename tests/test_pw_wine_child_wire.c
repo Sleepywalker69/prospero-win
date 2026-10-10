@@ -27,6 +27,7 @@ static int fake_close(int);
 static struct {
     uint64_t now,advance;
     int recv_cancel,cancelled,clock_error,clock_reverse,poll_rc,type_rc,stream_type,close_rc;
+    unsigned no_wait;
     unsigned polls,sends,receives,types,closes;int closed[20],sent_right;
     short revents;ssize_t received,sent;int flags;
     unsigned char bytes[PW_WC_WIRE_BYTES],sent_bytes[PW_WC_WIRE_BYTES];
@@ -53,7 +54,7 @@ static void reset(PwWineChildFrame f)
     assert(!pw_wine_child_wire_encode(m.bytes,&f));
 }
 static int fake_poll(struct pollfd*p,nfds_t n,int timeout)
-{assert(n==1&&p->fd==3&&timeout>0&&timeout<=25);m.polls++;p->revents=m.poll_rc==1?(p->events==POLLOUT?POLLOUT:m.revents):0;
+{assert(n==1&&p->fd==3&&(m.no_wait?timeout==0:timeout>0&&timeout<=25));m.polls++;p->revents=m.poll_rc==1?(p->events==POLLOUT?POLLOUT:m.revents):0;
  if(m.poll_rc<0)errno=13;
  return m.poll_rc;}
 static int fake_type(int fd,int level,int option,void *value,socklen_t *length)
@@ -128,5 +129,17 @@ int main(void)
     reset(boot());f=boot();m.sent=-1;assert(pw_wine_child_wire_try_send(3,&f,9,&r)<0&&r.delivery_uncertain&&r.native_error==45&&!m.closes);
     reset(boot());f=boot();m.sent=127;assert(pw_wine_child_wire_try_send(3,&f,9,&r)<0&&r.delivery_uncertain);
     reset(boot());f=boot();m.advance=400;assert(pw_wine_child_wire_send(&io,3,&f,9,&r)<0&&r.delivery_uncertain&&r.status==PW_WC_BUDGET);
+    reset(hello());m.no_wait=1;m.poll_rc=0;fd=-1;
+    assert(pw_wine_child_wire_receive_nowait(&io,3,PW_WC_KIND(PW_WC_HELLO),&decoded,&fd,&r)==PW_WC_IDLE);
+    assert(m.polls==1&&!m.receives&&io.stage_end==500&&fd==-1);
+    m.poll_rc=1;
+    assert(pw_wine_child_wire_receive_nowait(&io,3,PW_WC_KIND(PW_WC_HELLO),&decoded,&fd,&r)==PW_WC_RECORD);
+    assert(m.polls==2&&m.receives==1&&fd==-1);
+    reset(boot());m.no_wait=1;m.poll_rc=0;f=boot();
+    assert(pw_wine_child_wire_send_step(&io,3,&f,9,&r)==PW_WC_IDLE&&!m.sends&&m.polls==1);
+    assert(io.stage_end==500);m.poll_rc=1;
+    assert(pw_wine_child_wire_send_step(&io,3,&f,9,&r)==PW_WC_RECORD&&m.sends==1&&m.sent_right==9);
+    reset(boot());m.no_wait=1;f=boot();m.advance=400;
+    assert(pw_wine_child_wire_send_step(&io,3,&f,9,&r)==PW_WC_ERROR&&r.delivery_uncertain&&m.sends==1);
     puts("wine child wire: all mocked controls passed");return 0;
 }

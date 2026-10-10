@@ -38,7 +38,7 @@ def check_dependency_inventory(wine, out, compiler):
     macro is off. The small input tree derives membership and bytes from the
     fully composed source; it never substitutes a model of that lookup.
     """
-    headers = ('wine/pw_wine_fixture_provider.h', 'wine/pw_wine_fixture_socket.h')
+    headers = ('wine/pw_wine_fixture_provider.h', 'wine/pw_wine_fixture_socket.h', 'wine/pw_wine_creation.h')
     work = out / 'makedep-check'; work.mkdir()
     source = work / 'source'
     (source / 'include/wine').mkdir(parents=True)
@@ -94,7 +94,7 @@ def main():
     startup = proc[begin:end]
     assert "if (status != STATUS_WAIT_0)" in startup
     if args.mutate_remove_final_budget:
-        guard = "#ifdef PW_WINE_SERVICE_FIXTURE\n    if (!fixture->startup_remaining_ms( fixture->context, fixture_generation ))\n    { success = FALSE; status = STATUS_IO_TIMEOUT; goto done; }\n#endif\n"
+        guard = "#ifdef PW_WINE_SERVICE_FIXTURE\n    if (!(fixture ? fixture->startup_remaining_ms( fixture->context, fixture_generation ) : pw_creation_client_remaining( &creation_call )))\n    { success = FALSE; status = STATUS_IO_TIMEOUT; goto done; }\n#endif\n"
         assert startup.count(guard) == 1
         startup = startup.replace(guard, "/* DELIBERATE MUTATION: final budget check removed. */\n")
     (out/"startup.inc").write_text(startup)
