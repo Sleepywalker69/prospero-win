@@ -50,6 +50,23 @@ class FailureRetention(unittest.TestCase):
         for name in ('../escape','/absolute','a/../b'):
             with self.assertRaises(ValueError):c.put(name,b'x')
 
+    def test_user_objects_and_compilers_precede_large_evidence(self):
+        names=('repo','title_foundation','foundation','wine_work','tls_work','title_build')
+        args=argparse.Namespace(**{name:self.root/name for name in names},wine_archive=self.root/'wine.tar.gz',
+                                sdk_source_archive=self.root/'sdk.tar.gz',out=self.root/'retained-user')
+        for name in names:getattr(args,name).mkdir()
+        expected={}
+        for name in ('build/dlls/win32u/ps5drv.o','service-translation-units.log',
+                     'user-driver-compiler','user-driver-sdk-compiler'):
+            path=args.wine_work/name;path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(('inert '+name).encode());expected['target/wine/'+name]=path.read_bytes()
+        args.wine_archive.write_bytes(b'x'*4096)
+        with mock.patch.object(retention,'MAX_TOTAL',sum(map(len,expected.values()))):
+            result=retention.collect(args)
+        self.assertEqual(set(result['files']),set(expected))
+        for name,value in expected.items():self.assertEqual((args.out/name).read_bytes(),value)
+        self.assertTrue(result['omissions']);self.assertFalse(result['accepted'])
+
     def test_bound_is_explicit_and_completed_evidence_remains(self):
         c=retention.Collector(self.root/'out');c.put('small',b'a')
         with mock.patch.object(retention,'MAX_TOTAL',2):c.put('too-large',b'bb')

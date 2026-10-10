@@ -23,6 +23,7 @@ class WineFixtureBuild(unittest.TestCase):
         block = block.split("\n", 1)[1]
         objects = ['dlls/ntdll/unix/' + n + '.o' for n in ('creation','loader','process','server','signal_x86_64','thread','virtual')]
         objects += ['dlls/wow64/x86_64-windows/syscall.o']
+        objects += ['dlls/win32u/ps5drv.o']
         objects += ['dlls/dnsapi/' + arch + '-windows/' + unit + '.o'
                     for arch in ('i386', 'x86_64') for unit in ('main', 'query')]
         objects += ['server/' + n + '.o' for n in ('creation','trace','process','ptrace','request','thread')]
@@ -41,7 +42,7 @@ class WineFixtureBuild(unittest.TestCase):
                 env = dict(os.environ, SDK=str(sdk), WORK=str(work), CALLS=str(calls),
                            SERVICE=str(service), PARTIAL=str(partial), FAIL_MAKE=str(fail_make), FAIL_ADAPTER=fail_adapter)
                 setup = ('set -eu\nsdk=$SDK\nwork=$WORK\nbuild=$work/build\ntree=$work/source\nroot=$work/repo\n'
-                         'jobs=2\nservice_cflags=-DPW_WINE_SERVICE_FIXTURE=1\nservice_fixture=$SERVICE\n'
+                         'wine_cc=$sdk/bin/prospero-clang\njobs=2\nservice_cflags=-DPW_WINE_SERVICE_FIXTURE=1\nservice_fixture=$SERVICE\n'
                          'compile_check_only=$PARTIAL\nfail() { exit 73; }\n'
                          'make() { printf "%s\\n" "$@" > "$work/make-args"; [ "$FAIL_MAKE" = 0 ]; }\n')
                 result = subprocess.run(['sh'], input=setup+block+'\necho FULL_CONTINUATION\n', env=env,
@@ -52,9 +53,9 @@ class WineFixtureBuild(unittest.TestCase):
                     self.assertFalse((work/'make-args').exists()); self.assertFalse(calls.exists())
                     self.assertIn('FULL_CONTINUATION', result.stdout); continue
                 args = (work/'make-args').read_text().splitlines()
-                self.assertEqual(len(objects), 18)
+                self.assertEqual(len(objects), 19)
                 self.assertEqual(args[-len(objects):], objects)
-                self.assertEqual(args.count('-W'), 16)
+                self.assertEqual(args.count('-W'), 17)
                 expected_sources = list(dict.fromkeys(
                     str(work/'source'/name.replace('x86_64-windows/', '').replace('i386-windows/', '')).removesuffix('.o') + '.c'
                     for name in objects))

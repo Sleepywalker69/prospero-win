@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shlex
 from pathlib import Path
 import re
 import struct
@@ -58,6 +59,65 @@ def dnsapi_guard_record(work: Path) -> dict:
             "sources": {name: sha(work / "source" / name) for name in sources},
             "objects": {name: sha(work / "build" / name) for name in objects},
             "pe": {name: sha(work / "pe" / name) for name in pe}}
+
+
+USER_DRIVER_UNITS = ("ps5drv",)
+
+
+def user_driver_record(work: Path) -> dict:
+    """Bind real target inputs and compile commands; this is not input delivery."""
+    sources = ["dlls/win32u/" + unit + ".c" for unit in USER_DRIVER_UNITS]
+    sources += ["dlls/win32u/" + name for name in
+                ("ntuser_private.h", "win32u_private.h", "Makefile.in")]
+    objects = ["dlls/win32u/" + unit + ".o" for unit in USER_DRIVER_UNITS]
+    evidence = ("service-translation-units.log", "user-driver-compiler", "user-driver-sdk-compiler")
+    # Wine make prints long compiler commands with shell continuations.
+    # Preserve the complete argv before selecting the source/output pair.
+    lines, pending, continued = [], "", False
+    for line in data(work / evidence[0]).decode("utf-8", errors="strict").splitlines(keepends=True):
+        if line.endswith("\\\n"):
+            pending += line[:-2]
+            continued = True
+            continue
+        lines.append(pending + line.rstrip("\n"))
+        pending, continued = "", False
+    require(not continued, "unterminated USER compile command continuation")
+    commands = {name: [] for name in objects}
+    for line in lines:
+        if not any(name in line for name in objects):
+            continue
+        argv = shlex.split(line)
+        if "-c" not in argv or "-o" not in argv:
+            continue
+        index = argv.index("-o")
+        require(index + 1 < len(argv), "incomplete USER object compile command")
+        for name in objects:
+            if argv[index + 1] == name or argv[index + 1].endswith("/" + name):
+                source = name.removesuffix(".o") + ".c"
+                require(any(arg == source or arg.endswith("/" + source) for arg in argv),
+                        "USER compile command has a different source: " + name)
+                commands[name].append(argv)
+    require(all(commands.values()), "missing actual USER target compile command")
+    return {"schema": "pw-user-driver-build/1", "runtime_validated": False,
+            "sources": {name: sha(work / "source" / name) for name in sources},
+            "objects": {name: sha(work / "build" / name) for name in objects},
+            "evidence": {name: sha(work / name) for name in evidence},
+            "compile_commands": commands}
+
+
+def check_user_driver_objects(work: Path, bindir: Path, commands) -> None:
+    for unit in USER_DRIVER_UNITS:
+        path = work / "build/dlls/win32u" / (unit + ".o")
+        value = data(path)
+        require(len(value) >= 64 and value[:7] == b"\x7fELF\x02\x01\x01" and
+                struct.unpack_from("<HHI", value, 16) == (1, 62, 1),
+                "USER target object is not AMD64 ELF64 relocatable: " + unit)
+        listing = commands.run(bindir / "llvm-readelf", "-h", "-s", "-W", path)
+        if unit == "ps5drv":
+            matches = [row.split() for row in listing.splitlines()]
+            require(any(len(row) >= 8 and row[3:5] == ["FUNC", "GLOBAL"] and
+                        row[6].isdigit() and int(row[6]) > 0 and row[7] == "ps5_install_user_driver"
+                        for row in matches), "PS5 USER driver branch was not compiled")
 
 
 def elf(path: Path, kind: int) -> tuple[bytes, list[tuple[int, int, int]]]:
@@ -153,6 +213,10 @@ def validate(work: Path, sdk: Path, foundation: Path, bindir: Path, output: Path
     entries = report["prx"]["modules"]
     require(set(entries) == set(MODULES), "missing or unexpected PRX module")
     commands = Commands(output)
+    if report.get("service_fixture", {}).get("enabled") is True:
+        require(report.get("user_driver_fixes") == user_driver_record(work),
+                "missing/changed USER driver build provenance")
+        check_user_driver_objects(work, bindir, commands)
     require(commands.run("git", "-C", foundation, "rev-parse", "HEAD").strip() == foundation_commit,
             "converter checkout is not pinned")
     require(commands.run("git", "-C", work / "source", "rev-parse", "HEAD").strip() == wine_commit,

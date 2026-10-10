@@ -6,6 +6,7 @@ import os
 import json
 import hashlib
 import re
+import shlex
 import subprocess
 import sys
 from unittest.mock import patch
@@ -179,6 +180,32 @@ def check_tls_reporting() -> None:
         assert result.returncode == 6
         assert "dnsapi_guard_error" in json.loads(report.read_text())
         missing_object.write_bytes(saved)
+        # Service builds retain the actual USER compilation inputs before
+        # inspecting the final PRX; a missing object must fail the producer.
+        from check_wine_prx_build import USER_DRIVER_UNITS, user_driver_record
+        lines = []
+        for unit in USER_DRIVER_UNITS:
+            source = f"dlls/win32u/{unit}.c"
+            target = f"dlls/win32u/{unit}.o"
+            write(base / "source" / source, "inert USER source")
+            write(build / target, "inert USER object identity")
+            lines.append(shlex.join(["/inert/prospero-clang", "-c", "../source/" + source, "-o", target]))
+        for name in ("ntuser_private.h", "win32u_private.h", "Makefile.in"):
+            write(base / "source/dlls/win32u" / name, "inert USER header")
+        write(base / "service-translation-units.log", "\n".join(lines) + "\n")
+        for name in ("user-driver-compiler", "user-driver-sdk-compiler"):
+            write(base / name, "inert compiler wrapper")
+        env["PW_SERVICE_FIXTURE"] = "1"
+        result = run()
+        assert result.returncode == 0, result.stderr
+        assert json.loads(report.read_text())["user_driver_fixes"] == user_driver_record(base)
+        for unit in USER_DRIVER_UNITS:
+            object_path = build / f"dlls/win32u/{unit}.o"
+            saved = object_path.read_bytes(); object_path.unlink()
+            result = run()
+            assert result.returncode == 7 and "user_driver_error" in json.loads(report.read_text())
+            object_path.write_bytes(saved)
+        env.pop("PW_SERVICE_FIXTURE")
         # ON requires actual staged PE metadata and records the native bytes.
         env["PW_PRIVATE_DISPATCH"] = "1"
         result = run()

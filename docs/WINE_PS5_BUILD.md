@@ -1477,3 +1477,23 @@ console, `access()` reported the uploaded PRX absent in both places, while
 `open()` succeeds, so the probe's presence check opens the file.
 Wine-level initialisation (`__wine_main`, the wineserver) is not part of
 this probe.
+
+## PS5 input queue re-arming
+
+Patch 0917 adapts upstream [#428](https://github.com/mpereiraesaa/prospero-win/commit/5c597f7ab61eac109f502b8b42e68f791944a542).
+A valid wake pipe counts as handled even when another GUI thread consumed its
+input event. This lets Wine clear and re-arm the driver queue. Existing bridge
+domain refusal, suppression and event batch limits are preserved; no event is
+invented and no child input transport is provided.
+
+The mandatory composed-source gate runs the exact driver and message-pump
+function bodies with inert boundaries, under strict compilation and UBSan.
+These are host controls. The experimental target gate separately compiles
+ps5drv.o, retains its real compile commands and compiler wrappers, and requires
+an AMD64 ELF object defining ps5_install_user_driver. That definition is inside
+the PS5 USER branch, so an empty object from a disabled driver cannot pass.
+The build report binds source, headers, object and evidence hashes; the bounded
+collector retains the small objects and compiler evidence before large inputs.
+The normal win32u link/conversion and package checks remain required. No new
+module, export or process ABI is introduced, and the original MSVC fixture is
+unchanged. Console input delivery remains unverified for this correction.
