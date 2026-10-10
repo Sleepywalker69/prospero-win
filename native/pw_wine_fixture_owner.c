@@ -603,8 +603,15 @@ static void start_generation(PwWineFixtureOwner *o,Generation *g)
     PwWineChildFrame ack;
     rc=pw_wine_child_wire_receive(&g->io,g->control_fd,PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE),&ack,&received,&g->wire);
     if(rc!=PW_WC_RECORD||received>=0){close_slot(o,&received);wire_failure(o,g);return;}
-    if(!pw_wine_child_wire_same_session(&g->session,&ack)||ack.sequence!=1||ack.kind!=PW_WC_BOOTSTRAP_ACK||ack.status){
+    if(!pw_wine_child_wire_same_session(&g->session,&ack)||ack.sequence!=1){
+        /* Do not attribute diagnostic payload from a different generation or
+         * process to this child, even when the frame itself decoded. */
+        record(o,"bootstrap_refused",g,ack.kind,ack.sequence,ack.status);
+        failure(o,API_HANDOFF,ack.status,0,0);atomic_store(&g->cleanup_requested,1);return;
+    }
+    if(ack.kind!=PW_WC_BOOTSTRAP_ACK||ack.status){
         record(o,"bootstrap_failure",g,ack.failure_api,ack.failure_raw,ack.native_error);
+        record(o,"bootstrap_failure_value",g,ack.returned_length,ack.returned_value,ack.errno_valid);
         failure(o,API_HANDOFF,ack.status,ack.errno_valid?ack.native_error:0,0);atomic_store(&g->cleanup_requested,1);return;
     }
     if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}

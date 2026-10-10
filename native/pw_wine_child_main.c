@@ -38,6 +38,21 @@ static atomic_uint socket_failure_attempted;
 static atomic_flag send_claim=ATOMIC_FLAG_INIT;
 static pthread_mutex_t log_lock=PTHREAD_MUTEX_INITIALIZER;
 static struct {void(*entry)(void*);void *arg;} thread_start;
+/* Only the pre-Wine main thread writes this snapshot. Copy errno at the failed
+ * native call, before observers, budget checks or once-only cleanup run. */
+static struct {
+    uint32_t api, auxiliary, errno_valid;
+    int32_t raw, error, detail;
+} bootstrap_failure;
+static int boot_failure(unsigned api,int32_t raw,int error,unsigned auxiliary,int32_t detail)
+{
+    if(!bootstrap_failure.api){
+        bootstrap_failure.api=api;bootstrap_failure.raw=raw;
+        bootstrap_failure.errno_valid=error>0;bootstrap_failure.error=error>0?error:0;
+        bootstrap_failure.auxiliary=auxiliary;bootstrap_failure.detail=detail;
+    }
+    return -1;
+}
 static int clock_ms(void *unused,uint64_t *out)
 {
     struct timespec t;(void)unused;
@@ -49,6 +64,10 @@ static int clock_ms(void *unused,uint64_t *out)
 }
 static int cancelled(void *unused){(void)unused;return atomic_load(&runtime_failure)!=0;}
 static int within_budget(void){unsigned n;return pw_native_child_remaining(&child_io,&n);}
+static int boot_budget(void)
+{
+    return within_budget()?boot_failure(PW_WC_DIAG_BUDGET,-1,0,0,0):0;
+}
 static int send_record(const PwWineChildFrame *f)
 {
     if(within_budget())return -1;
@@ -56,6 +75,24 @@ static int send_record(const PwWineChildFrame *f)
     int rc=pw_wine_child_wire_try_send(3,f,-1,&wire_result);
     atomic_flag_clear(&send_claim);
     if(!rc&&within_budget()){wire_result.delivery_uncertain=1;return -1;}
+    return rc;
+}
+static int send_bootstrap_failure(const PwWineChildFrame *f)
+{
+    /* A failed local logger must not hide a pre-Wine failure on fd3. This is
+     * one final nonblocking attempt, never a retry after transport ambiguity.
+     * Keep any other cancellation callback and the original clock history. */
+    if(!f||f->kind!=PW_WC_FAILURE||bootstrap.started||wire_result.status||wire_result.delivery_uncertain||
+       wire_result.ownership_uncertain||wire_result.cleanup_failed)return -1;
+    PwNativeChildIo io=child_io;unsigned left;
+    if(io.cancelled==cancelled)io.cancelled=NULL;
+    int rc=pw_native_child_remaining(&io,&left);
+    child_io.last_clock=io.last_clock;
+    if(rc||atomic_flag_test_and_set(&send_claim))return -1;
+    rc=pw_wine_child_wire_try_send(3,f,-1,&wire_result);
+    atomic_flag_clear(&send_claim);
+    if(!rc&&pw_native_child_remaining(&io,&left)){wire_result.delivery_uncertain=1;rc=-1;}
+    child_io.last_clock=io.last_clock;
     return rc;
 }
 static void socket_failure_sink(void *context,const PwWineFixtureSocketResult *failure)
@@ -80,41 +117,68 @@ static void socket_failure_sink(void *context,const PwWineFixtureSocketResult *f
 static int directory(void *unused,const char *path)
 {
     struct stat st;(void)unused;
-    if(within_budget()||stat(path,&st)||!S_ISDIR(st.st_mode))return -1;
-    return within_budget();
+    unsigned which=!strcmp(path,PW_WINE_CHILD_PREFIX)||!strcmp(path,PW_WINE_CHILD_BATTLENET_PREFIX)?
+                   PW_WC_DIRECTORY_PREFIX:PW_WC_DIRECTORY_CWD;
+    if(boot_budget())return -1;
+    errno=0;int rc=stat(path,&st),error=rc<0?errno:0;
+    if(rc)return boot_failure(PW_WC_DIAG_DIRECTORY_STAT,rc,error,which,0);
+    if(!S_ISDIR(st.st_mode))return boot_failure(PW_WC_DIAG_DIRECTORY_TYPE,0,0,which,0);
+    return boot_budget();
 }
 static int runtime(void *unused,const char *hash,char *out,size_t size)
 {
     static const char *const roots[]={PW_WINE_CHILD_RUNTIME,PW_WINE_CHILD_RUNTIME_ALIAS};
-    int found=0;(void)unused;
+    int found=0,first_open_raw=0,first_open_error=0;unsigned first_open_index=0;(void)unused;
     for(unsigned i=0;i<2;i++){
         char path[272],actual[65];struct stat before,after;
-        if(within_budget())return -1;
+        if(boot_budget())return -1;
         int n=snprintf(path,sizeof(path),"%s/ntdll.prx",roots[i]);
-        if(n<=0||(size_t)n>=sizeof(path))return -1;
-        int fd=open(path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
-        if(fd<0)continue;
+        if(n<=0||(size_t)n>=sizeof(path))return boot_failure(PW_WC_DIAG_RUNTIME_PATH,n,0,i,0);
+        errno=0;int fd=open(path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK),open_error=fd<0?errno:0;
+        if(fd<0){
+            /* An unreadable alias is permitted by the existing selection
+             * contract. Publish it only if neither candidate can be opened. */
+            if(!first_open_raw){first_open_raw=fd;first_open_error=open_error;first_open_index=i;}
+            continue;
+        }
         int error=0;
-        if(fstat(fd,&before)||!S_ISREG(before.st_mode)||before.st_size<=0||
-           (uint64_t)before.st_size>128u*1024u*1024u)error=1;
+        errno=0;int rc=fstat(fd,&before),native_error=rc<0?errno:0;
+        if(rc)error=boot_failure(PW_WC_DIAG_RUNTIME_STAT,rc,native_error,i,0);
+        else if(!S_ISREG(before.st_mode))error=boot_failure(PW_WC_DIAG_RUNTIME_TYPE,0,0,i,0);
+        else if(before.st_size<=0||(uint64_t)before.st_size>128u*1024u*1024u)
+            error=boot_failure(PW_WC_DIAG_RUNTIME_SIZE,0,0,i,0);
         PwWineChildHash state;pw_wine_child_hash_init(&state);uint64_t count=0;
         while(!error&&count<(uint64_t)before.st_size){unsigned char bytes[4096];
             size_t wanted=(uint64_t)before.st_size-count;if(wanted>sizeof(bytes))wanted=sizeof(bytes);
-            if(within_budget()){error=1;break;}
-            ssize_t got=read(fd,bytes,wanted);
-            if(got<=0||(size_t)got>wanted||pw_wine_child_hash_update(&state,bytes,(size_t)got)){error=1;break;}
-            count+=(uint64_t)got;if(within_budget())error=1;
+            if(boot_budget()){error=-1;break;}
+            errno=0;ssize_t got=read(fd,bytes,wanted);native_error=got<0?errno:0;
+            if(got<=0||(size_t)got>wanted){error=boot_failure(PW_WC_DIAG_RUNTIME_READ,(int32_t)got,native_error,i,0);break;}
+            if(pw_wine_child_hash_update(&state,bytes,(size_t)got)){
+                error=boot_failure(PW_WC_DIAG_RUNTIME_HASH,-1,0,i,0);break;}
+            count+=(uint64_t)got;if(boot_budget())error=-1;
         }
         if(!error){unsigned char extra;
-            if(read(fd,&extra,1)!=0||fstat(fd,&after)||before.st_dev!=after.st_dev||
-               before.st_ino!=after.st_ino||before.st_size!=after.st_size)error=1;}
-        if(!error){pw_wine_child_hash_final(&state,actual);if(strcmp(actual,hash))error=1;}
-        /* close is once-only; any failure keeps this attempt failed. */
-        if(close(fd))error=1;
-        if(within_budget()||error)return -1;
-        if(!found){if(strlen(roots[i])>=size)return -1;strcpy(out,roots[i]);found=1;}
+            errno=0;ssize_t got=read(fd,&extra,1);native_error=got<0?errno:0;
+            if(got!=0)error=boot_failure(PW_WC_DIAG_RUNTIME_EXTRA_READ,(int32_t)got,native_error,i,0);
+            if(!error){
+                errno=0;rc=fstat(fd,&after);native_error=rc<0?errno:0;
+                if(rc)error=boot_failure(PW_WC_DIAG_RUNTIME_STAT,rc,native_error,i,0);
+                else if(before.st_dev!=after.st_dev||before.st_ino!=after.st_ino||before.st_size!=after.st_size)
+                    error=boot_failure(PW_WC_DIAG_RUNTIME_CHANGED,0,0,i,0);
+            }
+        }
+        if(!error){pw_wine_child_hash_final(&state,actual);
+            if(strcmp(actual,hash))error=boot_failure(PW_WC_DIAG_RUNTIME_HASH,-1,0,i,0);}
+        /* Close once; a later close failure cannot replace the first error. */
+        errno=0;rc=close(fd);native_error=rc<0?errno:0;
+        if(rc)error=boot_failure(PW_WC_DIAG_RUNTIME_CLOSE,rc,native_error,i,0);
+        if(boot_budget()||error)return -1;
+        if(!found){
+            if(strlen(roots[i])>=size)return boot_failure(PW_WC_DIAG_RUNTIME_PATH,-1,0,i,0);
+            strcpy(out,roots[i]);found=1;
+        }
     }
-    return found?0:-1;
+    return found?0:boot_failure(PW_WC_DIAG_RUNTIME_OPEN,first_open_raw,first_open_error,first_open_index,0);
 }
 static int set_env(const char *name,const char *value){return setenv(name,value,1);}
 static void add_log_loss(atomic_ullong *counter,unsigned long long amount)
@@ -180,6 +244,7 @@ static void output(const char *text,size_t size)
 static void record(void *unused,unsigned stage,int status)
 {
     char line[160];(void)unused;
+    if(stage==PW_WCB_PATHS&&status)boot_failure(PW_WC_DIAG_PATHS_CONTROL,status,0,0,0);
     int n=snprintf(line,sizeof(line),"PW_WINE_CHILD_BOOT stage=%u status=%d\n",stage,status);
     if(n>0&&(size_t)n<sizeof(line))output(line,(size_t)n);
 }
@@ -203,24 +268,35 @@ static int start_thread(void(*entry)(void*),void *arg,size_t stack)
     if(destroyed)atomic_store(&runtime_failure,3);
     return 0;
 }
+/* Diagnostic only, after a failed log open. No helper/grant, directory
+ * creation, alternate path, retry or wait. Preserve the primary open error. */
+static void observe_data(void)
+{
+    if(within_budget()){bootstrap_failure.auxiliary=PW_WC_DATA_BUDGET;return;}
+    struct stat st;errno=0;int rc=stat("/data",&st),error=rc<0?errno:0;
+    if(rc<0){bootstrap_failure.auxiliary=PW_WC_DATA_STAT_FAILED;bootstrap_failure.detail=error>0?error:0;}
+    else if(rc){bootstrap_failure.auxiliary=PW_WC_DATA_UNEXPECTED;bootstrap_failure.detail=rc;}
+    else bootstrap_failure.auxiliary=S_ISDIR(st.st_mode)?PW_WC_DATA_DIRECTORY:PW_WC_DATA_NOT_DIRECTORY;
+}
 static int open_log(const PwWineChildFrame *session)
 {
     char path[256],line[256];
     int n=snprintf(path,sizeof(path),"/data/prospero-win/logs/wine-child-%s-%u-%llu.log",
                    PW_WINE_CHILD_BUILD_ID,session->child_pid,(unsigned long long)session->generation);
-    if(n<=0||(size_t)n>=sizeof(path))return -1;
-    log_fd=open(path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK,0600);
-    if(log_fd<0)return -1;
+    if(n<=0||(size_t)n>=sizeof(path))return boot_failure(PW_WC_DIAG_LOG_PATH,n,0,0,0);
+    errno=0;log_fd=open(path,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK,0600);
+    int error=log_fd<0?errno:0;
+    if(log_fd<0){boot_failure(PW_WC_DIAG_LOG_OPEN,log_fd,error,0,0);observe_data();return -1;}
     n=snprintf(line,sizeof(line),"PW_WINE_CHILD build=%s generation=%llu native_pid=%u native_ppid=%u wine_pid=%u wine_tid=%u profile=%u machine=%04x\n",
        PW_WINE_CHILD_BUILD_ID,(unsigned long long)session->generation,session->child_pid,
        session->child_ppid,session->wine_pid,session->wine_tid,session->profile,session->machine);
-    if(n<=0||(size_t)n>=sizeof(line))return -1;
+    if(n<=0||(size_t)n>=sizeof(line))return boot_failure(PW_WC_DIAG_LOG_HEADER,n,0,0,0);
     size_t before=log_bytes;output(line,(size_t)n);
-    if(log_bytes-before!=(size_t)n)return -1; /* the initial header is mandatory */
+    if(log_bytes-before!=(size_t)n)return boot_failure(PW_WC_DIAG_LOG_HEADER,-1,0,0,0); /* mandatory header */
     if(session->profile==PW_WC_PROFILE_BATTLENET){
         static const char policy[]="PW_WINE_CHILD_LOG completeness=not_guaranteed quota=65536 loss_policy=nonfatal snapshot_counters=lower_bounds\n";
         before=log_bytes;output(policy,sizeof(policy)-1);
-        if(log_bytes-before!=sizeof(policy)-1)return -1;
+        if(log_bytes-before!=sizeof(policy)-1)return boot_failure(PW_WC_DIAG_LOG_HEADER,-1,0,0,0);
     }
     return atomic_load(&runtime_failure)?-1:0;
 }
@@ -249,8 +325,10 @@ static int run_child(void)
                                              PW_WINE_CHILD_PRIVATE_DISPATCH_ABI,session->profile,session->machine,&ops);
     PwWineChildFrame reply=*session;
     if(rc){reply.kind=PW_WC_FAILURE;reply.status=-(int)(bootstrap.stage?bootstrap.stage:1);
-        reply.native_error=0; /* generic stage failures do not invent errno */
-        (void)send_record(&reply);
+        reply.failure_api=bootstrap_failure.api;reply.failure_raw=bootstrap_failure.raw;
+        reply.native_error=bootstrap_failure.error;reply.errno_valid=bootstrap_failure.errno_valid;
+        reply.returned_length=bootstrap_failure.auxiliary;reply.returned_value=bootstrap_failure.detail;
+        (void)send_bootstrap_failure(&reply);
         pw_wine_child_wire_close(&fd,&wire_result);return 14;}
     reply.kind=PW_WC_BOOTSTRAP_ACK;
     if(send_record(&reply)){
