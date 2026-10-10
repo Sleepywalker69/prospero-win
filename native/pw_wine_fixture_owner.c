@@ -30,7 +30,7 @@ _Static_assert(sizeof(ServiceEntry)==36 && sizeof(ServiceOptions)==72,"service A
 static const char *const helpers[]={"/app0/native-wine-child.self","/mnt/sandbox/PPSA99995_000/app0/native-wine-child.self"};
 
 typedef struct Generation {
-    atomic_uint state,released,startup_done,startup_success,cleanup_requested,identity_ready;
+    atomic_uint state,released,startup_done,startup_success,cleanup_requested,identity_ready,launch_failed;
     atomic_uint startup_status,pending_signal,signal_sequence,signal_ack,signal_failure;
     atomic_flag send_claim;
     uint64_t generation,started,startup_end,end,last_clock,next_list;
@@ -236,7 +236,9 @@ static uint32_t spawn(void *context,uint64_t id,int borrowed,uint32_t pid,uint32
     atomic_store_explicit(&g->state,G_LAUNCH,memory_order_release);
     while(atomic_load_explicit(&g->state,memory_order_acquire)!=G_RUNNING){
         if(atomic_load(&o->blocked)||pause_client(o,g->startup_end,&last)){
-            atomic_store(&g->cleanup_requested,1);return atomic_load(&o->cancelled)?WF_CANCELLED:WF_TIMEOUT;
+            atomic_store(&g->cleanup_requested,1);
+            if(atomic_load(&o->cancelled))return WF_CANCELLED;
+            return atomic_load_explicit(&g->launch_failed,memory_order_acquire)?WF_BAD:WF_TIMEOUT;
         }
     }
     return remaining(o,id)?WF_OK:WF_TIMEOUT;
@@ -562,8 +564,13 @@ static void start_generation(PwWineFixtureOwner *o,Generation *g)
     record(o,"launch_possible",g,o->app_id,o->helper_index,0);
     if(budget(o,g,1)){g->launch_possible=0;retire(o,g);return;}
     rc=sceSystemServiceAddLocalProcess(o->app_id,helpers[o->helper_index],g->arguments,&g->options);
-    record(o,"launch_return",g,rc,o->app_id,0);close_slot(o,&g->passed_fd);
-    if(rc<=0){uncertain(o,g,API_ADD,rc,0);close_slot(o,&g->stream_fd);close_control(o,g);return;}
+    record(o,"launch_return",g,rc,o->app_id,0);
+    if(rc<=0){
+        atomic_store_explicit(&g->launch_failed,1,memory_order_release);
+        uncertain(o,g,API_ADD,rc,0);close_slot(o,&g->passed_fd);
+        close_slot(o,&g->stream_fd);close_control(o,g);return;
+    }
+    close_slot(o,&g->passed_fd);
     for(unsigned i=0;i<g->baseline_count;i++)if(g->baseline[i]==rc){
         uncertain(o,g,API_ADD,rc,0);close_slot(o,&g->stream_fd);close_control(o,g);return;
     }
