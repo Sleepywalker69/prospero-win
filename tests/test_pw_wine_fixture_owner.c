@@ -75,6 +75,7 @@ static struct {
     int64_t first_api,first_raw,first_errno;
     int extra_right,wire_uncertain,auto_present,prepare_cancel,prepare_expire;
     int record_action,step_result,root_during_send,wire_cancelled;
+    int add_cancel,add_partial_failure;
     const char *record_event;
     PwWineChildFrame sent;
 } m;
@@ -151,6 +152,9 @@ static int mock_nanosleep(const struct timespec *delay,struct timespec *out)
     CHECK(delay->tv_sec==0&&delay->tv_nsec==10000000&&!out);m.sleeps++;m.now+=10;
     if(m.sleep_action==1)pw_wine_fixture_owner_pump(&owner);
     else if(m.sleep_action==2)atomic_store(&owner.generations[0].state,G_RETIRED);
+    else if(m.sleep_action==3){m.now=owner.generations[0].startup_end;pw_wine_fixture_owner_pump(&owner);}
+    else if(m.sleep_action==4)m.now=owner.generations[0].startup_end;
+    else if(m.sleep_action==5){pw_wine_fixture_owner_cancel(&owner);pw_wine_fixture_owner_pump(&owner);}
     else m.cancelled=1;
     return 0;
 }
@@ -171,7 +175,15 @@ int sceSystemServiceAddLocalProcess(int app,const char *path,const char *const *
     const ServiceOptions *o=opaque;CHECK(o->size==72&&o->fd==81&&o->crash==0&&o->other[0]==UINT_MAX);
     uint64_t preload;memcpy(&preload,&o->other[3],8);CHECK(preload==UINT64_C(0x8000000000000002));
     CHECK(owner.generations[0].launch_possible&&atomic_load(&owner.generations[0].state)==G_STARTING);
-    m.adds++;return m.add_result;
+    m.adds++;
+    if(m.add_cancel)pw_wine_fixture_owner_cancel(&owner);
+    if(m.add_partial_failure){
+        /* Model an unrelated failure publisher paused at its claimed state.
+         * These plain fields deliberately do not identify the service failure. */
+        owner.failure_api=API_CLOCK;owner.failure_raw=123;owner.failure_errno=ERANGE;
+        atomic_store(&owner.failure_state,1);
+    }
+    return m.add_result;
 }
 int sceSystemServiceKillLocalProcess(int app,int id)
 {CHECK(app==8216&&id==900);m.kills++;return m.kill_result;}
@@ -530,12 +542,97 @@ static void first_failure_tests(void)
     report_root_exit(&owner,77);pw_wine_fixture_owner_pump(&owner);
     CHECK(m.first_failures==1&&m.first_index<m.release_index&&pw_wine_fixture_owner_release_ready(&owner));
 }
+
+/* These exercise the actual provider.spawn wait and actual supervisor pump.
+ * Service/OS calls remain deterministic mocks, never console execution. */
+static void launch_failure_tests(int close_fails)
+{
+    const int errors[]={-2147352574,-7,0};
+    for(unsigned profile=1;profile<=2;profile++)for(unsigned i=0;i<sizeof(errors)/sizeof(errors[0]);i++){
+        Generation *g=bound(profile);m.sleep_action=1;m.add_result=errors[i];
+        m.close_error=close_fails?-1:0;
+        uint64_t began=m.now;
+        uint32_t status=provider.spawn(&owner,g->generation,70,46,47);
+        printf("Add raw=%d close_error=%d status=%08x elapsed=%llu first_api=%u first_raw=%lld uncertain=%u\n",
+               errors[i],m.close_error,status,(unsigned long long)(m.now-began),owner.failure_api,
+               (long long)owner.failure_raw,atomic_load(&owner.uncertain));fflush(stdout);
+        CHECK(m.now<g->startup_end&&m.now-began==10);
+        CHECK(m.dups==1&&m.pairs==1&&m.adds==1&&!m.sends&&!m.receives&&!m.kills);
+        CHECK(atomic_load(&g->state)==G_UNCERTAIN&&g->launch_possible&&!g->service_id);
+        CHECK(atomic_load(&owner.blocked)&&atomic_load(&owner.uncertain));
+        CHECK(g->stream_fd==-1&&g->passed_fd==-1&&g->control_fd==-1);
+        CHECK(m.closes[71]==1&&m.closes[80]==1&&m.closes[81]==1&&!m.closes[70]);
+        CHECK(atomic_load(&owner.failure_state)==2);
+        /* Check the causal error before status so the combined failure has its own red. */
+        CHECK(owner.failure_api==API_ADD&&owner.failure_raw==errors[i]&&!owner.failure_errno);
+        CHECK(status==WF_BAD);
+        CHECK(atomic_load(&g->cleanup_requested)&&!atomic_load(&g->startup_done));
+        CHECK(m.first_failures==1&&m.first_api==API_ADD&&m.first_raw==errors[i]&&!m.first_errno);
+        provider.startup_result(&owner,g->generation,0,status);
+        CHECK(atomic_load(&g->startup_done)==2&&!atomic_load(&g->startup_success)&&atomic_load(&g->startup_status)==status);
+        CHECK(owner.failure_api==API_ADD&&owner.failure_raw==errors[i]);
+        unsigned lists=m.lists;
+        for(unsigned n=0;n<3;n++)pw_wine_fixture_owner_pump(&owner);
+        CHECK(provider.spawn(&owner,g->generation,70,46,47)==WF_BAD);
+        uint64_t next=UINT64_MAX;
+        CHECK(provider.admit(&owner,44,48,PW_WINE_FIXTURE_AMD64,
+              profile==1?owner.config.child_unix_path:"/data/prospero-win/prefixes/battlenet-experimental-v1/drive_c/Agent.exe",&next)!=WF_OK);
+        CHECK(next==UINT64_MAX&&atomic_load(&owner.count)==1);
+        CHECK(!report_root_exit(&owner,status));pw_wine_fixture_owner_pump(&owner);
+        CHECK(!pw_wine_fixture_owner_release_ready(&owner)&&atomic_load(&owner.uncertain));
+        CHECK(m.dups==1&&m.pairs==1&&m.adds==1&&!m.kills&&m.lists==lists);
+        CHECK(m.closes[71]==1&&m.closes[80]==1&&m.closes[81]==1&&!m.closes[70]);
+        CHECK(m.first_failures==1);
+    }
+}
+static void launch_wait_status_tests(void)
+{
+    for(unsigned action=3;action<=5;action++)for(unsigned profile=1;profile<=2;profile++){
+        Generation *g=bound(profile);m.sleep_action=(int)action;
+        uint32_t status=provider.spawn(&owner,g->generation,70,46,47);
+        uint32_t expected=action==5?WF_CANCELLED:WF_TIMEOUT;
+        printf("No launch: action=%u status=%08x expected=%08x first_api=%u now=%llu endpoint=%llu\n",
+               action,status,expected,owner.failure_api,(unsigned long long)m.now,
+               (unsigned long long)g->startup_end);fflush(stdout);
+        CHECK(status==expected);
+        CHECK(atomic_load(&owner.failure_state)==2&&owner.failure_api==API_CLOCK);
+        CHECK(!atomic_load(&owner.uncertain)&&!g->launch_possible&&!g->service_id);
+        CHECK(m.dups==1&&!m.adds&&!m.pairs&&!m.sends&&!m.receives&&!m.kills);
+        CHECK(atomic_load(&g->cleanup_requested));
+        pw_wine_fixture_owner_pump(&owner);
+        CHECK(g->stream_fd==-1&&m.closes[71]==1&&!m.closes[70]);
+        CHECK(atomic_load(&g->state)==G_RETIRED);
+        CHECK(provider.spawn(&owner,g->generation,70,46,47)!=WF_OK&&!m.adds&&m.dups==1);
+    }
+}
+static void launch_cancel_publication_tests(void)
+{
+    for(unsigned cancelled=0;cancelled<=1;cancelled++)for(unsigned partial=0;partial<=1;partial++){
+        Generation *g=bound(1);m.sleep_action=1;m.add_result=-2147352574;
+        m.add_cancel=(int)cancelled;m.add_partial_failure=(int)partial;
+        uint32_t status=provider.spawn(&owner,g->generation,70,46,47);
+        printf("Add publication: partial=%u cancel=%u status=%08x failure_state=%u\n",
+               partial,cancelled,status,atomic_load(&owner.failure_state));fflush(stdout);
+        CHECK(status==(cancelled?WF_CANCELLED:WF_BAD));
+        CHECK(atomic_load(&owner.failure_state)==(partial?1u:2u));
+        CHECK(m.adds==1&&!m.sends&&!m.receives&&!m.kills&&atomic_load(&owner.uncertain));
+        CHECK(m.closes[71]==1&&m.closes[80]==1&&m.closes[81]==1&&!m.closes[70]);
+        CHECK(atomic_load(&g->state)==G_UNCERTAIN&&!g->service_id&&g->launch_possible);
+        if(partial){CHECK(!m.first_failures);CHECK(owner.failure_api==API_CLOCK&&owner.failure_raw==123);}
+        else CHECK(owner.failure_api==API_ADD&&owner.failure_raw==m.add_result);
+    }
+}
+
 int main(int argc,char **argv)
 {
+    if(argc==2&&!strcmp(argv[1],"launch-failure")){launch_failure_tests(0);return 0;}
+    if(argc==2&&!strcmp(argv[1],"launch-close-failure")){launch_failure_tests(1);return 0;}
+    if(argc==2&&!strcmp(argv[1],"launch-wait-status")){launch_wait_status_tests();return 0;}
+    if(argc==2&&!strcmp(argv[1],"launch-publication")){launch_cancel_publication_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"retained-handle")){release_deadlock();return 0;}
     if(argc==2&&!strcmp(argv[1],"retired-missing")){retired_missing_result();return 0;}
     if(argc==2&&!strcmp(argv[1],"wire-root-closure")){wire_root_closure();return 0;}
     if(argc==2&&!strcmp(argv[1],"seal-race")){seal_race_test();return 0;}
-    init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();
+    init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();
     printf("Actual Wine owner with mocked native/transport boundaries: %u checks passed\n",checks);return 0;
 }

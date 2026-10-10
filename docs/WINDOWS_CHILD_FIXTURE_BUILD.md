@@ -217,3 +217,15 @@ service call returns, nor does it authorize release of uncertain ownership.
 settled failed run; it is not the fixture's `automated_pass` or a claim that the
 installer works. Child logs and the actual lowercase
 `/data/prospero-win/logs/session-N.log` should be inspected before sharing.
+
+
+## Native launch failure reporting
+
+A nonpositive `sceSystemServiceAddLocalProcess` result is a failed dispatch,
+not evidence that the startup deadline expired. The owner preserves the raw
+platform result before closing its passed descriptor. The Windows caller
+receives a generic unsuccessful status; an observed cancellation still takes
+priority and a genuine deadline without a failed dispatch remains a timeout.
+The first-failure record remains first-publisher-wins across concurrent failures.
+A rejected call does not prove that no native resource was created: uncertainty
+still blocks replacement and there is no automatic second launch.
