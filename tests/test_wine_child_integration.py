@@ -143,14 +143,17 @@ class WineChildIntegration(unittest.TestCase):
             self.assertNotIn('continue-on-error', step)
             self.assertNotIn('|| true', step['run'])
 
-    def test_fixture_provenance_preflight_runs_before_expensive_builds(self):
+    def test_fixture_provenance_preflight_runs_before_first_consumption(self):
         workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
                              Loader=yaml.BaseLoader)
         steps = workflow['jobs']['matched-runtime']['steps']
         index = next(i for i, step in enumerate(steps) if step.get('id') == 'fixture-preflight')
         self.assertTrue(any(step.get('uses', '').startswith('actions/download-artifact@') for step in steps[:index]))
-        self.assertFalse(any('apt-get' in step.get('run', '') or 'build_wine' in step.get('run', '')
-                             for step in steps[:index]))
+        consumers = [i for i, step in enumerate(steps)
+                     if '--fixture ' in step.get('run', '') or
+                     'PW_WINDOWS_CHILD_FIXTURE_DIR' in step.get('env', {})]
+        self.assertTrue(consumers)
+        self.assertTrue(all(index < i for i in consumers))
         self.assertNotIn('if', steps[index])
         project = {name: subprocess.check_output(['git', 'rev-parse', value], cwd=ROOT, text=True).strip()
                    for name, value in [('commit', 'HEAD'), ('tree', 'HEAD^{tree}')]}
@@ -167,6 +170,7 @@ class WineChildIntegration(unittest.TestCase):
             metadata = {'schema': 'pw-original-windows-child-msvc/1', 'project': project, 'architecture': 'x64',
                 'compiler': {'name': 'MSVC cl.exe', 'file_version': 'synthetic', 'sha256': 'a'*64},
                 'reference': {'exit': 0, 'deadline_seconds': 45},
+                'run_id': '123456', 'run_attempt': '2',
                 'files': {name: {'bytes': len(value), 'sha256': sha(value)} for name in ('parent.exe', 'child.exe')},
                 'source_sha256': sha((ROOT / 'tests/fixtures/windows_child_process.c').read_bytes()),
                 'recipe_sha256': sha((ROOT / 'tools/build_windows_child_fixture.ps1').read_bytes())}
@@ -175,7 +179,8 @@ class WineChildIntegration(unittest.TestCase):
                 if changed: record[changed] = '0'*64
                 (pair / 'fixture-source.json').write_text(json.dumps(record))
                 result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', steps[index]['run']],
-                    cwd=ROOT, env=dict(os.environ, RUNNER_TEMP=str(temp)), capture_output=True, text=True, timeout=10)
+                    cwd=ROOT, env=dict(os.environ, RUNNER_TEMP=str(temp), GITHUB_RUN_ID='123456',
+                                          GITHUB_RUN_ATTEMPT='2'), capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode == 0, changed is None, result.stderr)
                 if changed: self.assertIn('fixture input bytes differ:', result.stderr)
             self.assertTrue((temp / 'fixture-evidence/fixture-preflight.json').is_file())

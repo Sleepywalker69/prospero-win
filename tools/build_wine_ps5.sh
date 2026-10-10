@@ -336,9 +336,21 @@ fi
 if [ -n "$ps5opengl_sdk" ]; then opengl_cflags="$opengl_cflags -DWINE_PS5_OPENGL"; fi
 
 # Reconfigure whenever the patches, staged Vulkan sources or arguments change.
+# Optional explicit compiler launcher supplied by the compiler-only workflow cache.
+# Direct adapter/TLS compilation continues to use the original SDK tool.
+wine_cc=${PW_WINE_CACHED_CC:-$sdk/bin/prospero-clang}
+if [ -n "${PW_WINE_CACHED_CC:-}" ]; then
+    case "$wine_cc" in /*) ;; *) fail "Wine compiler launcher must be absolute" ;; esac
+    [ -x "$wine_cc" ] || fail "Wine compiler launcher is not executable"
+fi
+
 stamp=$(
     { printf '%s\n' "$WINE_COMMIT" "$CONFIGURE_ARGS" "$sdk" "$FREETYPE_SHA256" \
         "$ps5opengl_sdk" "$opengl_cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" "$tls_stamp"
+      if [ -n "${PW_WINE_CACHED_CC:-}" ]; then
+          printf '%s\n' "$wine_cc" "${i386_CC:-}" "${x86_64_CC:-}"
+          cat "$wine_cc"
+      fi
       [ "$private_dispatch" = 0 ] || printf '%s\n' "private-dispatch-abi=1" "private-dispatch-wow64-abi=1" "$x86_64_CFLAGS" "$i386_CFLAGS"
       if [ "$service_fixture" = 1 ]; then
           printf '%s\n' "service-fixture-abi=1"
@@ -354,7 +366,7 @@ if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)"
     # shellcheck disable=SC2086
     # FreeType is found by its flags; its soname is the name Wine dlopens,
     # which pw_wine_dl turns into libfreetype.prx beside ntdll.prx.
-    (cd "$build" && "$tree/configure" $CONFIGURE_ARGS CC="$sdk/bin/prospero-clang" \
+    (cd "$build" && "$tree/configure" $CONFIGURE_ARGS CC="$wine_cc" \
         CFLAGS="$opengl_cflags" \
         FREETYPE_CFLAGS="-I$ft/src/include" FREETYPE_LIBS="$ft/libfreetype.a" \
         ac_cv_lib_soname_freetype=libfreetype.so ac_cv_lib_soname_vulkan=libvulkan.so \
