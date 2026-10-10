@@ -6,19 +6,25 @@
 #include <string.h>
 #include "../wine/ps5/pw_wine_fixture_provider.h"
 
-static unsigned checks, publication_checks, reentrant;
+static unsigned checks, publication_checks, role_checks, table_checks, publication_phase, reentrant;
 static PwWineFixtureProvider candidate;
-static void publication_hook(void);
+static void publication_hook(atomic_uint *object);
 static int compare_and_check(atomic_uint *object, unsigned *expected, unsigned desired,
                              memory_order success, memory_order failure)
 {
     int result = atomic_compare_exchange_strong_explicit(object, expected, desired, success, failure);
-    if (result) publication_hook();
+    if (result) publication_hook(object);
     return result;
 }
+/* Both standard forms must be intercepted explicitly. GCC expands the plain
+ * form through the explicit macro; Clang can call its builtin directly. */
+#undef atomic_compare_exchange_strong
 #undef atomic_compare_exchange_strong_explicit
+#define atomic_compare_exchange_strong(p,e,n) \
+    compare_and_check(p,e,n,memory_order_seq_cst,memory_order_seq_cst)
 #define atomic_compare_exchange_strong_explicit compare_and_check
 #include "../wine/ps5/pw_wine_fixture_provider.c"
+#undef atomic_compare_exchange_strong
 #undef atomic_compare_exchange_strong_explicit
 
 #define CHECK(x) do { ++checks; assert(x); } while (0)
@@ -44,13 +50,23 @@ static void reset(void)
     /* Independent included-C cases reset test-local immutable role state. */
     atomic_init(&process_role,0);atomic_init(&creation_ready,0);atomic_init(&child_ready,0);
     memset(&creation_provider,0,sizeof(creation_provider));memset(&creation_child,0,sizeof(creation_child));
-    atomic_init(&ready, 0); memset(&installed, 0, sizeof(installed)); reentrant=0;
+    atomic_init(&ready, 0); memset(&installed, 0, sizeof(installed)); reentrant=0; publication_phase=0;
     candidate=(PwWineFixtureProvider){PW_WINE_FIXTURE_ABI,sizeof(candidate),&context,
         admit,bind_process,release_process,spawn,remaining,startup_result,signal_submit,state,root_exit,root_detached};
 }
-static void publication_hook(void)
+static void publication_hook(atomic_uint *object)
 {
     ++publication_checks;
+    CHECK(object==&process_role || object==&ready);
+    if (object==&process_role) {
+        ++role_checks;
+        CHECK(publication_phase==0); publication_phase=1;
+        CHECK(atomic_load(&process_role)==1); CHECK(atomic_load(&ready)==0);
+    } else {
+        ++table_checks;
+        CHECK(publication_phase==1); publication_phase=2;
+        CHECK(atomic_load(&ready)==1);
+    }
     CHECK(pw_wine_fixture_get()==NULL);
     if (!reentrant) {
         reentrant=1;
@@ -73,7 +89,8 @@ int main(void)
         case 11:bad.signal=NULL;break;case 12:bad.process_state=NULL;break;case 13:bad.root_exit=NULL;break;default:bad.root_detached=NULL;break;
         }
         CHECK(pw_wine_fixture_install(&bad)==-1);CHECK(!pw_wine_fixture_get());
-        CHECK(!atomic_load(&ready));CHECK(!pw_wine_fixture_install(&candidate));
+        CHECK(!atomic_load(&ready));CHECK(publication_phase==0);
+        CHECK(!pw_wine_fixture_install(&candidate));CHECK(publication_phase==2);
         const PwWineFixtureProvider *p=pw_wine_fixture_get();CHECK(p && p!=&candidate);
         CHECK(!memcmp(p,&candidate,sizeof(candidate)));
         CHECK(pw_wine_fixture_install(&candidate)==-1);
@@ -83,8 +100,9 @@ int main(void)
         CHECK(pw_wine_fixture_install(&candidate)==-1);CHECK(pw_wine_fixture_get()==p);
     }
     reset();CHECK(pw_wineserver_fixture_install(&candidate)==0);CHECK(pw_wine_fixture_get()!=NULL);
-    /* Each installation now publishes its exclusive role, then its table. */
+    /* Every installation observes the role claim and incomplete table once. */
     CHECK(publication_checks==32);
+    CHECK(role_checks==16);CHECK(table_checks==16);CHECK(publication_phase==2);
     const PwWineFixtureProvider *p=pw_wine_fixture_get();
     CHECK(p->root_exit(p->context,UINT32_C(0x80000100))==UINT32_C(0x80000100));
     printf("fixture provider installer: %u checks passed; incomplete publication/rebind/caller mutation rejected\n",checks);
