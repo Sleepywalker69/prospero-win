@@ -2,6 +2,8 @@
 name: Matched original Windows child fixture
 on:
   workflow_dispatch:
+  push:
+    branches: [perf/windows-child-incremental-cache]
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 permissions:
@@ -16,7 +18,12 @@ jobs:
   original-x64-reference:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event.pull_request.head.repo.full_name == github.repository &&
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+           github.event.deleted == false) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
     runs-on: windows-2022
     timeout-minutes: 15
@@ -73,7 +80,12 @@ jobs:
   matched-runtime:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event.pull_request.head.repo.full_name == github.repository &&
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+           github.event.deleted == false) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
     permissions:
       contents: read
@@ -221,6 +233,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/ccache-host
           key: ${{ steps.host-cache-key.outputs.key }}
+          restore-keys: ${{ steps.host-cache-key.outputs.restore-prefix }}
       - name: Build only matching host tools for early target checks
         env:
           PW_CACHE_RESTORE_HIT: ${{ steps.host-cache.outputs.cache-hit }}
@@ -263,6 +276,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/ccache-ps5
           key: ${{ steps.ps5-cache-key.outputs.key }}
+          restore-keys: ${{ steps.ps5-cache-key.outputs.restore-prefix }}
       - name: Measure the actual SDK compiler cache with original compile-only input
         run: |
           python3 tools/wine_compile_cache.py smoke --state "$RUNNER_TEMP/fixture-evidence/ccache-ps5" \

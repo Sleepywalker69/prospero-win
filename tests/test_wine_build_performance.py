@@ -5,12 +5,14 @@
 No Wine, PE, SDK payload, or native i386 program is executed by this suite.
 An Actions cache restore is not compiler-cache hit evidence.
 """
+import ast
 import copy
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -34,6 +36,40 @@ def step_by_id(name):
     if len(matches) != 1:
         raise AssertionError('expected one actual workflow step: ' + name)
     return matches[0]
+
+
+def actual_job_gate(expression, context):
+    """Evaluate only the gate's bounded boolean grammar over original case data.
+
+    This consumes the actual YAML expression, not a second admission function.
+    It does not claim to emulate the complete GitHub expression language.
+    """
+    if not expression.strip().startswith('${{') or not expression.strip().endswith('}}'):
+        raise AssertionError('job gate is not an Actions expression')
+    value = expression.strip()[3:-2]
+    label_call = "contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')"
+    value = value.replace(label_call, repr('build-windows-child-fixture' in context['labels']))
+    for name in sorted((key for key in context if key != 'labels'), key=len, reverse=True):
+        value = value.replace(name, repr(context[name]))
+    value = value.replace('&&', ' and ').replace('||', ' or ')
+    value = re.sub(r'\bfalse\b', 'False', value)
+    value = re.sub(r'\btrue\b', 'True', value)
+
+    def visit(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bool)):
+            return node.value
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
+            values = [visit(item) for item in node.values]
+            return all(values) if isinstance(node.op, ast.And) else any(values)
+        if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators) == 1:
+            left, right = visit(node.left), visit(node.comparators[0])
+            if isinstance(node.ops[0], ast.Eq):
+                return left == right
+            if isinstance(node.ops[0], ast.NotEq):
+                return left != right
+        raise AssertionError('unsupported job-gate grammar: ' + ast.dump(node))
+
+    return visit(ast.parse('(' + value.strip() + ')', mode='eval').body)
 
 
 class FixturePreflightControls(unittest.TestCase):
@@ -121,6 +157,57 @@ class FixturePreflightControls(unittest.TestCase):
 
 class WorkflowPerformanceContracts(unittest.TestCase):
     """Static Actions wiring checks; these do not execute hosted jobs."""
+
+    def test_exact_branch_seed_trigger_structure_and_permissions(self):
+        actual = workflow()
+        self.assertEqual(set(actual['on']), {'workflow_dispatch', 'push', 'pull_request'})
+        self.assertEqual(actual['on']['push'], {'branches': ['perf/windows-child-incremental-cache']})
+        self.assertEqual(actual['on']['pull_request'], {'types': ['opened', 'synchronize', 'reopened', 'labeled']})
+        self.assertEqual(actual['permissions'], {'contents': 'read'})
+        self.assertEqual(actual['jobs']['matched-runtime']['permissions'],
+                         {'contents': 'read', 'actions': 'read'})
+        self.assertNotIn('permissions', actual['jobs']['original-x64-reference'])
+        self.assertEqual(actual['concurrency'],
+                         {'group': 'windows-child-fixture-${{ github.ref }}', 'cancel-in-progress': 'false'})
+        expected = """${{ github.event_name == 'workflow_dispatch' ||
+            (github.event_name == 'push' &&
+             github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+             github.event.deleted == false) ||
+            (github.event_name == 'pull_request' &&
+             github.event.pull_request.head.repo.full_name == github.repository &&
+             github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+             contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}"""
+        for name in ('original-x64-reference', 'matched-runtime'):
+            self.assertEqual(''.join(actual['jobs'][name]['if'].split()), ''.join(expected.split()))
+
+    def test_actual_seed_job_gates_truth_table(self):
+        seed = 'perf/windows-child-incremental-cache'
+        base = {'github.event_name': 'pull_request', 'github.repository': 'Sleepywalker69/prospero-win',
+                'github.ref': 'refs/pull/123/merge', 'github.event.deleted': False,
+                'github.event.pull_request.head.repo.full_name': 'Sleepywalker69/prospero-win',
+                'github.event.pull_request.head.ref': 'reviewed-change',
+                'github.event.pull_request.base.ref': 'main', 'labels': ['build-windows-child-fixture']}
+        cases = [
+            ('dispatch unchanged', {'github.event_name': 'workflow_dispatch', 'labels': []}, True),
+            ('seed push', {'github.event_name': 'push', 'github.ref': 'refs/heads/' + seed, 'labels': []}, True),
+            ('seed deletion', {'github.event_name': 'push', 'github.ref': 'refs/heads/' + seed,
+                               'github.event.deleted': True}, False),
+            ('unrelated push even with PR metadata', {'github.event_name': 'push', 'github.ref': 'refs/heads/other'}, False),
+            ('tag with matching name', {'github.event_name': 'push', 'github.ref': 'refs/tags/' + seed}, False),
+            ('duplicate seed head PR', {'github.event.pull_request.head.ref': seed}, False),
+            ('dependent PR into seed', {'github.event.pull_request.base.ref': seed}, True),
+            ('ordinary labeled PR', {}, True),
+            ('similar head is not excluded', {'github.event.pull_request.head.ref': seed + '-followup'}, True),
+            ('unlabeled PR', {'labels': []}, False),
+            ('external fork PR', {'github.event.pull_request.head.repo.full_name': 'external/prospero-win'}, False),
+            ('other event with copied PR metadata', {'github.event_name': 'issues'}, False),
+        ]
+        jobs = workflow()['jobs']
+        for label, changes, expected in cases:
+            context = dict(base, **changes)
+            for name in ('original-x64-reference', 'matched-runtime'):
+                with self.subTest(case=label, job=name):
+                    self.assertIs(actual_job_gate(jobs[name]['if'], context), expected)
 
     def test_parallel_runtime_retains_trusted_trigger_and_real_reference_join(self):
         jobs = workflow()['jobs']
@@ -218,9 +305,13 @@ class WorkflowPerformanceContracts(unittest.TestCase):
                              {'actions/cache/restore', 'actions/cache/save'})
             for step in selected:
                 self.assertEqual(step['with']['key'], '${{ steps.' + phase + '-cache-key.outputs.key }}')
-                self.assertNotIn('restore-keys', step['with'])
+                expected_fields = {'path', 'key'}
+                if step['uses'].startswith('actions/cache/restore@'):
+                    expected_fields.add('restore-keys')
+                    self.assertEqual(step['with']['restore-keys'],
+                                     '${{ steps.' + phase + '-cache-key.outputs.restore-prefix }}')
                 self.assertNotIn('continue-on-error', step)
-                self.assertEqual(set(step['with']), {'path', 'key'})
+                self.assertEqual(set(step['with']), expected_fields)
         # Evidence, installed runtimes, initialized prefixes and fresh MSVC bytes
         # must not become alternate entries in a cache path list.
         self.assertEqual({step['with']['path'] for step in cached},

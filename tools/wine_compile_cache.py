@@ -13,12 +13,22 @@ import shutil
 import subprocess
 import time
 
-SCHEMA = 'pw-wine-compiler-cache/1'
+SCHEMA = 'pw-wine-compiler-cache/2'
 SETTINGS = {'compiler_check': 'content', 'hard_link': 'false', 'sloppiness': '',
-            'hash_dir': 'true', 'direct_mode': 'true', 'run_second_cpp': 'true',
+            'hash_dir': 'true', 'direct_mode': 'false', 'run_second_cpp': 'true',
             'remote_storage': '', 'ignore_options': '', 'ignore_headers_in_manifest': ''}
 FLAGS = ('CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CROSSCFLAGS', 'i386_CFLAGS',
          'x86_64_CFLAGS', 'PW_WINE_PRIVATE_DISPATCH', 'PW_WINE_SERVICE_FIXTURE')
+# Explicit public ABI identifiers remain global partition boundaries. Structure
+# and ordinary source/header changes are checked by current preprocessing too.
+ABI_INPUTS = {
+    'private_dispatch': ('wine/patches/0910-ntdll-private-dispatcher-abi-proposal.patch', 'PW_PRIVATE_DISPATCH_ABI'),
+    'private_wow64': ('wine/patches/0914-ntdll-private-dispatcher-wow64.patch', 'PW_PRIVATE_DISPATCH_WOW64_ABI'),
+    'fixture': ('wine/ps5/pw_wine_fixture_provider.h', 'PW_WINE_FIXTURE_ABI'),
+    'creation': ('wine/ps5/pw_wine_creation.h', 'PW_WINE_CREATION_ABI'),
+    'creation_protocol': ('wine/ps5/pw_wine_creation.h', 'PW_WINE_CREATION_PROTOCOL'),
+    'server_protocol': ('wine/patches/0915-wine-owned-descendant-creation.patch', 'SERVER_PROTOCOL_VERSION'),
+}
 
 
 def sha(path):
@@ -102,6 +112,20 @@ def compiler_record(path, kind):
     return result
 
 
+def abi_contracts(repo):
+    contracts = {}
+    for name, (path, macro) in ABI_INPUTS.items():
+        prefix = r'^\+' if path.endswith('.patch') else '^'
+        values = re.findall(prefix + r'#define\s+' + re.escape(macro) + r'\s+([0-9]+)[uU]?\s*$',
+                            (repo / path).read_text(), re.M)
+        if len(values) != 1:
+            raise ValueError('missing or ambiguous compiler ABI identifier: ' + macro)
+        contracts[name] = {'source': path, 'macro': macro, 'value': int(values[0])}
+    if contracts['creation_protocol']['value'] != contracts['server_protocol']['value']:
+        raise ValueError('compiler creation/server protocol identifiers differ')
+    return contracts
+
+
 def compatibility(repo, phase, providers, ccache, *, sdk=None, tls=None):
     names = command(['git', '-C', repo, 'ls-files', 'wine/patches', 'wine/ps5',
                      'tools/build_host_wine.sh', 'tools/build_wine_ps5.sh',
@@ -115,6 +139,7 @@ def compatibility(repo, phase, providers, ccache, *, sdk=None, tls=None):
         raise ValueError('missing Wine pin')
     value = {'schema': SCHEMA, 'phase': phase, 'os': Path('/etc/os-release').read_text(),
              'machine': platform.machine(), 'wine_commit': pin.group(1), 'recipe': recipe,
+             'abi_contracts': abi_contracts(repo),
              'settings': SETTINGS, 'flags': {name: os.environ.get(name, '') for name in FLAGS},
              'ccache': {'file': file_record(ccache), 'version': command([ccache, '--version'])},
              'compilers': providers, 'system_headers': tree_record('/usr/include'),
@@ -131,16 +156,49 @@ def compatibility(repo, phase, providers, ccache, *, sdk=None, tls=None):
     return value
 
 
+def cache_partition(identity):
+    """Keep opaque toolchain/ABI inputs global; preprocess current source per compile.
+
+    The complete recipe remains in fresh provenance and the immutable Actions
+    archive key. It must not invalidate every otherwise identical compilation.
+    Preprocessor mode resolves added/shadowing headers before looking up objects.
+    """
+    return {name: value for name, value in identity.items() if name != 'recipe'}
+
+
+def cache_keys(identity):
+    partition_hash = hashlib.sha256(canonical(cache_partition(identity))).hexdigest()
+    partition_key = 'wine-ccache-v2-' + identity['phase'] + '-' + partition_hash
+    recipe_hash = hashlib.sha256(canonical(identity)).hexdigest()
+    return partition_key, partition_key + '-', partition_key + '-' + recipe_hash
+
+
+def checked_identity(directory, state):
+    """Both receipts are per-run inputs, never restored compiler-cache content."""
+    if sha(directory / 'compatibility.json') != state['compatibility_sha256']:
+        raise ValueError('cache compatibility input changed')
+    if sha(directory / 'partition.json') != state['partition_sha256']:
+        raise ValueError('cache partition input changed')
+    identity = json.loads((directory / 'compatibility.json').read_text())
+    if (directory / 'partition.json').read_bytes() != canonical(cache_partition(identity)):
+        raise ValueError('cache partition disagrees with compatibility input')
+    partition_key, restore_prefix, key = cache_keys(identity)
+    if (state['partition_key'], state['restore_prefix'], state['key']) != (partition_key, restore_prefix, key):
+        raise ValueError('cache key disagrees with current inputs')
+    return identity
+
+
 def write_state(out, cache_dir, identity, compilers, ccache, project):
     out = Path(out).resolve()
     cache_dir = Path(cache_dir).resolve()
     if out == cache_dir or out in cache_dir.parents or cache_dir in out.parents:
         raise ValueError('cache objects and per-run evidence must be disjoint')
     out.mkdir(parents=True, exist_ok=False)
-    key = 'wine-ccache-v1-' + identity['phase'] + '-' + hashlib.sha256(canonical(identity)).hexdigest()
+    partition_key, restore_prefix, key = cache_keys(identity)
     (out / 'compatibility.json').write_bytes(canonical(identity))
-    config = dict(SETTINGS, max_size='3G', cache_dir=str(cache_dir), namespace=key,
-                  extra_files_to_hash=str(out / 'compatibility.json'))
+    (out / 'partition.json').write_bytes(canonical(cache_partition(identity)))
+    config = dict(SETTINGS, max_size='3G', cache_dir=str(cache_dir), namespace=partition_key,
+                  extra_files_to_hash=str(out / 'partition.json'))
     (out / 'ccache.conf').write_text(''.join(k + ' = ' + v + '\n' for k, v in config.items()))
     launchers = out / 'launchers'; launchers.mkdir()
     mapping = {}
@@ -153,6 +211,8 @@ def write_state(out, cache_dir, identity, compilers, ccache, project):
         target.chmod(0o755)
         mapping[role] = str(target)
     state = {'schema': SCHEMA, 'key': key, 'project': project, 'phase': identity['phase'],
+             'partition_key': partition_key, 'restore_prefix': restore_prefix,
+             'partition_sha256': sha(out / 'partition.json'),
              'cache_dir': str(cache_dir), 'ccache': str(ccache), 'launchers': mapping,
              'compatibility_sha256': sha(out / 'compatibility.json'),
              'compilers': {role: [str(path), kind] for role, (path, kind) in compilers.items()}}
@@ -176,8 +236,7 @@ def run_stage(directory, stage, argv):
         raise ValueError('invalid cache stage')
     directory = Path(directory).resolve()
     state = json.loads((directory / 'state.json').read_text())
-    if sha(directory / 'compatibility.json') != state['compatibility_sha256']:
-        raise ValueError('cache compatibility input changed')
+    checked_identity(directory, state)
     env = cache_env(state, directory)
     cc = state['launchers']
     env.update(i386_CC=cc['i386'], x86_64_CC=cc['x86_64'])
@@ -195,7 +254,10 @@ def run_stage(directory, stage, argv):
         result = subprocess.run(argv, env=env)
         return result.returncode
     finally:
-        record = {'schema': 'pw-wine-cache-stage/1', 'key': state['key'], 'project': state['project'],
+        record = {'schema': 'pw-wine-cache-stage/2', 'key': state['key'], 'project': state['project'],
+                  'partition_key': state['partition_key'], 'partition_sha256': state['partition_sha256'],
+                  'compatibility_sha256': state['compatibility_sha256'],
+                  'restore_prefix': state['restore_prefix'],
                   'phase': state['phase'], 'stage': stage, 'argv': argv,
                   'elapsed_seconds': time.monotonic() - started,
                   'exit': result.returncode if result else None,
@@ -226,9 +288,7 @@ def compiler_smoke(directory, out, objects):
     """Compile twice through the actual selected launcher; never run target code."""
     directory = Path(directory).resolve()
     state = json.loads((directory / 'state.json').read_text())
-    identity = json.loads((directory / 'compatibility.json').read_text())
-    if sha(directory / 'compatibility.json') != state['compatibility_sha256']:
-        raise ValueError('cache compatibility input changed')
+    identity = checked_identity(directory, state)
     if Path(objects).exists():
         raise ValueError('compiler smoke requires a fresh, uncached object directory')
     probe = write_state(out, objects, identity, state['compilers'], state['ccache'], state['project'])
@@ -304,6 +364,7 @@ def main():
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write('key=' + state['key'] + '\n')
+            output.write('restore-prefix=' + state['restore_prefix'] + '\n')
     print(json.dumps(state))
 
 
