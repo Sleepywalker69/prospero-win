@@ -33,6 +33,16 @@ static int fake_step(PwNativeChildIo*,int,uint32_t,PwWineChildFrame*,int*,PwWine
 static void fake_wire_close(int*,PwWineChildWireResult*);
 static int fake_prepare(PwWineChildBootstrap*,PwNativeChildIo*,int,const char*,unsigned,uint32_t,uint32_t,const PwWineChildBootstrapOps*);
 static int fake_start(PwWineChildBootstrap*,PwNativeChildIo*,const PwWineChildBootstrapOps*);
+/* This older diagnostic suite models an already ready data boundary.
+ * Separate functional controls link the real data adapter and main. */
+#include "../native/pw_wine_child_data.h"
+static int fake_data_prepare(PwWineChildData *value,PwNativeChildIo *io,const char *hash)
+{
+    assert(value&&io&&hash&&strlen(hash)==64);
+    value->attempted=value->ready=value->data_before=value->data_after=value->lstat_before=1;
+    value->before_observations=3;return 0;
+}
+#define pw_wine_child_data_prepare fake_data_prepare
 #define clock_gettime fake_clock
 #define open fake_open
 #define stat(...) fake_stat(__VA_ARGS__)
@@ -147,7 +157,7 @@ static int fake_prepare(PwWineChildBootstrap*b,PwNativeChildIo*i,int fd,const ch
 static int fake_start(PwWineChildBootstrap*b,PwNativeChildIo*i,const PwWineChildBootstrapOps*o)
 {assert(i==&child_io&&o);m.starts++;b->started=m.start_owns;return m.start_rc;}
 static void reset(void)
-{memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&wire_result,0,sizeof(wire_result));
+{memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&data_readiness,0,sizeof(data_readiness));memset(&wire_result,0,sizeof(wire_result));
  memset(&bootstrap_failure,0,sizeof(bootstrap_failure));
  memset(&child_io,0,sizeof(child_io));memset(&active_session,0,sizeof(active_session));log_fd=-1;log_bytes=0;log_loss_marker=0;atomic_store(&log_dropped_records,0);atomic_store(&log_dropped_bytes,0);atomic_store(&log_counts_incomplete,0);atomic_store(&runtime_failure,0);atomic_store(&socket_failure_attempted,0);atomic_flag_clear(&send_claim);}
 static void run(void){if(!setjmp(done))child_main(0,NULL);}
@@ -208,12 +218,12 @@ int main(void)
     assert(m.exit_code==14&&m.sends==2&&!m.prepares&&!m.starts&&m.data_stats==1);
     assert(m.frames[1].failure_api==PW_WC_DIAG_LOG_OPEN&&m.frames[1].failure_raw==-1);
     assert(m.frames[1].errno_valid&&m.frames[1].native_error==EACCES);
-    assert(m.frames[1].returned_length==PW_WC_DATA_STAT_FAILED&&m.frames[1].returned_value==ENOENT);
+    assert(m.frames[1].returned_length==(PW_WC_DATA_STAT_FAILED|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&m.frames[1].returned_value==ENOENT);
     assert(closed(9)==1&&closed(3)==1&&!closed(5));
     reset();m.log_fail=1;m.log_error=EEXIST;run();
-    assert(m.frames[1].native_error==EEXIST&&m.frames[1].returned_length==PW_WC_DATA_DIRECTORY&&!m.frames[1].returned_value);
+    assert(m.frames[1].native_error==EEXIST&&m.frames[1].returned_length==(PW_WC_DATA_DIRECTORY|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&!m.frames[1].returned_value);
     reset();m.log_fail=1;m.data_nondir=1;run();
-    assert(!m.frames[1].errno_valid&&!m.frames[1].native_error&&m.frames[1].returned_length==PW_WC_DATA_NOT_DIRECTORY);
+    assert(!m.frames[1].errno_valid&&!m.frames[1].native_error&&m.frames[1].returned_length==(PW_WC_DATA_NOT_DIRECTORY|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT)));
     for(unsigned operation=0;operation<4;operation++){
         reset();child_io=(PwNativeChildIo){.clock_ms=clock_ms,.ready=1,.last_clock=100,.stage_end=1000,.total_end=2000};
         if(operation==0)m.open_mask=3;

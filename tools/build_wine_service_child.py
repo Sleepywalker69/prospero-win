@@ -31,14 +31,25 @@ ROOT = Path(__file__).resolve().parents[1]
 CRT_SHA = 'a99fe406e36d8ce82e68e0245898ba064e28a56a9853f746e9cf13d23cc17a00'
 LAYOUT_SHA = '72ee9a1605cce2836d2290fa9a6a6fba0c3c277e78094e7f07562e92dd5b4e49'
 WRAPPER_SHA = 'c90881bd828048981da08644ae1e1730a0ef10692b6322cbd6a294de8c5c5346'
-UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'native/pw_wine_child_main.c',
+UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'native/pw_wine_child_main.c', 'native/pw_wine_child_data.c',
          'native/pw_native_child_protocol.c', 'src/pw_wine_start.c', 'wine/ps5/pw_wine_prx.c', 'wine/ps5/pw_wine_threads.c')
-HEADERS = ('native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
+HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
            'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h')
 PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so'}
 CRT_IMPORTS = {'_init_env': 'libSceLibcInternal.sprx', 'atexit': 'libSceLibcInternal.sprx',
-               'exit': 'libSceLibcInternal.sprx', 'pthread_create': 'libkernel.sprx'}
+               'exit': 'libSceLibcInternal.sprx', 'pthread_create': 'libkernel.sprx',
+               'sceKernelDlsym': 'libkernel.sprx', 'sceKernelLoadStartModule': 'libkernel.sprx'}
+DYNAMIC_PROVIDERS = {'libSceSysmodule.sprx': 'libSceSysmodule.so', 'libSceNet.sprx': 'libSceNet.so'}
+DYNAMIC_FUNCTIONS = {
+    'libkernel.sprx': ('sceKernelLoadStartModule', 'sceKernelDlsym'),
+    'libSceSysmodule.sprx': ('sceSysmoduleLoadModuleInternal', 'sceSysmoduleGetModuleHandleInternal'),
+    'libSceNet.sprx': ('sceNetInit', 'sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
+                        'sceNetSetsockopt', 'sceNetSocketClose', 'sceNetErrnoLoc')}
+HELPER_SHA = '43fab6d8045b525403f025a7b15e313aeaeac174bba6bff19a32b0000293c647'
+HELPER_RELEASE = 'v0.3.2-experimental'
+HELPER_SOURCE = 'b48b7d7236eca25c7b9dfd6c040c763ae05dde80'
+HELPER_FILES = ('lapy.elf', 'lapy-manifest.json', 'lapy-release.json')
 TITLE_MARKER = 'pw-wine-child-fixture/1'
 TITLE_FUNCTIONS = ('pw_wine_fixture_owner_init', 'pw_wine_fixture_owner_pump')
 
@@ -57,7 +68,8 @@ def source_identity(root, commands):
     project = {'commit': commands.run('git', '-C', root, 'rev-parse', 'HEAD').strip(),
                'tree': commands.run('git', '-C', root, 'rev-parse', 'HEAD^{tree}').strip()}
     sources = {name: sha(root / name) for name in (*UNITS, *HEADERS, 'tools/build_wine_service_child.py',
-               'tools/native_service_converter.py', 'tools/native_probe_elf.py', 'tools/check_native_suite.py')}
+               'tools/native_service_converter.py', 'tools/native_probe_elf.py', 'tools/check_native_suite.py',
+               'tools/fetch_lapy_helper.py', 'tools/build_native.sh')}
     return project, sources
 
 
@@ -94,7 +106,53 @@ def ordinary_graph(linked, converted, providers):
             converted.offset(relocation['address'], 8, 6)
     require(all(name in graph and graph[name]['provider'] == expected for name, expected in CRT_IMPORTS.items()),
             'full-CRT lifecycle imports missing or bound to wrong providers')
+    require(not any(name in graph for names in list(DYNAMIC_FUNCTIONS.values())[1:] for name in names),
+            'child dynamically resolved calls must not become static imports')
     return graph
+
+
+def helper_inputs(args, root):
+    from fetch_lapy_helper import validate_helper_manifest, verify_pinned_elf
+    script = (root / 'tools/build_native.sh').read_text()
+    for key, expected in (('lapy_release', HELPER_RELEASE), ('lapy_elf_sha256', HELPER_SHA)):
+        require(re.findall(r'^' + key + r'=([^\n]+)$', script, re.M) == [expected],
+                'child helper contract differs from title pin: ' + key)
+    work = getattr(args, 'service_work', None)
+    if work:
+        elf, manifest_path, release_path = (work / name for name in HELPER_FILES)
+    else:
+        elf, manifest_path, release_path = (getattr(args, name, None) for name in ('helper', 'helper_manifest', 'helper_release'))
+        require(all((elf, manifest_path, release_path)), 'child build needs exact title helper inputs')
+    for path in (elf, manifest_path, release_path):
+        require(path.is_file() and not path.is_symlink(), 'helper input must be a regular non-symlink file')
+    require(4 <= elf.stat().st_size <= 4 * 1024 * 1024 and elf.read_bytes()[:4] == b'\x7fELF', 'helper ELF size/type differs')
+    verify_pinned_elf(elf, HELPER_SHA)
+    manifest = json.loads(manifest_path.read_text()); release = json.loads(release_path.read_text())
+    validate_helper_manifest(manifest, elf, root / 'native/lapy_elevation_protocol.h', 'PPSA99995')
+    require(manifest.get('schema') == 'lapy-owned-build/1' and manifest.get('max_requests') == 1 and
+            manifest.get('service') is False and manifest.get('require_client_result') is False,
+            'helper one-shot lifecycle declaration differs')
+    require(release.get('repository') == 'mpereiraesaa/PS5-Lapy-JB-Daemon' and
+            release.get('tag_name') == HELPER_RELEASE and release.get('release_url') ==
+            'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/' + HELPER_RELEASE,
+            'helper release identity differs')
+    return {'elf': record(elf), 'manifest': record(manifest_path), 'release': record(release_path),
+            'protocol_sha256': sha(root / 'native/lapy_elevation_protocol.h'),
+            'source_contract_commit': HELPER_SOURCE, 'source_to_binary_reproducibility_verified': False,
+            'release_tag': HELPER_RELEASE, 'runtime_validated': False}
+
+
+def dynamic_inputs(sdk, bindir, commands):
+    result = {}
+    for name, calls in DYNAMIC_FUNCTIONS.items():
+        leaf = (PROVIDERS | DYNAMIC_PROVIDERS)[name]
+        path = sdk / 'target/lib' / leaf
+        item = provider(path, bindir, commands)
+        require(item['soname'] == name and all(item['definitions'].get(call) == 'FUNC' for call in calls),
+                'child dynamic provider/exports differ: ' + name)
+        result[name] = {**record(path), 'functions': list(calls)}
+    return {'providers': result, 'sysmodule_path': '/system/common/lib/libSceSysmodule.sprx',
+            'net_internal_id': '0x8000001c', 'net_init_required_return': 0, 'runtime_validated': False}
 
 
 def check_disassembly(disassembly):
@@ -150,7 +208,9 @@ def inputs(args, commands):
     declaration = json.loads((runtime / 'report.json').read_text()).get('service_fixture')
     require(declaration == {'enabled': True, 'unix_define': 'PW_WINE_SERVICE_FIXTURE=1',
                             'abi': 1, 'runtime_validated': False}, 'Wine service consumers were not explicitly built')
-    result = {'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
+    helper = helper_inputs(args, root)
+    dynamic = dynamic_inputs(sdk, bindir, commands)
+    result = {'helper': helper, 'dynamic_modules': dynamic, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
               'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
               'candidate_capabilities': [
                   {'mode': 1, 'prefix': 'windows-child-fixture-v1', 'guest_machine': 'AMD64',
@@ -171,15 +231,18 @@ def child_header(bound, build_id):
             bound['runtime'].get('private_dispatch_wow64_abi') == 1,
             'child header cannot assert an absent ABI capability')
     require(re.fullmatch('[0-9a-f]{40}', build_id) and
-            re.fullmatch('[0-9a-f]{64}', bound['runtime']['ntdll_sha256']), 'invalid child header identity')
+            re.fullmatch('[0-9a-f]{64}', bound['runtime']['ntdll_sha256']) and
+            bound.get('helper', {}).get('elf', {}).get('sha256') == HELPER_SHA, 'invalid child header identity')
     return ('#define PW_WINE_CHILD_BUILD_ID "' + build_id + '"\n' +
             '#define PW_WINE_CHILD_NTDLL_SHA256 "' + bound['runtime']['ntdll_sha256'] + '"\n' +
             '#define PW_WINE_CHILD_PRIVATE_DISPATCH_ABI 1\n' +
-            '#define PW_WINE_CHILD_WOW64_ABI 1\n')
+            '#define PW_WINE_CHILD_WOW64_ABI 1\n' +
+            '#define PW_WINE_CHILD_HELPER_SHA256 \"' + bound['helper']['elf']['sha256'] + '\"\n')
 
 
 def build(args):
-    out = output_directory(args.out, (args.sdk, args.foundation, args.runtime))
+    require(all((args.helper, args.helper_manifest, args.helper_release)), 'child build needs helper inputs')
+    out = output_directory(args.out, (args.sdk, args.foundation, args.runtime, args.helper, args.helper_manifest, args.helper_release))
     commands = Commands(out / 'inspection')
     bound, paths = inputs(args, commands)
     root, sdk, foundation, runtime, bindir, title = paths
@@ -237,6 +300,7 @@ def build(args):
     require(extract_self(final.read_bytes()) == recovered.read_bytes(), 'independent SELF recovery differs')
     after = inspect_service_preload(recovered.read_bytes()); compare_service_preload(preload, after)
     compiled_identity(Elf(recovered.read_bytes()), build_id)
+    compiled_identity(Elf(recovered.read_bytes()), HELPER_SHA)
     final.chmod(0o755)
     require(inputs(args, commands)[0] == bound, 'service build inputs changed')
     manifest = {'schema': 'pw-wine-service-child/1', **bound,
@@ -260,7 +324,9 @@ def build(args):
         for start in range(0, len(value), 16):
             stream.write(','.join(str(v) for v in value[start:start + 16]) + ',\n')
         stream.write('};\nconst size_t pw_wine_child_image_size = sizeof(pw_wine_child_image);\n')
-    for name, leaf in PROVIDERS.items():
+    for original, name in zip((args.helper, args.helper_manifest, args.helper_release), HELPER_FILES):
+        shutil.copyfile(original, out / name)
+    for name, leaf in (PROVIDERS | DYNAMIC_PROVIDERS).items():
         shutil.copyfile(sdk / 'target/lib' / leaf, out / leaf)
     return manifest
 
@@ -289,6 +355,7 @@ def verify_child(args, commands):
     value = extract_self((work / 'native-wine-child.self').read_bytes())
     require(value == (work / 'native-wine-child.after.elf').read_bytes(), 'child SELF recovery differs')
     compiled_identity(Elf(value), manifest['worker']['build_id'])
+    compiled_identity(Elf(value), HELPER_SHA)
     require(inspect_service_preload((work / 'child.elf').read_bytes()) == manifest['preload_before_signing'] and
             inspect_service_preload(value) == manifest['preload_after_recovery'], 'child preload report differs')
     compare_service_preload(manifest['preload_before_signing'], manifest['preload_after_recovery'])
@@ -307,6 +374,10 @@ def verify_child(args, commands):
             manifest['zlib_headers'] == tree_files(zroot / 'usr/include'), 'converter zlib inputs differ')
     for name, leaf in PROVIDERS.items():
         require(record(work / leaf) == bound['providers'][name], 'retained service provider differs')
+    for name, leaf in DYNAMIC_PROVIDERS.items():
+        require(record(work / leaf) == {k: bound['dynamic_modules']['providers'][name][k] for k in ('bytes', 'sha256')},
+                'retained dynamic provider differs')
+    require((work / 'wine-child-build.h').read_text() == child_header(bound, identity(bound)), 'child generated helper/ABI header differs')
     for key in ('console_execution_verified', 'windows_process_support', 'platform_authentication_verified'):
         require(manifest.get(key) is False, 'child manifest makes unsupported execution claim')
     return manifest, paths
@@ -363,6 +434,9 @@ def check_title(args):
         shutil.copyfile(original, out / name)
     for name in ('native-wine-child.self', 'native-wine-child-build.json'):
         require((app / name).read_bytes() == (args.service_work / name).read_bytes(), 'packaged child differs: ' + name)
+    require(record(app / 'lapy.elf') == manifest['helper']['elf'] and
+            record(build / 'lapy-helper-manifest.json') == manifest['helper']['manifest'] and
+            record(build / 'lapy-helper-release.json') == manifest['helper']['release'], 'packaged/title helper differs from child binding')
     require(record(app / 'sce_module/libc.prx') == manifest['libc_companion'], 'title/child libc companions differ')
     linked, converted = Elf((build / 'llvm-pie.elf').read_bytes()), Elf((build / 'eboot.elf').read_bytes())
     index = index_sdk_providers(sdk, out, bindir, commands)
@@ -416,7 +490,7 @@ def main():
     parser.add_argument('--check-title', action='store_true')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture'):
+    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'helper', 'helper-manifest', 'helper-release'):
         parser.add_argument('--' + name, type=Path)
     args = parser.parse_args()
     if args.check_title:

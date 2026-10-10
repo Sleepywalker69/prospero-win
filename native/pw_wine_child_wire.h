@@ -19,7 +19,9 @@ enum { PW_WC_API_NONE, PW_WC_API_CLOCK, PW_WC_API_TYPE, PW_WC_API_POLL,
 /* FAILURE diagnostics only; the byte layout and protocol version are unchanged.
  * Values below 0x100 remain the existing socket-setup API namespace. Native
  * call failures retain their immediate return/errno; validation failures never
- * invent errno. For DIRECTORY_* the auxiliary length is PREFIX or CWD. For
+ * invent errno. Low16 length bits carry the operation auxiliary; high bits
+ * follow the child-data readiness contract. For DIRECTORY_* the low16 value
+ * is PREFIX or CWD. For
  * RUNTIME_* it is the attempted root index (0 or 1). Other auxiliary values are
  * zero except LOG_OPEN, whose two words carry the read-only /data observation
  * and its detail as specified below. */

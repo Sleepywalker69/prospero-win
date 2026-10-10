@@ -89,7 +89,7 @@ class ArchiveControls(unittest.TestCase):
         return value
 
     def prepared(self):
-        for name in ('PPSA99995/eboot.bin', 'PPSA99995/native-wine-child.self', 'PPSA99995/LICENSE',
+        for name in ('PPSA99995/eboot.bin', 'PPSA99995/lapy.elf', 'PPSA99995/native-wine-child.self', 'PPSA99995/LICENSE',
                      'PPSA99995/THIRD_PARTY.md', 'BUILD-INFO.txt', package.PROFILE,
                      package.RUNTIME + '/share/wine/ca-certificates.crt', 'sources/project.tar.gz'):
             self.put(name)
@@ -125,9 +125,14 @@ class ArchiveControls(unittest.TestCase):
             target = package.LIB + '/x86_64-unix/' + name + '.prx'
             self.put(target, ('inert ' + name).encode())
             checked[name] = {'sha256': package.digest_file(self.root / target)}
+        for name in ('lapy-helper-manifest.json', 'lapy-helper-release.json'):
+            self.put('sources/' + name, ('original inert ' + name).encode())
         worker = {'schema': 'pw-wine-service-child/1', 'project': self.project,
                   'runtime': {'private_dispatch_abi': 1, 'ntdll_sha256': checked['ntdll']['sha256']},
-                  'worker': package.record(self.root / 'PPSA99995/native-wine-child.self')}
+                  'worker': package.record(self.root / 'PPSA99995/native-wine-child.self'),
+                  'helper': {'elf': package.record(self.root / 'PPSA99995/lapy.elf'),
+                             'manifest': package.record(self.root / 'sources/lapy-helper-manifest.json'),
+                             'release': package.record(self.root / 'sources/lapy-helper-release.json')}}
         self.json('PPSA99995/native-wine-child-build.json', worker)
         pair = {'project': self.project, 'architecture': 'x64', 'files': {
             n: package.record(self.root / package.FIXTURE / n) for n in ('parent.exe', 'child.exe')}}
@@ -490,6 +495,20 @@ class ArchiveControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'replayed title'):
                 package.validate_title(paths, {'original': 'stale provider graph'}, self.temp / 'inspect2')
 
+    def test_rehashed_helper_change_is_rejected_by_child_binding(self):
+        self.prepared();self.put(package.APP+'/lapy.elf',b'changed inert helper');self.finish()
+        with self.assertRaisesRegex(ValueError,'helper differs from child binding'):
+            package.verify_directory(self.root)
+
+    def test_rehashed_retained_helper_metadata_is_rejected_by_child_binding(self):
+        for name in ('lapy-helper-manifest.json','lapy-helper-release.json'):
+            self.prepared();self.put('sources/'+name,b'changed metadata')
+            sources=package.read_json(self.root/'provenance/retained-sources.json')
+            sources['inventory']=package.prefix.inventory(self.root/'sources')
+            self.json('provenance/retained-sources.json',sources);self.finish()
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'retained helper metadata differs'):
+                package.verify_directory(self.root)
+
     def test_rehashed_title_bound_to_another_fixture_is_rejected(self):
         self.prepared()
         value = package.read_json(self.root / 'provenance/title.json')
@@ -694,6 +713,7 @@ class FullAssembleControls(unittest.TestCase):
         self.save(self.p['prefix_report'], self.prepared)
         self.save(self.p['cohort'], {'ps5_source': {'inert.c': 'external source-cohort validator mock'}})
         self.put(self.p['title'] / 'eboot.bin', b'original inert title', 0o755)
+        self.put(self.p['title'] / 'lapy.elf', (self.seed / 'PPSA99995/lapy.elf').read_bytes())
         self.put(self.p['title'] / 'sce_module/libc.prx', b'original inert libc', 0o755)
         self.service['libc_companion'] = package.record(self.p['title'] / 'sce_module/libc.prx')
         for n in ('title','service_work'):
@@ -743,6 +763,8 @@ class FullAssembleControls(unittest.TestCase):
             notice='notices/'+name+'/LICENSE';self.put(self.p['sources_root']/notice,b'Original synthetic notice')
             roles[name]={'path':path,'revision':revisions.get(name,'original-test-revision'),
                          'url':'https://example.invalid/original-inert-test','notices':[notice]}
+        for name in ('lapy-helper-manifest.json','lapy-helper-release.json'):
+            self.put(self.p['sources_root']/name,(self.seed/'sources'/name).read_bytes())
         self.put(self.p['wine_archive'],data);self.put(self.p['sdk_source_archive'],data)
         self.sdk_identity={'commit':'5'*40,'tree':'6'*40,'sha256':package.digest_file(self.p['sdk_source_archive'])}
         self.sources={'schema':'pw-windows-child-retained-sources/1','project':self.project,'roles':roles,

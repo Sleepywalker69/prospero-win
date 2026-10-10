@@ -182,6 +182,13 @@ $(BUILD)/test_pw_wine_child_title: native/pw_wine_child_title.c native/pw_wine_c
 
 PW_WINE_CHILD_TEST_FLAGS := -D_DEFAULT_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections -Itests/wine_child_fixture
 PW_WINE_CHILD_FLOW_TEST_FLAGS := $(PW_WINE_CHILD_TEST_FLAGS) -pthread -Inative
+PW_WINE_DATA_TEST_FLAGS := -D_DEFAULT_SOURCE -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread -Inative
+PW_WINE_DATA_FLOW_FLAGS := $(PW_WINE_DATA_TEST_FLAGS) -DPW_WINE_DATA_COMPOSED -Itests/data_child_fixture
+$(eval $(call test_rule,test_wine_child_data,tests/test_wine_child_data.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_DATA_TEST_FLAGS)))
+$(eval $(call test_rule,test_wine_child_data_owner,tests/test_wine_child_data_owner.c native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_DATA_TEST_FLAGS)))
+$(eval $(call test_rule,test_wine_child_data_flow,tests/test_wine_child_data_flow.c tests/wine_child_data_main.c tests/test_wine_child_data.c native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_DATA_FLOW_FLAGS)))
+$(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_wine_child_data_flow: native/pw_wine_child_data.c native/pw_wine_child_data.h native/lapy_elevation_protocol.h native/pw_wine_child_main.c native/pw_wine_fixture_owner.c native/pw_wine_fixture_owner.h native/pw_wine_child_wire.h native/pw_wine_child_bootstrap.h native/pw_native_child_protocol.h wine/ps5/pw_wine_fixture_provider.h wine/ps5/pw_wine_fixture_socket.h wine/ps5/pw_wine_threads.h wine/ps5/pw_wine_prx.h src/pw_wine_start.h tests/data_adapter_fixture.h tests/wine_child_data_bridge.h tests/data_child_fixture/wine-child-build.h
+$(BUILD)/test_pw_wine_child_main $(BUILD)/test_bootstrap_diagnostic_flow: native/pw_wine_child_data.h
 $(eval $(call test_rule,test_pw_wine_child_wire,tests/test_pw_wine_child_wire.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
 $(eval $(call test_rule,test_pw_wine_child_bootstrap,tests/test_pw_wine_child_bootstrap.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
 $(eval $(call test_rule,test_pw_wine_child_main,tests/test_pw_wine_child_main.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
@@ -253,7 +260,7 @@ $(eval $(call test_rule,test_pw_diagnostics,tests/test_pw_diagnostics.c native/p
 $(eval $(call test_rule,test_pw_qpc_clock,tests/test_pw_qpc_clock.c,))
 $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
 
-TESTS := test_bootstrap_diagnostic_flow test_pw_wine_child_title test_pw_wine_fixture_owner test_pw_wine_child_wire test_pw_wine_child_bootstrap test_pw_wine_child_main test_pw_wine_fixture_provider test_pw_wine_fixture_socket test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
+TESTS := test_wine_child_data test_wine_child_data_owner test_wine_child_data_flow test_bootstrap_diagnostic_flow test_pw_wine_child_title test_pw_wine_fixture_owner test_pw_wine_child_wire test_pw_wine_child_bootstrap test_pw_wine_child_main test_pw_wine_fixture_provider test_pw_wine_fixture_socket test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
 	test_pw_present test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch \
 	test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
 	test_d3d9_bridge_wire test_vk_replay test_d3d9_objects test_d3d9_program_query test_d3d9_program_wire test_d3d9_factory_wire test_d3d9_resource_wire \

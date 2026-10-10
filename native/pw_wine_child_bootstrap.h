@@ -15,7 +15,7 @@
 #define PW_WINE_CHILD_RUNTIME_ALIAS "/mnt/sandbox/PPSA99995_000/app0/win/wine/lib/wine/x86_64-unix"
 enum { PW_WCB_INITIAL, PW_WCB_PATHS, PW_WCB_ENVIRONMENT, PW_WCB_LOAD,
        PW_WCB_EXPORTS, PW_WCB_ABI, PW_WCB_CWD, PW_WCB_REGISTRY,
-       PW_WCB_PREPARED, PW_WCB_THREAD, PW_WCB_RUNNING, PW_WCB_SOCKET };
+       PW_WCB_PREPARED, PW_WCB_THREAD, PW_WCB_RUNNING, PW_WCB_SOCKET, PW_WCB_DATA };
 typedef struct PwWineChildBootstrapOps {
     void *context;
     PwWineStartOps wine;

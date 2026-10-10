@@ -208,6 +208,8 @@ if [[ $wine_child_fixture == 1 ]]; then
     python3 "$root/tools/build_wine_service_child.py" --work "$root" --sdk "$sdk" \
         --foundation "${PW_WINE_CHILD_FOUNDATION:?Wine child needs the pinned PRX foundation}" \
         --runtime "${PW_WINE_CHILD_RUNTIME:?Wine child needs the matched runtime work directory}" \
+        --helper "$lapy_helper_elf" --helper-manifest "$helper_download/lapy-manifest.json" \
+        --helper-release "$helper_download/release.json" \
         --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
     python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" <<'PYWINEINPUT'
 import hashlib, json, pathlib, sys

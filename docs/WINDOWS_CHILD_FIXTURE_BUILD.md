@@ -320,8 +320,92 @@ log-open error, requests access, or retries the open. Parent access does not
 establish the child's filesystem view. A missing child log alone therefore
 cannot establish an access-denied or missing-directory diagnosis.
 
-A child can send its bootstrap failure and exit while the parent is listing
-and terminating that same owned service. A later nonzero `kill_return` is a
-cleanup observation, not the bootstrap cause or proof that the child remains
-alive. The existing ownership-uncertainty hold remains in force; no error code
-is treated as a retirement receipt.
+Where service cleanup is permitted, a nonzero `kill_return` is a cleanup
+observation, not the bootstrap cause or proof that the child remains alive.
+The ownership-uncertainty hold remains in force; no error code is treated as a
+retirement receipt. Child-local data readiness adds the stricter pre-ACK hold
+below, which prevents automatic cleanup of a possibly helper-targeted PID.
+
+### Experimental child data readiness
+
+The experimental native child checks `/data` after its session-bound BOOTSTRAP
+and before creating a log or any Wine thread. Reuse requires both `stat` and
+`lstat` to successfully observe a directory. Visibility from `stat` alone does
+not skip the helper. The original log, prefix, CWD, runtime hash and ABI checks still run;
+a later refusal never triggers a helper fallback.
+
+If `stat` observes a directory or reports `ENOENT`, and `lstat` reports
+`EPERM`, the child uses the same pinned one-shot
+[Lapy helper release](https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/v0.3.2-experimental)
+already packaged by the title. Paired `stat`/`lstat` `ENOENT` also preserves
+the original missing-directory helper path. It requests only its own PID and the existing
+filesystem capability, and performs the existing local PREPARE operation in that
+child. The distinction is supported by [upstream PR423](https://github.com/mpereiraesaa/prospero-win/pull/423):
+`stat` may see `/data` while `lstat` returns `EPERM`. Other `lstat` errors,
+non-directory results, and contradictory failed `stat` observations remain
+explicit refusals. A successful `lstat` is not a privilege or prefix-access proof. The helper's title, one-thread and credential checks remain authoritative.
+Status 7 alone does not identify which admission check refused the request.
+The phase/status interpretation is bound to helper source contract
+`b48b7d7236eca25c7b9dfd6c040c763ae05dde80`; the report explicitly makes no
+source-to-binary reproducibility claim. The child hashes one bounded heap buffer
+and uploads those exact bytes, after matching the packaged helper pin. It does
+not hash and then reread a changing file.
+
+Net is resolved after HELLO using the pinned SDK's ordinary module route:
+`/system/common/lib/libSceSysmodule.sprx`, internal Net ID `0x8000001c`, and
+successful `sceNetInit() == 0`. Modules remain loaded for the process lifetime.
+The static child graph remains libc/kernel and the existing preload mask. The
+builder separately verifies the SDK providers' 12 required function exports;
+this is not proof that console firmware loads or initializes them successfully
+inside this service. No helper request is sent after a failed resolution/init.
+SceNet socket IDs and inherited native fd3 stay in separate descriptor domains.
+Once data readiness observes a parent-control refusal, it suppresses the final
+diagnostic send too, even when an earlier operation remains the primary error.
+
+Before sending BOOTSTRAP, the owner logs `helper_possible` and latches possible
+helper activity. Only the exact successful BOOTSTRAP_ACK clears that latch.
+A pre-ACK refusal, cancellation, timeout or ambiguous transfer logs
+`helper_unsettled` and permanently holds ownership, with no Kill or automatic
+title restart. This intentionally also holds some conclusively refused children.
+The child keeps its PID alive if a request might have reached the helper but no
+recognized terminal response arrived. Closing a socket cannot recall remote
+work. A terminal response means the pinned helper finished its synchronous
+request, not that every failure restored access successfully. Status 8,
+wrong-phase responses and contradictory OK after local PREPARE failure stay
+unknown. The original 30-second deadline bounds admission to Wine; it cannot
+prove remote helper work stopped. Successful helper use requires actual data
+directory observations from both calls and the full measured 1,000 ms settle
+inside that original deadline. After helper success, the same denied/absent
+pairs may continue the existing bounded visibility polling; other errors remain
+refusals.
+
+The child log records `PW_WINE_CHILD_DATA` with `attempted`, `possible_apply`,
+`terminal`, `data_before`, `data_after`, `settled_ms`, `lstat_before`,
+`lstat_after`, and the raw return/errno of each observation. The
+`observations_before/after` masks distinguish an actual sample (mask value1 for stat,
+value2 for lstat) from an unobserved zero. Here `attempted` means one readiness
+invocation; `possible_apply` marks possible helper-request delivery.
+A reused directory has `data_before=1`, `lstat_before=1` and
+`possible_apply=0`; its after-observation mask stays zero because no second
+probe is invented. Terminal helper
+success has `possible_apply=1`, `terminal=1`, `data_after=1`, `lstat_after=1` and a settle of at
+least 1,000 ms. Neither record nor BOOTSTRAP_ACK proves Windows startup success.
+
+FAILURE packets keep wire version 2 and 136 bytes. Data readiness uses stage 12
+and the operation values starting at `0x200` in `pw_wine_child_data.h`. On every
+bootstrap FAILURE, `returned_length` bits 16–21 hold possible-apply, terminal,
+data-before, data-after, successful-directory-lstat-before and
+successful-directory-lstat-after flags; its low 16 bits preserve the existing
+operation auxiliary. `returned_value` retains the operation detail: CONTROL
+uses the exact native poll revents mask, RESOLVE uses the following fixed index,
+and other data operations use the observed helper status. Raw return and
+immediate errno remain separate. Resolution indices are 1 Sysmodule load,
+2 Sysmodule handle query, 3 NetInit, 4 NetSocket, 5 NetConnect, 6 NetSend,
+7 NetRecv, 8 NetSetsockopt, 9 NetSocketClose and 10 NetErrnoLoc.
+
+The compiler manifest binds the exact helper ELF, release record, helper
+manifest, protocol, generated hash and dynamic SDK provider bytes. Title and
+archive checks compare the packaged helper and retained metadata to that child
+binding. Host controls mock native/filesystem/transport boundaries; they do not
+execute the helper or establish service-console admission. A held result needs
+manual recovery and remains inconclusive, never an automatic compatibility pass.

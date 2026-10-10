@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Headless application main, linked with the unchanged foundation app_crt.
- * No payload CRT, helper, graphics setup or root-title restart hook. */
+ * Child-local data readiness precedes logs and all Wine threads. */
 #define _POSIX_C_SOURCE 200809L
 #include "pw_wine_child_bootstrap.h"
+#include "pw_wine_child_data.h"
 #include "../wine/ps5/pw_wine_threads.h"
 #include "wine-child-build.h"
 #include <errno.h>
@@ -20,11 +21,13 @@ int32_t sceKernelLoadStartModule(const char *,size_t,const void *,uint32_t,const
 int sceKernelGetModuleInfo(int32_t,void *);
 _Static_assert(sizeof(PW_WINE_CHILD_BUILD_ID)==41,"worker build ID shape");
 _Static_assert(sizeof(PW_WINE_CHILD_NTDLL_SHA256)==65,"ntdll hash shape");
+_Static_assert(sizeof(PW_WINE_CHILD_HELPER_SHA256)==65,"helper hash shape");
 _Static_assert(PW_WINE_CHILD_PRIVATE_DISPATCH_ABI==1,"private dispatcher cohort");
 _Static_assert(PW_WINE_CHILD_WOW64_ABI==1,"checked translated I386 cohort");
 static PwNativeChildIo child_io;
 static PwWineChildWireResult wire_result;
 static PwWineChildBootstrap bootstrap;
+static PwWineChildData data_readiness;
 /* Registered callbacks can outlive run_child's stack on a failure path. */
 static PwWineChildFrame active_session;
 static int log_fd=-1;
@@ -82,7 +85,8 @@ static int send_bootstrap_failure(const PwWineChildFrame *f)
     /* A failed local logger must not hide a pre-Wine failure on fd3. This is
      * one final nonblocking attempt, never a retry after transport ambiguity.
      * Keep any other cancellation callback and the original clock history. */
-    if(!f||f->kind!=PW_WC_FAILURE||bootstrap.started||wire_result.status||wire_result.delivery_uncertain||
+    if(!f||f->kind!=PW_WC_FAILURE||bootstrap.started||data_readiness.control_refused||
+       wire_result.status||wire_result.delivery_uncertain||
        wire_result.ownership_uncertain||wire_result.cleanup_failed)return -1;
     PwNativeChildIo io=child_io;unsigned left;
     if(io.cancelled==cancelled)io.cancelled=NULL;
@@ -280,7 +284,7 @@ static void observe_data(void)
 }
 static int open_log(const PwWineChildFrame *session)
 {
-    char path[256],line[256];
+    char path[256],line[512];
     int n=snprintf(path,sizeof(path),"/data/prospero-win/logs/wine-child-%s-%u-%llu.log",
                    PW_WINE_CHILD_BUILD_ID,session->child_pid,(unsigned long long)session->generation);
     if(n<=0||(size_t)n>=sizeof(path))return boot_failure(PW_WC_DIAG_LOG_PATH,n,0,0,0);
@@ -293,6 +297,15 @@ static int open_log(const PwWineChildFrame *session)
     if(n<=0||(size_t)n>=sizeof(line))return boot_failure(PW_WC_DIAG_LOG_HEADER,n,0,0,0);
     size_t before=log_bytes;output(line,(size_t)n);
     if(log_bytes-before!=(size_t)n)return boot_failure(PW_WC_DIAG_LOG_HEADER,-1,0,0,0); /* mandatory header */
+    n=snprintf(line,sizeof(line),"PW_WINE_CHILD_DATA attempted=%u possible_apply=%u terminal=%u data_before=%u data_after=%u settled_ms=%u lstat_before=%u lstat_after=%u observations_before=%u observations_after=%u stat_before_raw=%d stat_before_errno=%d lstat_before_raw=%d lstat_before_errno=%d stat_after_raw=%d stat_after_errno=%d lstat_after_raw=%d lstat_after_errno=%d\n",
+               data_readiness.attempted,data_readiness.possible_apply,data_readiness.terminal,
+               data_readiness.data_before,data_readiness.data_after,data_readiness.settled_ms,
+               data_readiness.lstat_before,data_readiness.lstat_after,data_readiness.before_observations,data_readiness.after_observations,
+               data_readiness.stat_before_raw,data_readiness.stat_before_error,data_readiness.lstat_before_raw,data_readiness.lstat_before_error,
+               data_readiness.stat_after_raw,data_readiness.stat_after_error,data_readiness.lstat_after_raw,data_readiness.lstat_after_error);
+    if(n<=0||(size_t)n>=sizeof(line))return boot_failure(PW_WC_DIAG_LOG_HEADER,n,0,0,0);
+    before=log_bytes;output(line,(size_t)n);
+    if(log_bytes-before!=(size_t)n)return boot_failure(PW_WC_DIAG_LOG_HEADER,-1,0,0,0);
     if(session->profile==PW_WC_PROFILE_BATTLENET){
         static const char policy[]="PW_WINE_CHILD_LOG completeness=not_guaranteed quota=65536 loss_policy=nonfatal snapshot_counters=lower_bounds\n";
         before=log_bytes;output(policy,sizeof(policy)-1);
@@ -320,14 +333,29 @@ static int run_child(void)
     const PwWineChildBootstrapOps ops={.context=session,.wine={sceKernelLoadStartModule,sceKernelGetModuleInfo,set_env,start_thread},
         .runtime=runtime,.directory=directory,.register_thread=pw_wine_thread_register,
         .unregister_thread=pw_wine_thread_unregister,.output=output,.socket_sink=socket_failure_sink,.record=record};
-    int rc=open_log(session);
+    int rc=pw_wine_child_data_prepare(&data_readiness,&child_io,PW_WINE_CHILD_HELPER_SHA256);
+    if(rc){
+        bootstrap.stage=PW_WCB_DATA;
+        boot_failure(data_readiness.api,data_readiness.raw,
+                     data_readiness.errno_valid?data_readiness.native_error:0,0,
+                     (int32_t)(data_readiness.api==PW_WCD_CONTROL?data_readiness.control_revents:
+                               data_readiness.api==PW_WCD_RESOLVE?data_readiness.resolution_index:data_readiness.helper_status));
+    }
+    if(!rc)rc=open_log(session);
     if(!rc)rc=pw_wine_child_bootstrap_prepare(&bootstrap,&child_io,fd,PW_WINE_CHILD_NTDLL_SHA256,
                                              PW_WINE_CHILD_PRIVATE_DISPATCH_ABI,session->profile,session->machine,&ops);
     PwWineChildFrame reply=*session;
     if(rc){reply.kind=PW_WC_FAILURE;reply.status=-(int)(bootstrap.stage?bootstrap.stage:1);
         reply.failure_api=bootstrap_failure.api;reply.failure_raw=bootstrap_failure.raw;
         reply.native_error=bootstrap_failure.error;reply.errno_valid=bootstrap_failure.errno_valid;
-        reply.returned_length=bootstrap_failure.auxiliary;reply.returned_value=bootstrap_failure.detail;
+        unsigned data_flags=(data_readiness.possible_apply?PW_WCD_POSSIBLE:0)|
+                            (data_readiness.terminal?PW_WCD_TERMINAL:0)|
+                            (data_readiness.data_before?PW_WCD_DATA_BEFORE:0)|
+                            (data_readiness.data_after?PW_WCD_DATA_AFTER:0)|
+                            (data_readiness.lstat_before?PW_WCD_LSTAT_BEFORE:0)|
+                            (data_readiness.lstat_after?PW_WCD_LSTAT_AFTER:0);
+        reply.returned_length=bootstrap_failure.auxiliary|(data_flags<<PW_WCD_STATE_SHIFT);
+        reply.returned_value=bootstrap_failure.detail;
         (void)send_bootstrap_failure(&reply);
         pw_wine_child_wire_close(&fd,&wire_result);return 14;}
     reply.kind=PW_WC_BOOTSTRAP_ACK;
@@ -365,5 +393,11 @@ int main(int argc,char **argv)
         if(log_fd>=0){int owned=log_fd;log_fd=-1;(void)close(owned);}
         (void)close(3);
     }
-    _exit(result); /* a finite supervisor failure, never Windows success */
+    if(data_readiness.possible_apply&&!data_readiness.terminal){
+        /* A timeout or closed socket cannot recall helper work against this
+         * PID. Keep it alive, with no Wine entry or new helper attempt, until
+         * manual title recovery. The parent independently holds uncertainty. */
+        for(;;){struct timespec pause={1,0};(void)nanosleep(&pause,NULL);}
+    }
+    _exit(result); /* known child teardown, never Windows success */
 }

@@ -406,6 +406,12 @@ if [ "$service_fixture" = 1 ]; then
             -fsyntax-only "$root/wine/ps5/$unit.c" >> "$work/service-translation-units.log" 2>&1 ||
             fail "real experimental adapter translation-unit gate failed: $unit"
     done
+    # Child-only readiness has no generated build header. Exercise its real
+    # target declarations here before the full host build; full child link,
+    # provider, conversion and SELF checks still run in the final producer.
+    "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror $service_cflags \
+        -fsyntax-only "$root/native/pw_wine_child_data.c" >> "$work/service-translation-units.log" 2>&1 ||
+        fail "real child data-readiness translation-unit gate failed"
 fi
 if [ "$compile_check_only" = 1 ]; then
     printf '%s\n' '{"schema":"pw-wine-build-stage/1","stage":"target-translation-units","complete_runtime":false}' > "$work/compile-check-only.json"

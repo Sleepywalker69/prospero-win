@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -64,8 +65,7 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #undef pw_wine_child_wire_same_session
 #undef pw_wine_child_wire_receive
 #undef pw_wine_child_wire_receive_step
-#include "bootstrap_diagnostic_bridge.h"
-#include "../native/pw_wine_child_data.h"
+#include "wine_child_data_bridge.h"
 int pw_wine_child_wire_same_session(const PwWineChildFrame*,const PwWineChildFrame*);
 static DiagnosticCase scenario;
 static DiagnosticResult child_result;
@@ -271,95 +271,58 @@ static Generation *bound(unsigned profile)
 {Generation *g=admitted(profile);uint64_t id=0;CHECK(!provider.bind_process(provider.context,44,45,46,&id)&&id==g->generation);return g;}
 
 
-static Generation *run_case(unsigned profile,int which,int probe,int cleanup)
+
+static Generation *flow(unsigned profile,int which,int data_mode)
 {
-    scenario=(DiagnosticCase){.which=which,.probe=probe,.cleanup_error=cleanup,.profile=(int)profile};
-    Generation *g=bound(profile);g->stream_fd=71;g->wine_tid=47;
-    if(profile==PW_WC_PROFILE_BATTLENET)g->machine=PW_WC_MACHINE_I386;
-    atomic_store(&g->state,G_STARTING);start_generation(&owner,g);
-    CHECK(child_result.exit_code==14&&child_result.closes[72]==1&&child_result.closes[3]==1);
-    CHECK(!child_result.envs&&!child_result.loads&&!child_result.threads);
-    CHECK(!g->ack&&atomic_load(&g->cleanup_requested)&&atomic_load(&g->state)!=G_RUNNING);
-    CHECK(m.adds==1&&!m.kills&&g->service_id==900&&!pw_wine_fixture_owner_release_ready(&owner));
-    CHECK(m.closes[81]==1&&m.closes[71]==1&&!m.closes[70]);
-    CHECK(child_result.stage_end==31000&&child_result.total_end==(profile==1?61000:301000));
-    return g;
+ scenario=(DiagnosticCase){.which=which,.data_mode=data_mode};Generation *g=bound(profile);g->stream_fd=71;g->wine_tid=47;if(profile==2)g->machine=PW_WC_MACHINE_I386;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);return g;
 }
-static void check_failure(unsigned profile,int which,unsigned api,int raw,int error,unsigned aux,int detail,int cleanup)
+int main(void)
 {
-    Generation *g=run_case(profile,which,0,cleanup);PwWineChildFrame *f=&child_result.failure;
-    CHECK(child_result.sends==2&&child_result.hello.kind==PW_WC_HELLO&&f->kind==PW_WC_FAILURE);
-    CHECK(f->status==-1&&f->failure_api==api&&f->failure_raw==raw);
-    CHECK(f->errno_valid==(unsigned)(error!=0)&&f->native_error==error);
-    CHECK(f->returned_length==(aux|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&f->returned_value==detail);
-    CHECK(pw_wine_child_wire_same_session(f,&g->session)&&f->sequence==1);
-    CHECK(m.boot_failures==1&&m.boot_values==1&&m.boot_api==api&&m.boot_raw==raw&&m.boot_errno==error);
-    CHECK(m.boot_aux1==(aux|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&m.boot_aux2==detail&&m.boot_valid==(error!=0));
-    CHECK(owner.failure_api==API_HANDOFF&&owner.failure_raw==-1&&owner.failure_errno==error);
-    CHECK(child_result.stage==(which==CASE_LOG?PW_WCB_INITIAL:PW_WCB_PATHS));
-    CHECK(child_result.probe_stats==(which==CASE_LOG));
-    CHECK(child_result.closes[5]==(which!=CASE_LOG));
-    CHECK(child_result.closes[9]==(which==CASE_RUNTIME_HASH||which==CASE_RUNTIME_READ||which==CASE_RUNTIME_STAT||which==CASE_RUNTIME_TYPE||which==CASE_RUNTIME_SIZE||which==CASE_RUNTIME_EXTRA||which==CASE_RUNTIME_CHANGED||which==CASE_RUNTIME_CLOSE));
-    printf("profile=%u case=%d cleanup_error=%d api=%u raw=%d errno=%d stage=%u accepted failure only\n",profile,which,cleanup,api,raw,error,child_result.stage);
-}
-int main(int argc,char **argv)
-{
-    if(argc==2&&!strcmp(argv[1],"initial-red")){
-        run_case(1,CASE_LOG,0,0);CHECK(child_result.failure.errno_valid==1&&child_result.failure.native_error==EACCES);return 0;
-    }
-    if(argc==2&&!strcmp(argv[1],"logger-red")){
-        scenario=(DiagnosticCase){.which=CASE_PREFIX,.log_after_path=1};
-        Generation *g=bound(1);g->stream_fd=71;g->wine_tid=47;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);
-        printf("PATHS original errno=%d local stage=%u sends=%d parent bootstrap records=%u\n",child_result.error,child_result.stage,child_result.sends,m.boot_failures);fflush(stdout);
-        CHECK(child_result.sends==2&&child_result.failure.native_error==EACCES&&m.boot_errno==EACCES);return 0;
-    }
-    for(unsigned profile=1;profile<=2;profile++)for(int cleanup=0;cleanup<2;cleanup++){
-        check_failure(profile,CASE_LOG,PW_WC_DIAG_LOG_OPEN,-1,EACCES,PW_WC_DATA_DIRECTORY,0,cleanup);
-        check_failure(profile,CASE_PREFIX,PW_WC_DIAG_DIRECTORY_STAT,-1,EACCES,PW_WC_DIRECTORY_PREFIX,0,cleanup);
-        check_failure(profile,CASE_CWD,PW_WC_DIAG_DIRECTORY_STAT,-1,ENOENT,PW_WC_DIRECTORY_CWD,0,cleanup);
-        check_failure(profile,CASE_PREFIX_TYPE,PW_WC_DIAG_DIRECTORY_TYPE,0,0,PW_WC_DIRECTORY_PREFIX,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_OPEN,PW_WC_DIAG_RUNTIME_OPEN,-1,EACCES,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_HASH,PW_WC_DIAG_RUNTIME_HASH,-1,0,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_READ,PW_WC_DIAG_RUNTIME_READ,-1,EIO,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_STAT,PW_WC_DIAG_RUNTIME_STAT,-1,EIO,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_TYPE,PW_WC_DIAG_RUNTIME_TYPE,0,0,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_SIZE,PW_WC_DIAG_RUNTIME_SIZE,0,0,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_EXTRA,PW_WC_DIAG_RUNTIME_EXTRA_READ,-1,EIO,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_CHANGED,PW_WC_DIAG_RUNTIME_CHANGED,0,0,0,0,cleanup);
-        check_failure(profile,CASE_RUNTIME_CLOSE,PW_WC_DIAG_RUNTIME_CLOSE,-1,EBADF,0,0,cleanup);
-    }
-    for(int probe=1;probe<=3;probe++){
-        run_case(1,CASE_LOG,probe,1);PwWineChildFrame *f=&child_result.failure;
-        CHECK(f->failure_api==PW_WC_DIAG_LOG_OPEN&&f->failure_raw==-1&&f->native_error==EACCES&&f->errno_valid==1);
-        unsigned expected=probe==1?PW_WC_DATA_STAT_FAILED:probe==2?PW_WC_DATA_NOT_DIRECTORY:PW_WC_DATA_UNEXPECTED;
-        int detail=probe==1?ENOTDIR:probe==3?7:0;
-        CHECK(f->returned_length==(expected|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&f->returned_value==detail&&child_result.probe_stats==1);
-        CHECK(m.boot_values==1&&m.boot_aux1==(expected|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&m.boot_aux2==detail&&m.boot_valid==1);
-    }
-    /* A valid wire failure from another generation is not attributed to ours. */
-    corrupt_generation=1;run_case(1,CASE_LOG,0,0);corrupt_generation=0;
-    CHECK(!m.boot_failures&&!m.boot_values&&owner.failure_errno==0);
-    /* Timeout/Stop in the optional observation cannot reset or extend budget. */
-    for(int action=1;action<=3;action++){
-        scenario=(DiagnosticCase){.which=CASE_LOG,.expire_probe=action==1,.cancel_probe=action==2,.expire_open=action==3};
-        Generation *g=bound(1);g->stream_fd=71;g->wine_tid=47;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);
-        CHECK(child_result.sends==1&&child_result.exit_code==14&&!g->ack);
-        CHECK(child_result.api==PW_WC_DIAG_LOG_OPEN&&child_result.raw==-1&&child_result.error==EACCES&&child_result.errno_valid==1);
-        CHECK(child_result.probe_stats==(action!=3)&&child_result.stage_end==31000&&child_result.total_end==61000);
-        CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.loads&&!child_result.threads);
-    }
-    run_case(1,CASE_PATH_BUDGET,0,0);CHECK(child_result.sends==1&&child_result.stage==PW_WCB_PATHS);
-    CHECK(child_result.api==PW_WC_DIAG_BUDGET&&child_result.error==0&&!child_result.errno_valid);
-    for(int fault=0;fault<=4;fault++){
-        scenario=(DiagnosticCase){.which=CASE_PREFIX,.log_after_path=1,.transport_guard=fault};
-        Generation *g=bound(1);g->stream_fd=71;g->wine_tid=47;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);
-        CHECK(child_result.api==PW_WC_DIAG_DIRECTORY_STAT&&child_result.error==EACCES&&child_result.errno_valid==1);
-        CHECK(child_result.exit_code==14&&!g->ack&&!child_result.threads&&child_result.closes[72]==1&&child_result.closes[3]==1&&child_result.closes[5]==1);
-        if(!fault){CHECK(child_result.sends==2&&child_result.failure.native_error==EACCES&&m.boot_errno==EACCES&&m.boot_values==1);}
-        else {CHECK(child_result.sends==1&&!m.boot_failures&&!m.boot_values);}
-    }
-    run_case(1,CASE_LOG_HEADER,0,0);
-    CHECK(child_result.stage==PW_WCB_INITIAL&&child_result.sends==2&&child_result.failure.failure_api==PW_WC_DIAG_LOG_HEADER);
-    CHECK(child_result.failure.status==-1&&!child_result.failure.errno_valid&&!child_result.failure.native_error&&m.boot_values==1);
-    printf("Actual child/main/bootstrap/codec/owner with mock platform boundaries: %u checks passed\n",checks);return 0;
+#ifdef PW_DATA_CONTROL_RED
+ Generation *red=flow(1,CASE_SUCCESS,PW_DATA_CONTROL_RED==1?4:6);
+ printf("control refusal: mode=%d sends=%d primary_api=%u failure_api=%u possible=%u terminal=%u held=%u\n",PW_DATA_CONTROL_RED,child_result.sends,child_result.data.api,child_result.failure.failure_api,child_result.data.possible_apply,child_result.data.terminal,red->helper_possible);fflush(stdout);
+ CHECK(child_result.sends==1);return 0;
+#endif
+ for(unsigned profile=1;profile<=2;profile++){
+  const int failures[]={CASE_LOG,CASE_PREFIX,CASE_CWD,CASE_RUNTIME_OPEN,CASE_RUNTIME_HASH};
+  for(unsigned i=0;i<sizeof(failures)/sizeof(failures[0]);i++){
+   Generation *g=flow(profile,failures[i],0);
+   CHECK(child_result.data.data_before&&child_result.data.ready&&child_result.data_calls==2&&!child_result.data_clones&&!child_result.data_sends);
+   CHECK(!child_result.parked&&child_result.exit_code==14&&child_result.failure.kind==PW_WC_FAILURE&&!g->ack&&!child_result.threads);
+   CHECK(g->helper_possible&&atomic_load(&g->state)==G_UNCERTAIN&&!m.kills);
+   CHECK((child_result.failure.returned_length>>PW_WCD_STATE_SHIFT)==(PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE));
+   CHECK((child_result.failure.returned_length&0xffff)==(failures[i]==CASE_LOG?PW_WC_DATA_DIRECTORY:failures[i]==CASE_PREFIX?PW_WC_DIRECTORY_PREFIX:failures[i]==CASE_CWD?PW_WC_DIRECTORY_CWD:0)); /* no fallback helper after filesystem refusal */
+  }
+  Generation *g=flow(profile,CASE_SUCCESS,0);CHECK(child_result.data.data_before&&!child_result.data_sends&&!g->helper_possible&&g->ack&&child_result.loads==1&&child_result.threads==1);
+  CHECK(child_result.data_marker_count==1&&strstr(child_result.data_marker,"attempted=1 possible_apply=0 terminal=0 data_before=1 data_after=1 settled_ms=0 lstat_before=1 lstat_after=0 observations_before=3 observations_after=0"));
+  g=flow(profile,CASE_SUCCESS,1);CHECK(child_result.data.possible_apply&&child_result.data.terminal&&child_result.data.ready&&child_result.data.settled_ms>=1000);
+  CHECK(child_result.data_clones==1&&child_result.data_sends>0&&!g->helper_possible&&g->ack&&child_result.loads==1&&child_result.threads==1);
+  CHECK(child_result.data_marker_count==1&&strstr(child_result.data_marker,"attempted=1 possible_apply=1 terminal=1 data_before=0 data_after=1 settled_ms=1000 lstat_before=0 lstat_after=1 observations_before=3 observations_after=3"));
+  for(unsigned mode=8;mode<=9;mode++){
+   g=flow(profile,CASE_SUCCESS,(int)mode);CHECK(child_result.data.ready&&child_result.data.terminal&&child_result.data.possible_apply&&child_result.data_clones==1);
+   CHECK(child_result.data.lstat_after&&child_result.data.settled_ms==1000&&g->ack&&!g->helper_possible&&child_result.loads==1&&child_result.threads==1);
+   CHECK(child_result.data.lstat_before_error==(mode==8?EPERM:ENOENT)&&child_result.data.data_before==(mode==8));
+  }
+  for(unsigned mode=0;mode<2;mode++){g=flow(profile,CASE_DATA_MARKER,(int)mode);CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads);CHECK(child_result.data_marker_count==1&&child_result.failure.failure_api==PW_WC_DIAG_LOG_HEADER&&g->helper_possible);}
+  g=flow(profile,CASE_SUCCESS,2);CHECK(child_result.data.possible_apply&&!child_result.data.terminal&&!child_result.data.ready);
+  CHECK(child_result.parked&&child_result.exit_code==0&&!g->ack&&!child_result.loads&&!child_result.threads);
+  CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==(PW_WCD_POSSIBLE<<PW_WCD_STATE_SHIFT)&&g->helper_possible);
+  CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.closes[5]);
+  g=flow(profile,CASE_SUCCESS,5);CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads);
+  CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==0&&child_result.failure.returned_value==PW_WCD_NET_INIT_SYMBOL);
+  const unsigned stopped_modes[]={4,6,7};
+  for(unsigned i=0;i<3;i++){
+   unsigned mode=stopped_modes[i];g=flow(profile,CASE_SUCCESS,(int)mode);
+   CHECK(child_result.sends==1&&child_result.data.control_refused&&!g->ack&&!child_result.loads&&!child_result.threads);
+   CHECK(g->helper_possible&&atomic_load(&g->state)==G_UNCERTAIN&&!m.kills);
+   CHECK(child_result.data.api==(mode==6?PW_WCD_RESOLVE:PW_WCD_CONTROL));
+   CHECK(child_result.parked==(mode==7)&&child_result.exit_code==(mode==7?0:14));
+   CHECK(child_result.data.possible_apply==(mode==7)&&!child_result.data.terminal);
+   CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.closes[5]);
+   if(mode==6)CHECK(child_result.data.raw==0&&!child_result.data.errno_valid&&child_result.data.resolution_index==PW_WCD_NET_INIT_SYMBOL);
+  }
+  g=flow(profile,CASE_SUCCESS,3);CHECK(child_result.data.possible_apply&&child_result.data.terminal&&!child_result.data.ready);
+  CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads&&g->helper_possible);
+ }
+ printf("Actual adapter/main/bootstrap/codec/owner with mocked platform boundaries: %u checks passed\n",checks);return 0;
 }

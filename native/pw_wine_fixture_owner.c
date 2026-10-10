@@ -37,6 +37,7 @@ typedef struct Generation {
     uint32_t caller_pid,caller_tid,wine_pid,wine_tid,machine;
     int stream_fd,control_fd,passed_fd,service_id,baseline[PW_WFO_LIST_CAP];
     unsigned baseline_count,launch_possible,hello,ack,listed,absent,kill_called,closed,list_calls,close_pending,missing_reported;
+    unsigned helper_possible; /* supervisor-owned; ACK is the only clearing authority */
     int kill_result;
     PwWineChildFrame session,signal;
     PwNativeChildIo io;
@@ -533,7 +534,7 @@ static void wire_failure(PwWineFixtureOwner *o,Generation *g)
     record(o,"wire_failure",g,g->wire.api,g->wire.raw_result,g->wire.native_error);
     atomic_store(&g->cleanup_requested,1);
 }
-static void start_generation(PwWineFixtureOwner *o,Generation *g)
+static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
 {
     if(budget(o,g,1)||service_list(o,g,1)<0){retire(o,g);return;}
     int pair[2]={-1,-1};int rc=socketpair(AF_UNIX,SOCK_SEQPACKET,0,pair),error=rc<0?errno:0;
@@ -597,6 +598,10 @@ static void start_generation(PwWineFixtureOwner *o,Generation *g)
     g->hello=1;atomic_store_explicit(&g->identity_ready,1,memory_order_release);
     record(o,"hello",g,hello.child_pid,hello.child_ppid,g->service_id);
     if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}
+    /* This matching child may dispatch the fixed PID-targeted data helper as
+     * soon as BOOTSTRAP arrives. Latch before even a possibly partial send. */
+    g->helper_possible=1;
+    record(o,"helper_possible",g,g->session.child_pid,g->service_id,0);
     rc=pw_wine_child_wire_send(&g->io,g->control_fd,&g->session,g->stream_fd,&g->wire);
     close_slot(o,&g->stream_fd);
     if(rc){wire_failure(o,g);return;}
@@ -614,10 +619,25 @@ static void start_generation(PwWineFixtureOwner *o,Generation *g)
         record(o,"bootstrap_failure_value",g,ack.returned_length,ack.returned_value,ack.errno_valid);
         failure(o,API_HANDOFF,ack.status,ack.errno_valid?ack.native_error:0,0);atomic_store(&g->cleanup_requested,1);return;
     }
+    /* ACK also certifies terminal helper success (or preexisting data), the
+     * full settle and actual bootstrap readiness in this exact child build. */
+    g->helper_possible=0;
     if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}
     g->ack=1;g->io.stage_end=g->end;
     atomic_store_explicit(&g->state,G_RUNNING,memory_order_release);
     record(o,"bootstrap_ready",g,g->wine_pid,g->wine_tid,0);
+}
+static void start_generation(PwWineFixtureOwner *o,Generation *g)
+{
+    start_generation_attempt(o,g);
+    if(g->helper_possible){
+        /* A timeout/failure cannot recall a helper request or safely recycle
+         * its target PID. Even a possibly settled rejection stays conservative
+         * without the exact ACK. Existing uncertainty blocks Kill and release. */
+        atomic_store(&o->blocked,1);atomic_store(&o->uncertain,1);
+        atomic_store_explicit(&g->state,G_UNCERTAIN,memory_order_release);
+        record(o,"helper_unsettled",g,g->session.child_pid,g->service_id,g->wire.status);
+    }
 }
 static void observe_control(PwWineFixtureOwner *o,Generation *g)
 {
