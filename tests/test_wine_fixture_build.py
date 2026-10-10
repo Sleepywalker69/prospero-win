@@ -23,6 +23,8 @@ class WineFixtureBuild(unittest.TestCase):
         block = block.split("\n", 1)[1]
         objects = ['dlls/ntdll/unix/' + n + '.o' for n in ('creation','loader','process','server','signal_x86_64','thread','virtual')]
         objects += ['dlls/wow64/x86_64-windows/syscall.o']
+        objects += ['dlls/dnsapi/' + arch + '-windows/' + unit + '.o'
+                    for arch in ('i386', 'x86_64') for unit in ('main', 'query')]
         objects += ['server/' + n + '.o' for n in ('creation','trace','process','ptrace','request','thread')]
         with tempfile.TemporaryDirectory(prefix='real gate routing ') as temporary:
             root = Path(temporary); sdk = root / 'sdk'; (sdk / 'bin').mkdir(parents=True)
@@ -50,9 +52,12 @@ class WineFixtureBuild(unittest.TestCase):
                     self.assertFalse((work/'make-args').exists()); self.assertFalse(calls.exists())
                     self.assertIn('FULL_CONTINUATION', result.stdout); continue
                 args = (work/'make-args').read_text().splitlines()
-                self.assertEqual(args[-14:], objects)
-                self.assertEqual(args.count('-W'), 14)
-                expected_sources = [str(work/'source'/name.replace('x86_64-windows/', '')).removesuffix('.o') + '.c' for name in objects]
+                self.assertEqual(len(objects), 18)
+                self.assertEqual(args[-len(objects):], objects)
+                self.assertEqual(args.count('-W'), 16)
+                expected_sources = list(dict.fromkeys(
+                    str(work/'source'/name.replace('x86_64-windows/', '').replace('i386-windows/', '')).removesuffix('.o') + '.c'
+                    for name in objects))
                 self.assertEqual([args[i+1] for i, arg in enumerate(args) if arg == '-W'], expected_sources)
                 self.assertIn('-k', args)
                 compiled = [json.loads(row) for row in calls.read_text().splitlines()] if calls.exists() else []

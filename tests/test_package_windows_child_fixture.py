@@ -360,6 +360,32 @@ class ArchiveControls(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'BUILD-INFO'):
             package.verify_directory(self.root)
 
+    def test_both_dnsapi_overlays_refuse_rehashed_stale_bytes(self):
+        self.prepared_battle()
+        for arch, directory in (('i386-windows', 'syswow64'), ('x86_64-windows', 'system32')):
+            for relative in (package.LIB + '/' + arch + '/dnsapi.dll',
+                             package.CONSOLE_PREFIX + '/drive_c/windows/' + directory + '/dnsapi.dll',
+                             package.BATTLE_PREFIX + '/drive_c/windows/' + directory + '/dnsapi.dll'):
+                path = self.root / relative
+                original = path.read_bytes()
+                path.write_bytes(b'previous DNSAPI without the guard')
+                self.finish(True)
+                # Earlier inventory admission may reject changed prefix bytes
+                # before the final per-PE equality; either must refuse them.
+                with self.subTest(path=relative), self.assertRaises(ValueError):
+                    package.verify_directory(self.root)
+                path.write_bytes(original)
+
+    def test_legacy_22_pe_report_cannot_omit_dnsapi(self):
+        self.prepared()
+        report = package.read_json(self.root / 'provenance/wine-build.json')
+        for arch in ('i386-windows', 'x86_64-windows'):
+            del report['pe'][arch + '/dnsapi.dll']
+        self.json('provenance/wine-build.json', report)
+        self.finish()
+        with self.assertRaisesRegex(ValueError, '24 PE provenance'):
+            package.verify_directory(self.root)
+
     def test_unreviewed_additional_battle_profile_cannot_silently_enter_package(self):
         self.prepared()
         self.put('console/data/prospero-win/profiles/battlenet-experimental-v1.profile', b'original inert profile text')

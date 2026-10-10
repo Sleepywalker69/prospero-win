@@ -24,6 +24,24 @@ class FailureRetention(unittest.TestCase):
         self.assertEqual((self.root/'out/target/worker.elf').read_bytes(),path.read_bytes());self.assertFalse(result['accepted'])
         with self.assertRaises(ValueError):retention.Collector(self.root/'out')
 
+    def test_dnsapi_objects_precede_large_evidence_and_keep_exact_bytes(self):
+        names=('repo','title_foundation','foundation','wine_work','tls_work','title_build')
+        args=argparse.Namespace(**{name:self.root/name for name in names},wine_archive=self.root/'wine.tar.gz',
+                                sdk_source_archive=self.root/'sdk.tar.gz',out=self.root/'retained')
+        for name in names:getattr(args,name).mkdir()
+        expected={}
+        for arch in ('i386','x86_64'):
+            for unit in ('main','query'):
+                name='build/dlls/dnsapi/'+arch+'-windows/'+unit+'.o'
+                path=args.wine_work/name;path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_bytes((arch+unit).encode());expected['target/wine/'+name]=path.read_bytes()
+        args.wine_archive.write_bytes(b'x'*512)
+        with mock.patch.object(retention,'MAX_TOTAL',sum(map(len,expected.values()))):
+            result=retention.collect(args)
+        self.assertEqual(set(result['files']),set(expected))
+        for name,value in expected.items():self.assertEqual((args.out/name).read_bytes(),value)
+        self.assertTrue(result['omissions']);self.assertFalse(result['accepted'])
+
     def test_links_and_path_escape_refused(self):
         source=self.root/'source';source.mkdir();other=self.root/'private';other.write_bytes(b'private')
         (source/'alias').symlink_to(other)

@@ -62,6 +62,12 @@ class Fixture:
             self.report["prx"]["modules"][name] = entry
         self.write("source/dlls/secur32/schannel_gnutls.c", b"LOAD_FUNCPTR(gnutls_handshake)\n")
         self.write("source/dlls/crypt32/unixlib.c", b"LOAD_FUNCPTR(gnutls_global_init)\n")
+        for name in ("main.c", "dnsapi.h", "query.c", "Makefile.in", "dnsapi.spec"):
+            self.write("source/dlls/dnsapi/" + name, ("inert source " + name).encode())
+        for arch in ("i386", "x86_64"):
+            for unit in ("main", "query"):
+                self.write(f"build/dlls/dnsapi/{arch}-windows/{unit}.o", b"inert object identity")
+        self.report["dnsapi_guard"] = check.dnsapi_guard_record(self.work)
 
     def write(self, name, contents):
         path = self.work / name
@@ -196,6 +202,28 @@ class DataFixture(Fixture):
 
 
 class PrxBuildContracts(unittest.TestCase):
+    def test_dnsapi_guard_binds_sources_objects_and_both_final_dlls(self):
+        for part, base in (("sources", "source"), ("objects", "build"), ("pe", "pe")):
+            with tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d))
+                names = list(f.report["dnsapi_guard"][part])
+            for name in names:
+                with self.subTest(part=part, name=name), tempfile.TemporaryDirectory() as d:
+                    f = Fixture(Path(d))
+                    f.write(base + "/" + name, b"changed after the report")
+                    if part == "pe":
+                        # A coherent general PE hash cannot waive guard binding.
+                        f.report["pe"][name] = check.sha(f.work / base / name)
+                    with self.assertRaisesRegex(ValueError, "DNSAPI guarded"):
+                        f.validate()
+        for defect in ("missing", "extra", "claimed-runtime"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d))
+                if defect == "missing": del f.report["dnsapi_guard"]
+                elif defect == "extra": f.report["dnsapi_guard"]["objects"]["other.o"] = "0" * 64
+                else: f.report["dnsapi_guard"]["runtime_validated"] = True
+                with self.assertRaisesRegex(ValueError, "DNSAPI guarded"): f.validate()
+
     def test_documented_system_data_has_exact_provider_type_and_relocations(self):
         with tempfile.TemporaryDirectory() as d:
             f = DataFixture(Path(d))
@@ -222,7 +250,7 @@ class PrxBuildContracts(unittest.TestCase):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
                 f = Fixture(Path(d))
                 target = "x86_64-windows/wow64win.dll"
-                self.assertEqual(len(f.report["pe"]), 22)
+                self.assertEqual(len(f.report["pe"]), 24)
                 if defect == "missing-report": del f.report["pe"][target]
                 elif defect == "missing-file": (f.work / "pe" / target).unlink()
                 elif defect == "changed-file": f.write("pe/" + target, b"changed after build report")

@@ -173,8 +173,8 @@ class FixturePackage(unittest.TestCase):
     def pe_tree(self):
         root, work = self.root / 'prefix', self.root / 'wine'
         expected = {}
-        for arch, names in [('i386-windows', [f'm{i}' for i in range(10)]),
-                            ('x86_64-windows', [f'm{i}' for i in range(12)])]:
+        for arch, names in [('i386-windows', [f'm{i}' for i in range(11)]),
+                            ('x86_64-windows', [f'm{i}' for i in range(13)])]:
             for name in names:
                 directory = 'system32' if arch.startswith('x86_64') else 'syswow64'
                 target = root / 'drive_c/windows' / directory / (name + '.dll')
@@ -185,15 +185,37 @@ class FixturePackage(unittest.TestCase):
         (root / 'system.reg').write_bytes(b'registry unchanged')
         return root, work, expected
 
-    def test_all_22_pe_changes_and_no_other_mutation(self):
+    def test_all_24_pe_changes_and_no_other_mutation(self):
         root, work, expected = self.pe_tree()
         before = prefix.inventory(root)
         changes = prefix.replace_pes(root, work, expected)
-        self.assertEqual(len(changes), 22)
+        self.assertEqual(len(changes), 24)
         prefix.verify_delta(before, prefix.inventory(root), changes)
         (root / 'system.reg').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'mutation'):
             prefix.verify_delta(before, prefix.inventory(root), changes)
+
+    def test_matched_pe_set_requires_dnsapi_in_both_architectures(self):
+        from check_wine_prx_build import PE
+        self.assertIn('dnsapi', PE)
+        work = self.root / 'matched-wine'
+        names = {a + '/' + n + '.dll' for a in ('i386-windows', 'x86_64-windows') for n in PE}
+        names |= {'x86_64-windows/wow64.dll', 'x86_64-windows/wow64win.dll'}
+        expected = {}
+        for name in names:
+            path = work / 'pe' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(('original inert PE: ' + name).encode())
+            expected[name] = prefix.sha(path)
+        report = work / 'report.json'
+        report.write_text(json.dumps({'pe': expected}))
+        self.assertEqual(prefix.patched_pe_set(ROOT, work), expected)
+        for arch in ('i386-windows', 'x86_64-windows'):
+            missing = dict(expected)
+            del missing[arch + '/dnsapi.dll']
+            report.write_text(json.dumps({'pe': missing}))
+            with self.assertRaisesRegex(ValueError, 'patched PE set'):
+                prefix.patched_pe_set(ROOT, work)
 
     def test_pe_parent_link_never_writes_input(self):
         root, work, expected = self.pe_tree()

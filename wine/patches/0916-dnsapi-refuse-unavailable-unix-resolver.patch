@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sat, 10 Oct 2026 22:06:00 +0000
+Subject: [PATCH] dnsapi: Refuse resolver calls when Unix initialization failed.
+
+DNSAPI remains loadable when its optional Unix resolver is missing. Its
+numeric address and PE-only configuration paths still work, but the four
+RESOLV_CALL operations currently dispatch through an uninitialized table.
+
+Record readiness only after successful initialization with a nonzero
+handle. Return ERROR_NOT_SUPPORTED in the DNS_STATUS domain before any
+unavailable backend call, preserving its output buffers and lengths.
+A healthy backend receives the original operation and parameters and its
+return value is unchanged. This supplies no DNS resolver, fallback,
+server configuration or synthetic DNS answer.
+
+The private boundary covers query, server-list and search-list calls;
+DllMain still succeeds so numeric and other PE-only operations retain
+their existing behavior. Keep the raw initialization status in the error
+message instead of returning an NTSTATUS as a DNS_STATUS.
+
+References:
+ https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsquery_a
+ https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsqueryconfig
+ https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
+---
+diff --git a/dlls/dnsapi/dnsapi.h b/dlls/dnsapi/dnsapi.h
+--- a/dlls/dnsapi/dnsapi.h
++++ b/dlls/dnsapi/dnsapi.h
+@@ -130,4 +130,6 @@
+     unix_funcs_count
+ };
+ 
+-#define RESOLV_CALL( func, params ) WINE_UNIX_CALL( unix_ ## func, params )
++DNS_STATUS dnsapi_resolv_call( enum unix_funcs func, void *params );
++
++#define RESOLV_CALL( func, params ) dnsapi_resolv_call( unix_ ## func, params )
+diff --git a/dlls/dnsapi/main.c b/dlls/dnsapi/main.c
+--- a/dlls/dnsapi/main.c
++++ b/dlls/dnsapi/main.c
+@@ -32,16 +32,33 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(dnsapi);
+ 
++static BOOL resolv_ready;
++
++/* DNSAPI also provides numeric-address and PE-only operations. Keep those
++ * usable when its optional resolver backend is unavailable, but never
++ * dispatch through an uninitialized Unix-call table. */
++DNS_STATUS dnsapi_resolv_call( enum unix_funcs func, void *params )
++{
++    if (!resolv_ready) return ERROR_NOT_SUPPORTED;
++    return WINE_UNIX_CALL( func, params );
++}
++
+ BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
+ {
++    NTSTATUS status;
++
+     TRACE( "(%p, %lu, %p)\n", hinst, reason, reserved );
+ 
+     switch (reason)
+     {
+     case DLL_PROCESS_ATTACH:
+         DisableThreadLibraryCalls( hinst );
+-        if (__wine_init_unix_call())
+-            ERR( "No libresolv support, expect problems\n" );
++        resolv_ready = FALSE;
++        status = __wine_init_unix_call();
++        resolv_ready = !status && __wine_unixlib_handle;
++        if (!resolv_ready)
++            ERR( "Resolver backend unavailable (status %#lx, handle %s)\n",
++                 status, wine_dbgstr_longlong(__wine_unixlib_handle) );
+         break;
+     case DLL_PROCESS_DETACH:
+         break;

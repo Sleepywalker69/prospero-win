@@ -38,11 +38,19 @@ publishing or console deployment occurs.
 3. Apply the exact final patch series to a private reference checkout and run
    the existing owned-source staging commands. Build host tools and the pinned
    public SDK/converters/TLS prerequisites, then compile the complete
-   experimental target units before starting the full host runtime.
+   experimental target units before starting the full host runtime. This
+   includes DNSAPI main/query for both PE architectures. The existing source
+   consumer gate also runs the actual DNSAPI main/query host controls with
+   mocked platform boundaries, under strict compilation and UBSan.
 4. Build full host Wine and retain its source checkpoint. Build and check the
    complete private-ON Wine PE/PRX cohort with `PW_WINE_SERVICE_FIXTURE=1`.
    The existing 14-module checker remains required; its exact PE set contains
-   22 patched DLLs, including x64 wow64 and wow64win.
+   24 patched DLLs, including DNSAPI for both architectures and x64 wow64
+   and wow64win. DNSAPI refuses an unavailable Unix resolver with status 50;
+   this preserves PE-only operations and provides no DNS backend.
+   The build report binds its five source inputs, four target objects and two
+   final DLLs. The bounded diagnostic artifact retains those objects and the
+   report before large sources or PRXs; admission must reject missing evidence.
 5. Build the distinct full-CRT service child, using unchanged app_crt and the
    high-address native layout. Its service-only converter copy adds a relocated
    pointer to the preload mask. The ordinary worker modes keep their original
@@ -52,7 +60,7 @@ publishing or console deployment occurs.
    parent/child diagnostic is added after the initialization audit and is never
    executed by the Linux producer.
 7. Convert through the existing `pw_prefix` filesystem seam, then substitute
-   all 22 matched PS5 PE DLLs with explicit before/after records. Check that all
+   all 24 matched PS5 PE DLLs with explicit before/after records. Check that all
    other exported files, directories and modes are unchanged, and recheck the
    selected ntdll/win32u private ABI. Assemble only after title, child, runtime,
    prefix, fixture and source identities agree.
@@ -144,7 +152,7 @@ operator's supplied PE32 installer there after its own admission checks.
 `provenance/battlenet-capability.json` binds the exact runtime check, CPU bytes,
 profile and prefix report, with `installer_included:false` and
 `runtime_validated:false`. `provenance/battlenet-prefix.json` retains the complete
-second inventory and all22 PE substitutions. The top-level package manifest
+second inventory and all 24 PE substitutions. The top-level package manifest
 admits the optional Battle roles only when these checks succeed.
 
 ## Prepared prefix and archive paths
