@@ -9,6 +9,7 @@ import types
 import unittest
 from unittest.mock import patch
 import hashlib
+import json
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,7 @@ class Mapping:
 
 def fixture():
     needed = ['libSceLibcInternal.sprx', 'libkernel.sprx']
-    names = ['_init_env', 'atexit', 'exit', 'pthread_create']
+    names = list(build.CRT_IMPORTS)
     providers = {name: {'definitions': {}, 'sha256': str(i) * 64} for i, name in enumerate(needed, 1)}
     linked, converted = Mapping(), Mapping()
     linked.kind = 3; converted.kind = 0xfe10
@@ -48,6 +49,61 @@ def fixture():
 
 
 class WineServiceChildBuild(unittest.TestCase):
+    def test_helper_inputs_bind_same_title_pin_manifest_and_retained_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'tools').mkdir();(root/'native').mkdir();work=root/'child';work.mkdir()
+            (root/'native/lapy_elevation_protocol.h').write_bytes(b'original test protocol')
+            elf=b'\x7fELF'+b'original inert helper';digest=hashlib.sha256(elf).hexdigest()
+            script='lapy_release='+build.HELPER_RELEASE+'\nlapy_elf_sha256='+digest+'\n'
+            (root/'tools/build_native.sh').write_text(script)
+            manifest={'schema':'lapy-owned-build/1','mode':'elf-helper','target_title':'PPSA99995',
+                      'elf_sha256':digest,'protocol_sha256':build.sha(root/'native/lapy_elevation_protocol.h'),
+                      'features':['root_layout_probe_retry'],'max_requests':1,'service':False,'require_client_result':False}
+            release={'repository':'mpereiraesaa/PS5-Lapy-JB-Daemon','tag_name':build.HELPER_RELEASE,
+                     'release_url':'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/'+build.HELPER_RELEASE}
+            (work/'lapy.elf').write_bytes(elf);(work/'lapy-manifest.json').write_text(json.dumps(manifest))
+            (work/'lapy-release.json').write_text(json.dumps(release))
+            args=types.SimpleNamespace(service_work=work)
+            with patch.object(build,'HELPER_SHA',digest):
+                expected=build.helper_inputs(args,root)
+                explicit=types.SimpleNamespace(helper=work/'lapy.elf',helper_manifest=work/'lapy-manifest.json',helper_release=work/'lapy-release.json')
+                self.assertEqual(expected,build.helper_inputs(explicit,root))
+                for key,value in [('target_title','OTHER'),('elf_sha256','0'*64),('protocol_sha256','0'*64),
+                                  ('max_requests',2),('service',True),('require_client_result',True),('features',[])]:
+                    bad=dict(manifest);bad[key]=value;(work/'lapy-manifest.json').write_text(json.dumps(bad))
+                    with self.subTest(field=key),self.assertRaises(ValueError):build.helper_inputs(args,root)
+                (work/'lapy-manifest.json').write_text(json.dumps(manifest))
+                (work/'lapy.elf').write_bytes(elf+b'changed')
+                with self.assertRaises(ValueError):build.helper_inputs(args,root)
+                (work/'lapy.elf').write_bytes(elf)
+                (root/'tools/build_native.sh').write_text(script.replace(digest,'f'*64))
+                with self.assertRaisesRegex(ValueError,'title pin'):build.helper_inputs(args,root)
+                (root/'tools/build_native.sh').write_text(script)
+                bad=dict(release,tag_name='different');(work/'lapy-release.json').write_text(json.dumps(bad))
+                with self.assertRaisesRegex(ValueError,'release identity'):build.helper_inputs(args,root)
+
+    def test_dynamic_providers_require_all_exact_function_exports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sdk=Path(directory);(sdk/'target/lib').mkdir(parents=True)
+            providers={}
+            for name,calls in build.DYNAMIC_FUNCTIONS.items():
+                leaf=(build.PROVIDERS|build.DYNAMIC_PROVIDERS)[name]
+                (sdk/'target/lib'/leaf).write_bytes(('inert '+name).encode())
+                providers[leaf]={'soname':name,'definitions':{call:'FUNC' for call in calls}}
+            def inspect(path,*unused):return providers[path.name]
+            with patch.object(build,'provider',side_effect=inspect):
+                result=build.dynamic_inputs(sdk,Path('/inert'),None)
+                self.assertFalse(result['runtime_validated']);self.assertEqual(result['net_internal_id'],'0x8000001c')
+                for name,calls in build.DYNAMIC_FUNCTIONS.items():
+                    leaf=(build.PROVIDERS|build.DYNAMIC_PROVIDERS)[name]
+                    for call in calls:
+                        providers[leaf]['definitions'][call]='OBJECT'
+                        with self.subTest(call=call),self.assertRaises(ValueError):build.dynamic_inputs(sdk,Path('/inert'),None)
+                        providers[leaf]['definitions'][call]='FUNC'
+                    providers[leaf]['soname']='wrong'
+                    with self.assertRaises(ValueError):build.dynamic_inputs(sdk,Path('/inert'),None)
+                    providers[leaf]['soname']=name
+
     def test_converter_replay_binds_every_specialization_field(self):
         original = b"/* original high-layout writer */\n" + b"".join(before for before, _ in converter.EDITS)
         with tempfile.TemporaryDirectory() as directory, patch.object(
@@ -71,10 +127,13 @@ class WineServiceChildBuild(unittest.TestCase):
 
     def test_generated_header_requires_both_actual_capabilities(self):
         bound={'runtime': {'private_dispatch_abi':1, 'private_dispatch_wow64_abi':1,
-                           'ntdll_sha256':'b'*64}}
+                           'ntdll_sha256':'b'*64}, 'helper': {'elf': {'sha256': build.HELPER_SHA}}}
         text=build.child_header(bound,'a'*40)
         self.assertIn('#define PW_WINE_CHILD_WOW64_ABI 1\n',text)
         self.assertIn('b'*64,text)
+        self.assertIn(build.HELPER_SHA,text)
+        wrong=copy.deepcopy(bound);wrong['helper']['elf']['sha256']='0'*64
+        with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
         for name in ('private_dispatch_abi','private_dispatch_wow64_abi'):
             wrong=copy.deepcopy(bound);wrong['runtime'].pop(name)
             with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
@@ -98,6 +157,18 @@ class WineServiceChildBuild(unittest.TestCase):
         graph = build.ordinary_graph(*fixture())
         self.assertEqual(set(graph), set(build.CRT_IMPORTS))
         self.assertEqual(graph['_init_env']['provider'], 'libSceLibcInternal.sprx')
+
+    def test_valid_bound_static_net_or_sysmodule_import_is_refused(self):
+        for name in ('sceNetInit','sceSysmoduleLoadModuleInternal'):
+            linked,converted,providers=fixture();index=len(linked.symbols)
+            providers['libkernel.sprx']['definitions'][name]='FUNC'
+            symbol={'name':name,'type':2,'binding':1,'visibility':0,'section':0,'value':0,'size':0}
+            linked.symbols.append(symbol)
+            converted.symbols.append({**symbol,'name':nid(name)+'#B#C'})
+            relocation={'symbol':index,'type':6,'addend':0,'address':0x1000+index*8}
+            linked.relocations.append(relocation);converted.relocations.append(dict(relocation))
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'dynamically resolved calls'):
+                build.ordinary_graph(linked,converted,providers)
 
     def test_wrong_provider_set(self):
         linked, converted, providers = fixture()

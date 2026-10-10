@@ -942,3 +942,14 @@ tests/test_wine_compile_cache.py
 tests/bootstrap_diagnostic_bridge.h
 tests/bootstrap_diagnostic_child.c
 tests/test_bootstrap_diagnostic_flow.c
+
+# Experimental child-local data readiness and exact-source mock controls
+native/pw_wine_child_data.c
+native/pw_wine_child_data.h
+tests/test_wine_child_data.c
+tests/test_wine_child_data_owner.c
+tests/test_wine_child_data_flow.c
+tests/wine_child_data_main.c
+tests/wine_child_data_bridge.h
+tests/data_adapter_fixture.h
+tests/data_child_fixture/wine-child-build.h

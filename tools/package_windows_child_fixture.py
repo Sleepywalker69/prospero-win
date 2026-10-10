@@ -378,6 +378,9 @@ def validate_manifest(manifest, values, read):
             'worker/runtime identity differs')
     require(worker.get('worker', {}).get('sha256') == values[APP + '/native-wine-child.self']['sha256'] and
             worker['worker'].get('bytes') == values[APP + '/native-wine-child.self']['bytes'], 'worker bytes differ')
+    require(worker.get('helper', {}).get('elf') ==
+            {k: values.get(APP + '/lapy.elf', {}).get(k) for k in ('bytes', 'sha256')} and
+            values.get(APP + '/lapy.elf', {}).get('type') == 'file', 'packaged helper differs from child binding')
     from check_wine_prx_build import MODULES, PE
     prx_root = LIB + '/x86_64-unix/'
     require({n[len(prx_root):] for n, v in values.items() if n.startswith(prx_root) and v['type'] == 'file'} ==
@@ -422,6 +425,11 @@ def validate_manifest(manifest, values, read):
     require(sources.get('schema') == 'pw-windows-child-retained-sources/1' and sources.get('project') == project,
             'packaged source provenance differs')
     copied_inventory(values, 'sources', sources['inventory'])
+    for field, name in (('manifest', 'lapy-helper-manifest.json'), ('release', 'lapy-helper-release.json')):
+        require(worker.get('helper', {}).get(field) ==
+                {k: values.get('sources/' + name, {}).get(k) for k in ('bytes', 'sha256')} and
+                values.get('sources/' + name, {}).get('type') == 'file',
+                'retained helper metadata differs from child binding: ' + name)
     title = decode_json(read('provenance/title.json'))
     require(title.get('schema') == 'pw-windows-child-title/1' and title.get('project') == project and
             title.get('fixture_child_sha256') == pair['files']['child.exe']['sha256'],

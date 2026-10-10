@@ -33,7 +33,8 @@ class WineFixtureBuild(unittest.TestCase):
             compiler.chmod(0o755)
             for name, service, partial, fail_make, fail_adapter in [
                 ('off',0,0,0,''), ('partial',1,1,0,''), ('full',1,0,0,''),
-                ('make-error',1,1,1,''), ('adapter-error',1,1,0,'pw_wine_fixture_socket')]:
+                ('make-error',1,1,1,''), ('adapter-error',1,1,0,'pw_wine_fixture_socket'),
+                ('child-data-error',1,1,0,'pw_wine_child_data')]:
                 work = root / name; work.mkdir(); calls = work / 'calls'
                 env = dict(os.environ, SDK=str(sdk), WORK=str(work), CALLS=str(calls),
                            SERVICE=str(service), PARTIAL=str(partial), FAIL_MAKE=str(fail_make), FAIL_ADAPTER=fail_adapter)
@@ -55,9 +56,11 @@ class WineFixtureBuild(unittest.TestCase):
                 self.assertEqual([args[i+1] for i, arg in enumerate(args) if arg == '-W'], expected_sources)
                 self.assertIn('-k', args)
                 compiled = [json.loads(row) for row in calls.read_text().splitlines()] if calls.exists() else []
-                self.assertEqual(len(compiled), 0 if fail_make else 2 if fail_adapter else 3)
-                adapter_names = ['pw_wine_fixture_provider.c', 'pw_wine_fixture_socket.c', 'pw_wine_compat.c']
+                self.assertEqual(len(compiled), 0 if fail_make else 2 if fail_adapter == 'pw_wine_fixture_socket' else 4)
+                adapter_names = ['pw_wine_fixture_provider.c', 'pw_wine_fixture_socket.c', 'pw_wine_compat.c', 'pw_wine_child_data.c']
                 self.assertEqual([Path(argv[-1]).name for argv in compiled], adapter_names[:len(compiled)])
+                if len(compiled) == 4:
+                    self.assertEqual(compiled[-1][-1], str(work/'repo/native/pw_wine_child_data.c'))
                 for argv in compiled:
                     self.assertIn('-fsyntax-only', argv)
                     self.assertIn('-DPW_WINE_SERVICE_FIXTURE=1', argv)
