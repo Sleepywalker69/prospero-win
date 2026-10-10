@@ -135,6 +135,14 @@ def main():
                         "--fixtures", str(dns_guard.parent.parent / "tests/fixtures/dnsapi_guard"),
                         "--cc", args.cc, "--out", str(out / ("dnsapi-" + suffix)),
                         *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
+    # Exact USER driver/message bodies with inert boundaries; target objects
+    # and full win32u linking remain separate mandatory checks.
+    user_fixes = Path(__file__).resolve().with_name("check_wine_user_fixes.py")
+    for suffix in ("strict", "ubsan"):
+        subprocess.run([sys.executable, str(user_fixes), "--wine-source", str(args.wine_source),
+                        "--fixtures", str(user_fixes.parent.parent / "tests/fixtures/wine_user_fixes"),
+                        "--cc", args.cc, "--only", "wake", "--out", str(out / ("user-wake-" + suffix)),
+                        *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
     paths = ["dlls/ntdll/unix/process.c", "dlls/ntdll/unix/server.c", "server/process.c", "server/ptrace.c", "dlls/ntdll/unix/thread.c", "include/wine/pw_wine_fixture_provider.h"]
     source = {n: (args.wine_source/n).read_text() for n in paths}
     (out/"source-hashes.json").write_text(json.dumps({n: hashlib.sha256((args.wine_source/n).read_bytes()).hexdigest() for n in paths}, indent=2)+"\n")
