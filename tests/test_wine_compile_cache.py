@@ -60,6 +60,10 @@ class CacheContracts(CacheFixture, unittest.TestCase):
             'tools/generate_vk_codecs.py':'generate', 'tools/wine_compile_cache.py':'cache recipe',
             'wine/patches/0001-test.patch':'patch', 'wine/ps5/staged.h':'staged header',
             '.github/workflows/windows-child-fixture.yml':'workflow'}
+        for name, (path, macro) in cache.ABI_INPUTS.items():
+            prefix = '+' if path.endswith('.patch') else ''
+            value = 962 if name.endswith('protocol') else 1
+            files[path] = files.get(path, '') + f'{prefix}#define {macro} {value}u\n'
         for name, text in files.items():
             path=repo/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(text)
         subprocess.run(['git','-C',str(repo),'add','.'],check=True)
@@ -90,6 +94,78 @@ class CacheContracts(CacheFixture, unittest.TestCase):
                         'commit','-qm','Original inert inputs'],check=True)
         self.assertEqual(base,identity())
 
+    def test_recipe_changes_archive_key_but_preserves_compile_partition(self):
+        identity = {'phase': 'host', 'settings': cache.SETTINGS, 'compiler': 'exact provider',
+                    'recipe': {'unit.c': 'old source'}}
+        first, before = self.state(identity=identity)
+        identity = dict(identity, recipe={'unit.c': 'changed source'})
+        second, after = self.state(identity=identity, suffix='changed')
+        self.assertNotEqual(before['key'], after['key'])
+        self.assertNotEqual(before['compatibility_sha256'], after['compatibility_sha256'])
+        self.assertEqual(before['partition_key'], after['partition_key'])
+        self.assertEqual(before['restore_prefix'], after['restore_prefix'])
+        self.assertEqual(before['partition_sha256'], after['partition_sha256'])
+        self.assertTrue(after['key'].startswith(before['restore_prefix']))
+        self.assertEqual((first/'partition.json').read_bytes(), (second/'partition.json').read_bytes())
+        for directory, state in ((first, before), (second, after)):
+            config = (directory/'ccache.conf').read_text()
+            self.assertIn('namespace = ' + state['partition_key'] + '\n', config)
+            self.assertIn('extra_files_to_hash = ' + str(directory/'partition.json') + '\n', config)
+            self.assertNotIn(str(directory/'compatibility.json'), config)
+
+    def test_global_compiler_and_abi_inputs_do_not_cross_partitions(self):
+        identity = {'phase': 'ps5', 'settings': cache.SETTINGS, 'wine_commit': 'a'*40,
+                    'compilers': {'cc': 'backend bytes'}, 'abi_contracts': {'creation': 1},
+                    'sdk': 'headers and wrappers', 'tls': 'headers and libraries',
+                    'flags': {'CFLAGS': '-O2'}, 'system_headers': 'system bytes',
+                    'cross_headers': 'MinGW bytes', 'packages': 'versions', 'recipe': {}}
+        _, before = self.state('ps5', identity=identity)
+        for name in ('phase', 'settings', 'wine_commit', 'compilers', 'abi_contracts',
+                     'sdk', 'tls', 'flags', 'system_headers', 'cross_headers', 'packages'):
+            changed = dict(identity)
+            changed[name] = 'host' if name == 'phase' else 'changed'
+            _, after = self.state('ps5', identity=changed, suffix=name)
+            self.assertNotEqual(before['partition_key'], after['partition_key'], name)
+            self.assertFalse(after['key'].startswith(before['restore_prefix']), name)
+
+    def test_partition_or_key_tampering_refuses_before_command(self):
+        for kind in ('bytes', 'meaning', 'key'):
+            with self.subTest(kind=kind):
+                directory, state = self.state(suffix=kind)
+                if kind == 'bytes':
+                    (directory/'partition.json').write_text('{}')
+                elif kind == 'meaning':
+                    (directory/'partition.json').write_text('{}')
+                    state['partition_sha256'] = cache.sha(directory/'partition.json')
+                    (directory/'state.json').write_bytes(cache.canonical(state))
+                else:
+                    state['restore_prefix'] = 'wine-ccache-v2-'
+                    (directory/'state.json').write_bytes(cache.canonical(state))
+                with mock.patch.object(cache.subprocess, 'run') as run:
+                    with self.assertRaises(ValueError):
+                        cache.run_stage(directory, 'changed', ['false'])
+                    run.assert_not_called()
+
+    def test_actual_abi_identifiers_are_unambiguous_and_protocols_match(self):
+        repo = self.root/'repo'; repo.mkdir()
+        for name, (path, macro) in cache.ABI_INPUTS.items():
+            target = repo/path; target.parent.mkdir(parents=True, exist_ok=True)
+            value = 962 if name.endswith('protocol') else 1
+            with target.open('a') as stream:
+                stream.write(('+' if path.endswith('.patch') else '') + f'#define {macro} {value}u\n')
+        self.assertEqual(cache.abi_contracts(repo)['creation']['value'], 1)
+        path, macro = cache.ABI_INPUTS['creation']
+        target = repo/path
+        original = target.read_text()
+        target.write_text(original.replace('#define ' + macro + ' 1u', '#define ' + macro + ' 2u'))
+        self.assertEqual(cache.abi_contracts(repo)['creation']['value'], 2)
+        target.write_text(original + '#define ' + macro + ' 1u\n')
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            cache.abi_contracts(repo)
+        target.write_text(original.replace('962u', '963u'))
+        with self.assertRaisesRegex(ValueError, 'protocol identifiers differ'):
+            cache.abi_contracts(repo)
+
     def test_directory_links_bind_real_target_bytes_and_reject_cycles(self):
         inputs = self.root / 'sdk'; inputs.mkdir()
         external = self.root / 'headers'; external.mkdir()
@@ -114,7 +190,8 @@ class CacheContracts(CacheFixture, unittest.TestCase):
     def test_exact_config_and_explicit_triple_names(self):
         directory, state = self.state()
         text = (directory / 'ccache.conf').read_text()
-        for value in ('compiler_check = content', 'hard_link = false', 'sloppiness = \n', 'hash_dir = true'):
+        for value in ('compiler_check = content', 'hard_link = false', 'sloppiness = \n',
+                      'hash_dir = true', 'direct_mode = false'):
             self.assertIn(value, text)
         self.assertEqual(Path(state['launchers']['i386']).name, 'i686-w64-mingw32-gcc')
         self.assertEqual(Path(state['launchers']['x86_64']).name, 'x86_64-w64-mingw32-gcc')

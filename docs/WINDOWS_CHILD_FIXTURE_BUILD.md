@@ -20,7 +20,12 @@ It never combines earlier native-suite or graphics-kit binaries with this build.
 The opt-in workflow uses ordinary Windows Server 2022 and Ubuntu 24.04 hosted runners,
 read-only repository permissions and commit-pinned actions. A same-repository
 pull request needs the `build-windows-child-fixture` label; a manual run uses its
-selected ref. No release publishing or console deployment occurs.
+selected ref. Pushes to exactly `perf/windows-child-incremental-cache` also run
+the full producer to seed a branch-scoped compiler cache. Deletion is excluded.
+Labeled PRs with that exact head branch do not duplicate its push build; other
+same-repository labeled PRs, including those targeting it, retain their route.
+The seed build tests the pushed branch tip, not a synthetic PR merge. No release
+publishing or console deployment occurs.
 
 1. Build the original AMD64 PE using `build_windows_child_fixture.ps1` and the
    installed MSVC toolchain. Run the same bytes on Windows with the existing
@@ -264,31 +269,66 @@ Host Wine uses explicit Clang and MinGW launchers. PS5 Wine uses the SDK launche
 for Makefile-owned Unix units and explicit MinGW launchers for PE units. Their
 triple-bearing names preserve Wine's compiler-target detection; no global
 compiler masquerade changes SDK/TLS provider selection. Ccache uses content
-checks, normal header validation, no sloppiness, and no hard links. A separate
-fresh-cache control compiles original C twice through the actual SDK dispatcher,
+checks, preprocessor mode, no sloppiness, and no hard links. Preprocessing every
+lookup resolves the current include search order, including newly added headers
+that shadow an existing include. A separate fresh-cache control compiles original C twice through the actual SDK dispatcher,
 requires a cold miss and warm hit, and compares the two object hashes without
 executing target code. It runs before the complete host build.
 
-The two Actions keys have no fallback restore keys. They bind the Wine pin,
-ordered patches and staged sources, build/staging/cache recipes and workflow,
-compiler versions and bytes, backend tools and resources, system/target headers,
-installed package versions, flags and feature modes. The PS5 key also binds the
-SDK and TLS inputs. Linked header directories are hashed through their real
-targets, with cycle refusal. Project commit/tree, per-run compiler statistics,
-Windows fixture metadata and runtime acceptance records remain fresh evidence
-outside the cache. Only `RUNNER_TEMP/ccache-host` and `RUNNER_TEMP/ccache-ps5` are
-uploaded by the cache actions, after their corresponding full build/check stage.
+The version-2 cache separates the immutable Actions archive identity from the
+compiler compatibility partition. Fresh `compatibility.json` still binds every
+ordered patch and staged source, build/staging/cache recipe and this workflow.
+Its complete digest is the archive-key suffix. `partition.json` excludes only
+those recipe hashes: it retains the Wine pin, compiler versions and bytes,
+backend tools/resources/libraries, system/target headers, installed packages,
+flags, feature modes, and explicit dispatcher, WoW64, fixture, creation and
+server-protocol identifiers. The PS5 partition also binds SDK and TLS inputs.
+Linked header directories bind their real targets, with cycle refusal.
 
-For the cold/warm hosted comparison, keep the same reviewed commit and run the
-full workflow twice. Preserve the two run URLs and exact fixture identities.
-Use `fixture-evidence/ccache-{host,ps5}/state.json`, `compatibility.json`, each
-stage's JSON/config/stats files, and `ccache-sdk-control/RESULT.json` to distinguish
-an Actions archive restore from real compiler hits. Stage records include the
-requested key, restored key/status, command exit and elapsed time, direct plus
-preprocessed hits, misses, hit rate and cache size. Actions step timings/logs
-provide cache upload/download overhead; compare total job wall time as well as
-compiler stages. A restored cache never substitutes for a missing build or
-checker pass, and a statistics failure retains the original command outcome.
+The internal ccache namespace and extra hashed input use this partition. Each
+compilation still preprocesses its actual current source and headers and checks
+compiler arguments; a patch changing one unit no longer invalidates every
+unaffected unit. ABI/header structure changes are also checked by preprocessing
+and the unchanged final runtime ABI validators. The workflow first requests the
+exact archive key, then permits only the same host/PS5 partition prefix. It has
+no cross-compiler, cross-mode or repository-wide restore prefix.
+
+Project commit/tree, complete recipe identity, compiler statistics, Windows
+fixture metadata and runtime acceptance records remain fresh evidence outside
+the cache. Only `RUNNER_TEMP/ccache-host` and `RUNNER_TEMP/ccache-ps5` are saved,
+after their corresponding full build/check stage. TLS/foundation and the fresh
+Windows reference are not replaced by this cache.
+
+GitHub's [cache scope rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)
+allow a PR to read a real base-branch cache, but another PR's merge-ref cache is
+not that cache. The exact performance-branch push trigger provides a seed
+without requiring dispatch availability or a merge. Both jobs use the pushed
+tip; the fresh MSVC pair, same-run join and preflight retain that actual commit,
+tree, run and attempt. The existing manual-dispatch route remains available.
+Record the actual event, branch ref and successful save before testing a later
+reviewed PR whose base is that branch. No PR base changes automatically. A
+PR-label run alone does not create a branch cache. The first unseeded build
+remains cold, and prefix matching cannot override GitHub's scope or retention.
+This uses the existing runners and permissions; no new service or secret is
+required. The exact seed-head PR exclusion avoids duplicate expensive builds;
+it does not establish synthetic-merge validation for that performance PR.
+
+For hosted measurement, run the full reviewed workflow twice on the same branch
+and source, then test a reviewed source-changing commit with the same partition.
+For cross-PR evidence, use an actual base-branch seed and a dependent PR. Every
+run must build and bind its own Windows reference. Preserve run URLs, refs,
+fixture identities and the complete normal gate inventory. Do not reuse a prior
+run attempt's reference or acceptance record.
+
+Use `fixture-evidence/ccache-{host,ps5}/state.json`, `compatibility.json`,
+`partition.json`, each stage's JSON/config/stats files and
+`ccache-sdk-control/RESULT.json` to distinguish an Actions archive restore from
+real compiler hits. Stage records include the complete recipe and partition
+digests, requested and restored keys, restore status, command exit and elapsed
+time, hits, misses, hit rate and cache size. Actions step timings/logs provide
+upload/download overhead; compare total wall time as well as compiler stages.
+A restored cache never substitutes for a missing build/checker pass. A statistics
+failure remains a failure and retains the original compiler exit in its receipt.
 
 Fresh MSVC output and its embedded child hash can differ across runs, so compare
 each archive against its own fixture/provenance records. Do not infer runtime
