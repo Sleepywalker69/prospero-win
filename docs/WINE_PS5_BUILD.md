@@ -1497,3 +1497,30 @@ collector retains the small objects and compiler evidence before large inputs.
 The normal win32u link/conversion and package checks remain required. No new
 module, export or process ABI is introduced, and the original MSVC fixture is
 unchanged. Console input delivery remains unverified for this correction.
+
+## Fresh-worker desktop recognition and failed geometry
+
+Patch 0918 adapts upstream [#606](https://github.com/mpereiraesaa/prospero-win/commit/da57aaab64bfd54e068da35522139ef6d6886a31).
+A fresh PS5 worker queries existing desktop handles before walking GA_ROOT,
+without creating a desktop or initializing the USER driver. Later full USER
+initialization still runs the driver and builtin-class callbacks once, with
+reentrant lookup preserved. Changing desktop successfully resets the cache.
+Absent roots or failed rectangle reads return empty virtual/monitor rectangles
+before any mapping; valid geometry retains its existing behavior.
+
+The reviewed adaptation handles a partial pair: a cached top window with no
+message window retains the original force=TRUE completion query. If that query
+fails, or succeeds with only the same top, the previously confirmed top remains
+available and the existing initialization tail runs once with message handle
+zero. This is deliberately different from a fresh failed query, whose original
+fallback remains. No message handle is synthesized and no extra retry is added.
+The source controls cover both failure outcomes, complete cached pairs, fresh
+failure, cache reset/reentrancy, geometry failures and the non-PS5 branch.
+
+The private Unix thread structure gains a field. Rebuild and retain the actual
+window.o, winstation.o and syscall.o alongside ps5drv.o; syscall.c owns its
+sizeof-based allocation. All four commands, objects and relevant headers are
+bound into the build report. Full win32u linking remains mandatory. This does
+not add a server request, process ABI, profile, child display/input transport or
+an observed console compatibility result. The existing MSVC fixture stays
+unchanged; a separate worker-first-USER fixture remains future validation.

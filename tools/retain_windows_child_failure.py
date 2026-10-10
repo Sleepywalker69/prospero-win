@@ -101,7 +101,7 @@ def collect(args):
         for unit in ('main','query'):
             c.copy(args.wine_work/'build/dlls/dnsapi'/(arch+'-windows')/(unit+'.o'),
                    args.wine_work,'target/wine')
-    for unit in ('ps5drv',):
+    for unit in ('ps5drv','window','winstation','syscall'):
         c.copy(args.wine_work/'build/dlls/win32u'/(unit+'.o'), args.wine_work,'target/wine')
     for name in ('service-translation-units.log','user-driver-compiler','user-driver-sdk-compiler'):
         c.copy(args.wine_work/name,args.wine_work,'target/wine')

@@ -384,7 +384,7 @@ fi
 # Compile complete experimental units with the actual generated target rules.
 if [ "$service_fixture" = 1 ]; then
     set -- -C "$build" -k -j"$jobs"
-    for source in dlls/ntdll/unix/creation.c dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c dlls/win32u/ps5drv.c dlls/dnsapi/main.c dlls/dnsapi/query.c server/creation.c server/trace.c server/process.c server/ptrace.c server/request.c server/thread.c; do
+    for source in dlls/ntdll/unix/creation.c dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c dlls/win32u/ps5drv.c dlls/win32u/window.c dlls/win32u/winstation.c dlls/win32u/syscall.c dlls/dnsapi/main.c dlls/dnsapi/query.c server/creation.c server/trace.c server/process.c server/ptrace.c server/request.c server/thread.c; do
         set -- "$@" -W "$tree/$source"
     done
     cp "$wine_cc" "$work/user-driver-compiler" || fail "cannot retain selected USER compiler"
@@ -399,6 +399,9 @@ if [ "$service_fixture" = 1 ]; then
         dlls/ntdll/unix/virtual.o \
         dlls/wow64/x86_64-windows/syscall.o \
         dlls/win32u/ps5drv.o \
+        dlls/win32u/window.o \
+        dlls/win32u/winstation.o \
+        dlls/win32u/syscall.o \
         dlls/dnsapi/i386-windows/main.o \
         dlls/dnsapi/i386-windows/query.o \
         dlls/dnsapi/x86_64-windows/main.o \

@@ -969,3 +969,5 @@ tests/fixtures/dnsapi_guard/dnsapi_test_alloc.h
 wine/patches/0917-win32u-ps5-report-drained-wake-pipe.patch
 tools/check_wine_user_fixes.py
 tests/fixtures/wine_user_fixes/wake.c
+wine/patches/0918-win32u-ps5-worker-desktop-cache.patch
+tests/fixtures/wine_user_fixes/desktop.c

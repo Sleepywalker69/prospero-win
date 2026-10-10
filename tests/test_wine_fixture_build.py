@@ -23,7 +23,7 @@ class WineFixtureBuild(unittest.TestCase):
         block = block.split("\n", 1)[1]
         objects = ['dlls/ntdll/unix/' + n + '.o' for n in ('creation','loader','process','server','signal_x86_64','thread','virtual')]
         objects += ['dlls/wow64/x86_64-windows/syscall.o']
-        objects += ['dlls/win32u/ps5drv.o']
+        objects += ['dlls/win32u/' + n + '.o' for n in ('ps5drv','window','winstation','syscall')]
         objects += ['dlls/dnsapi/' + arch + '-windows/' + unit + '.o'
                     for arch in ('i386', 'x86_64') for unit in ('main', 'query')]
         objects += ['server/' + n + '.o' for n in ('creation','trace','process','ptrace','request','thread')]
@@ -53,9 +53,9 @@ class WineFixtureBuild(unittest.TestCase):
                     self.assertFalse((work/'make-args').exists()); self.assertFalse(calls.exists())
                     self.assertIn('FULL_CONTINUATION', result.stdout); continue
                 args = (work/'make-args').read_text().splitlines()
-                self.assertEqual(len(objects), 19)
+                self.assertEqual(len(objects), 22)
                 self.assertEqual(args[-len(objects):], objects)
-                self.assertEqual(args.count('-W'), 17)
+                self.assertEqual(args.count('-W'), 20)
                 expected_sources = list(dict.fromkeys(
                     str(work/'source'/name.replace('x86_64-windows/', '').replace('i386-windows/', '')).removesuffix('.o') + '.c'
                     for name in objects))
