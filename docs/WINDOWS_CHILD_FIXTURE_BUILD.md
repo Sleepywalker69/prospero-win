@@ -239,3 +239,59 @@ and deadline check follows that diagnostic callback and precedes dispatch.
 The public [PS5 child-probe caller](https://github.com/mihawk-99/PS5_RetroArch/blob/33d61f4ddff906e0ca8584b7af74278e0459b451/frontends/child-probe/child_probe.c)
 also uses `/app0` with this service API. Acceptance of this full-CRT helper from
 an elevated parent remains a console test, not a consequence of the host mocks.
+
+## Compiler-cache comparison
+
+The Linux producer starts alongside `original-x64-reference`, with the same
+trusted trigger and a separate workspace. It checks that the Windows job in the
+exact run and attempt succeeded before the expensive complete host Wine build.
+The artifact is downloaded and checked again immediately before its first use
+in prefix export. The join uses the attempt-specific Actions jobs endpoint,
+refuses incomplete or ambiguous responses, and has a 15-minute absolute budget.
+The downloaded fixture must still match the current commit, tree, source and
+recipe bytes, run ID, attempt, PE hashes and successful Windows reference.
+Rerun the whole workflow when a new attempt needs a new Windows reference;
+a Linux-only rerun cannot consume a previous attempt's fixture.
+
+Only compiler results are cached. Each run freshly stages/configures Wine,
+links, installs, creates its own prefixes and runs every artifact checker.
+The MSVC recipe, host `make -j2 all`, `make sanitize`, and native i386 comparison
+remain mandatory. TLS, SDK/foundation preparation, direct SDK adapter and
+FreeType compilation, CPU packaging and title compilation are outside this
+compiler cache.
+
+Host Wine uses explicit Clang and MinGW launchers. PS5 Wine uses the SDK launcher
+for Makefile-owned Unix units and explicit MinGW launchers for PE units. Their
+triple-bearing names preserve Wine's compiler-target detection; no global
+compiler masquerade changes SDK/TLS provider selection. Ccache uses content
+checks, normal header validation, no sloppiness, and no hard links. A separate
+fresh-cache control compiles original C twice through the actual SDK dispatcher,
+requires a cold miss and warm hit, and compares the two object hashes without
+executing target code. It runs before the complete host build.
+
+The two Actions keys have no fallback restore keys. They bind the Wine pin,
+ordered patches and staged sources, build/staging/cache recipes and workflow,
+compiler versions and bytes, backend tools and resources, system/target headers,
+installed package versions, flags and feature modes. The PS5 key also binds the
+SDK and TLS inputs. Linked header directories are hashed through their real
+targets, with cycle refusal. Project commit/tree, per-run compiler statistics,
+Windows fixture metadata and runtime acceptance records remain fresh evidence
+outside the cache. Only `RUNNER_TEMP/ccache-host` and `RUNNER_TEMP/ccache-ps5` are
+uploaded by the cache actions, after their corresponding full build/check stage.
+
+For the cold/warm hosted comparison, keep the same reviewed commit and run the
+full workflow twice. Preserve the two run URLs and exact fixture identities.
+Use `fixture-evidence/ccache-{host,ps5}/state.json`, `compatibility.json`, each
+stage's JSON/config/stats files, and `ccache-sdk-control/RESULT.json` to distinguish
+an Actions archive restore from real compiler hits. Stage records include the
+requested key, restored key/status, command exit and elapsed time, direct plus
+preprocessed hits, misses, hit rate and cache size. Actions step timings/logs
+provide cache upload/download overhead; compare total job wall time as well as
+compiler stages. A restored cache never substitutes for a missing build or
+checker pass, and a statistics failure retains the original command outcome.
+
+Fresh MSVC output and its embedded child hash can differ across runs, so compare
+each archive against its own fixture/provenance records. Do not infer runtime
+compatibility from cache hits or require unrelated complete archives to have
+identical bytes. No hosted speedup is claimed until the cold and warm jobs and
+all their normal checks have completed.

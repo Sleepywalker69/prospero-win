@@ -286,6 +286,8 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_private_dispatch_wow64_contract.py
 	python3 tests/test_wine_fixture_build.py
 	python3 tests/test_wine_child_integration.py
+	python3 tests/test_wine_build_performance.py
+	python3 tests/test_wine_compile_cache.py
 	python3 tests/test_windows_child_package.py
 	python3 tests/test_battlenet_prefix.py
 	python3 tests/test_wine_service_child_build.py
