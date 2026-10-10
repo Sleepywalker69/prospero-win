@@ -56,7 +56,8 @@ class FailureRetention(unittest.TestCase):
                                 sdk_source_archive=self.root/'sdk.tar.gz',out=self.root/'retained-user')
         for name in names:getattr(args,name).mkdir()
         expected={}
-        for name in ('build/dlls/win32u/ps5drv.o','service-translation-units.log',
+        for name in ('build/dlls/win32u/ps5drv.o','build/dlls/win32u/window.o',
+                     'build/dlls/win32u/winstation.o','build/dlls/win32u/syscall.o','service-translation-units.log',
                      'user-driver-compiler','user-driver-sdk-compiler'):
             path=args.wine_work/name;path.parent.mkdir(parents=True,exist_ok=True)
             path.write_bytes(('inert '+name).encode());expected['target/wine/'+name]=path.read_bytes()

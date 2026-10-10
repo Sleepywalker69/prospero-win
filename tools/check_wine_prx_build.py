@@ -61,7 +61,7 @@ def dnsapi_guard_record(work: Path) -> dict:
             "pe": {name: sha(work / "pe" / name) for name in pe}}
 
 
-USER_DRIVER_UNITS = ("ps5drv",)
+USER_DRIVER_UNITS = ("ps5drv", "window", "winstation", "syscall")
 
 
 def user_driver_record(work: Path) -> dict:

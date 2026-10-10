@@ -40,8 +40,9 @@ publishing or console deployment occurs.
    public SDK/converters/TLS prerequisites, then compile the complete
    experimental target units before starting the full host runtime. This
    includes DNSAPI main/query for both PE architectures and the actual PS5
-   USER driver object. The latter must define its guarded driver entry and
-   retain the exact compile commands and selected compiler wrappers. The existing source
+   USER driver, window, winstation and syscall objects. The allocator in syscall
+   must use the extended private thread structure. The driver object must define
+   its guarded entry; all four retain compile commands and compiler wrappers. The existing source
    consumer gate also runs the actual DNSAPI main/query host controls with
    mocked platform boundaries, under strict compilation and UBSan.
 4. Build full host Wine and retain its source checkpoint. Build and check the
