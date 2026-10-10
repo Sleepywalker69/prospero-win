@@ -219,7 +219,7 @@ installer works. Child logs and the actual lowercase
 `/data/prospero-win/logs/session-N.log` should be inspected before sharing.
 
 
-## Native launch failure reporting
+## Native launch failures and service paths
 
 A nonpositive `sceSystemServiceAddLocalProcess` result is a failed dispatch,
 not evidence that the startup deadline expired. The owner preserves the raw
@@ -229,3 +229,13 @@ priority and a genuine deadline without a failed dispatch remains a timeout.
 The first-failure record remains first-publisher-wins across concurrent failures.
 A rejected call does not prove that no native resource was created: uncertainty
 still blocks replacement and there is no automatic second launch.
+
+The parent verifies the exact helper bytes using either known readable alias.
+The service call and `argv[0]` always use `/app0/native-wine-child.self` with the
+checked owning application ID. A readable global sandbox alias is not assumed
+to be a valid service launch path. The `launch_path` record carries the parent
+read-alias index and the service-path index (always zero); the final cancellation
+and deadline check follows that diagnostic callback and precedes dispatch.
+The public [PS5 child-probe caller](https://github.com/mihawk-99/PS5_RetroArch/blob/33d61f4ddff906e0ca8584b7af74278e0459b451/frontends/child-probe/child_probe.c)
+also uses `/app0` with this service API. Acceptance of this full-CRT helper from
+an elevated parent remains a console test, not a consequence of the host mocks.
