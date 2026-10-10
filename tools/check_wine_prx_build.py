@@ -20,7 +20,7 @@ MODULES = ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfreety
            "winevulkan", "opengl32", "ws2_32", "crypt32", "dwrite", "secur32", "libgnutls")
 UNIX = ("ntdll", "win32u", "winevulkan", "opengl32", "ws2_32", "crypt32", "dwrite", "secur32")
 PE = ("ntdll", "win32u", "xinput1_1", "xinput1_2", "xinput1_3", "xinput1_4", "xinputuap",
-      "quartz", "opengl32", "winevulkan")
+      "quartz", "opengl32", "winevulkan", "dnsapi")
 DIAGNOSTICS = ("unresolved", "errors", "title_unbound", "webkit_unbound", "raw_syscalls")
 # Public SDK v0.42 GLOBAL OBJECT ABI, not application-PRX data imports.
 # See sce_stubs/libSceLibcInternal.c, sce_stubs/libkernel.c and the system
@@ -44,6 +44,20 @@ def data(path: Path, limit=MAX_FILE) -> bytes:
 
 def sha(path: Path) -> str:
     return hashlib.sha256(data(path)).hexdigest()
+
+
+def dnsapi_guard_record(work: Path) -> dict:
+    """Bind the actual guarded PE build; this is not resolver/runtime proof."""
+    sources = ["dlls/dnsapi/" + name for name in
+               ("main.c", "dnsapi.h", "query.c", "Makefile.in", "dnsapi.spec")]
+    objects = [f"dlls/dnsapi/{arch}-windows/{unit}.o"
+               for arch in ("i386", "x86_64") for unit in ("main", "query")]
+    pe = [f"{arch}-windows/dnsapi.dll" for arch in ("i386", "x86_64")]
+    return {"schema": "pw-dnsapi-guard/1", "unavailable_status": 50,
+            "backend_provided": False, "runtime_validated": False,
+            "sources": {name: sha(work / "source" / name) for name in sources},
+            "objects": {name: sha(work / "build" / name) for name in objects},
+            "pe": {name: sha(work / "pe" / name) for name in pe}}
 
 
 def elf(path: Path, kind: int) -> tuple[bytes, list[tuple[int, int, int]]]:
@@ -134,6 +148,8 @@ def validate(work: Path, sdk: Path, foundation: Path, bindir: Path, output: Path
     require(set(report["pe"]) == expected_pe, "unexpected patched PE module set")
     for name in expected_pe:
         require(report["pe"][name] == sha(work / "pe" / name), f"missing/changed PE module: {name}")
+    require(report.get("dnsapi_guard") == dnsapi_guard_record(work),
+            "DNSAPI guarded source/object/PE build identity differs")
     entries = report["prx"]["modules"]
     require(set(entries) == set(MODULES), "missing or unexpected PRX module")
     commands = Commands(output)

@@ -23,7 +23,7 @@ must publish `__wine_ps5_private_dispatch_wow64_abi` through its actual PRX
 export descriptor alongside the unchanged base ABI1 export. The build report
 retains `wow64_abi: 1`; the checker verifies real I386 bytes and the native
 capability function and descriptor. `--require-wow64` rejects the old cohort.
-All 22 patched PEs, native PRXs and the separately built CPU PE must come from
+All 24 patched PEs, native PRXs and the separately built CPU PE must come from
 the matched build. This patch does not install a process provider or enable
 service child creation by itself.
 

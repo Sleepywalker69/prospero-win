@@ -362,7 +362,7 @@ def patched_pe_set(root, wine_work):
     expected = {a + '/' + n + '.dll' for a in ('i386-windows', 'x86_64-windows') for n in checker.PE}
     expected |= {'x86_64-windows/wow64.dll', 'x86_64-windows/wow64win.dll'}
     report = json.loads((wine_work / 'report.json').read_text())
-    require(set(report['pe']) == expected and len(expected) == 22, 'wrong matched patched PE set')
+    require(set(report['pe']) == expected and len(expected) == 24, 'wrong matched patched PE set')
     for name in expected:
         ordinary(wine_work / 'pe' / name)
         require(sha(wine_work / 'pe' / name) == report['pe'][name], 'stale patched PE: ' + name)

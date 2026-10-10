@@ -305,7 +305,7 @@ def validate_battle(manifest, values, read, prepared, abi, build):
         require(values.get(BATTLE_PREFIX + '/' + relative, {}).get('sha256') == digest and
                 battle.get('patched_pe_delta', {}).get(relative, {}).get('after', {}).get('sha256') == digest,
                 'Battle prefix patched PE mismatch: ' + name)
-    require(len(battle.get('patched_pe_delta', {})) == 22, 'Battle prefix22PE overlay report missing')
+    require(len(battle.get('patched_pe_delta', {})) == 24, 'Battle prefix 24 PE overlay report missing')
     cpu = check.get('translator_pe')
     for name in (LIB + '/x86_64-windows/wowprospero.dll',
                  BATTLE_PREFIX + '/drive_c/windows/system32/wowprospero.dll'):
@@ -404,10 +404,10 @@ def validate_manifest(manifest, values, read):
             'worker/package creation cohort differs')
     expected_pe = {arch + '/' + name + '.dll' for arch in ('i386-windows', 'x86_64-windows') for name in PE}
     expected_pe |= {'x86_64-windows/wow64.dll', 'x86_64-windows/wow64win.dll'}
-    require(set(build.get('pe', {})) == expected_pe and len(expected_pe) == 22 and
+    require(set(build.get('pe', {})) == expected_pe and len(expected_pe) == 24 and
             build.get('wine_commit') == prefix.WINE and build.get('patches') == sorted(manifest['patches']) and
-            prepared.get('patches') == manifest['patches'], 'Wine source/22PE provenance differs')
-    require(len(prepared.get('patched_pe_delta', {})) == 22, 'prefix22PE overlay report missing')
+            prepared.get('patches') == manifest['patches'], 'Wine source/24 PE provenance differs')
+    require(len(prepared.get('patched_pe_delta', {})) == 24, 'prefix 24 PE overlay report missing')
     for name, digest in build['pe'].items():
         arch, leaf = name.split('/')
         relative = 'drive_c/windows/' + ('system32' if arch == 'x86_64-windows' else 'syswow64') + '/' + leaf
@@ -827,7 +827,7 @@ def assemble(config, output):
             put(stage, LIB + '/' + relative, source, expected)
     for name, digest in expected_pe.items():
         require((stage / LIB / name).is_file() and digest_file(stage / LIB / name) == digest,
-                'matched22PE overlay incomplete')
+                'matched 24 PE overlay incomplete')
     for name in checker.MODULES:
         put(stage, LIB + '/x86_64-unix/' + name + '.prx', wine / 'prx/sce_module' / (name + '.prx'))
     nls_prefix = 'share/wine/nls'

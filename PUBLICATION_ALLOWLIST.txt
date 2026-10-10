@@ -960,3 +960,9 @@ wine/patches/0915-wine-owned-descendant-creation.patch
 tools/wine_creation_abi.py
 tests/test_pw_wine_creation_install.c
 tests/test_wine_creation_abi.py
+
+# DNSAPI optional resolver availability guard.
+wine/patches/0916-dnsapi-refuse-unavailable-unix-resolver.patch
+tools/check_dnsapi_guard.py
+tests/fixtures/dnsapi_guard/test_dnsapi_guard.c
+tests/fixtures/dnsapi_guard/dnsapi_test_alloc.h

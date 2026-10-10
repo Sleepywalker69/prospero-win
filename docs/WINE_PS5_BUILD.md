@@ -117,6 +117,18 @@ before evaluating a candidate built from that cache.
 | 0898 | `ntdll`: this process's memory counters (GetProcessMemoryInfo, ProcessVmCounters, SystemProcessInformation) come from its views, also for a handle opened on its own id; the console has no /proc or procstat, and every counter was zero |
 | 0899 | `include`: list the PS5 sync headers (0810, 0820, 0885, 0887) in `include/Makefile.in`, which makedep needs to resolve them; configure failed without it |
 | 0911 | `server`: allow watchdog guest-memory reads only when the registered thread/process native PIDs are positive, consistent and equal to the server host PID; keep server-owned wait/object diagnostics for other clients |
+| 0916 | `dnsapi`: keep numeric-address and PE-only operations usable when Unix resolver initialization fails, and return `ERROR_NOT_SUPPORTED` (DNS_STATUS 50) from every unavailable resolver operation before dispatch; this supplies no DNS backend or synthetic answer |
+
+Patch 0916 keeps DNSAPI loadable and records the raw initialization status.
+Resolver readiness requires both successful initialization and a nonzero Unix
+call handle. All four operations (search list, server list, server override and
+query) share the private checked boundary; healthy calls retain their arguments
+and returned status. The literal A/AAAA and hostname/domain configuration paths
+keep their existing behavior. Both PE architectures are rebuilt and overlaid
+into each matched prefix. The native PRX set is unchanged: this guard neither
+implements DNS resolution nor establishes the cause of a particular console
+fault. DNSAPI reports results in the [DNS_STATUS error-code domain](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsquery_a);
+the local unavailable-capability result is [ERROR_NOT_SUPPORTED, 50](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-).
 
 The optional `WINE_PS5_WAIT_WATCHDOG` diagnostics directly inspect guest TEB,
 CPU and stack addresses only for that registered local address space. A foreign,
