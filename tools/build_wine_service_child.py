@@ -36,14 +36,17 @@ UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'nat
 HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
            'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h')
-PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so'}
+PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so',
+             'libSceSysmodule.sprx': 'libSceSysmodule.so'}
+SYSMODULE_FUNCTIONS = ('sceSysmoduleLoadModuleInternal', 'sceSysmoduleGetModuleHandleInternal')
 CRT_IMPORTS = {'_init_env': 'libSceLibcInternal.sprx', 'atexit': 'libSceLibcInternal.sprx',
                'exit': 'libSceLibcInternal.sprx', 'pthread_create': 'libkernel.sprx',
-               'sceKernelDlsym': 'libkernel.sprx', 'sceKernelLoadStartModule': 'libkernel.sprx'}
-DYNAMIC_PROVIDERS = {'libSceSysmodule.sprx': 'libSceSysmodule.so', 'libSceNet.sprx': 'libSceNet.so'}
+               'sceKernelDlsym': 'libkernel.sprx', 'sceKernelLoadStartModule': 'libkernel.sprx',
+               **{name: 'libSceSysmodule.sprx' for name in SYSMODULE_FUNCTIONS}}
+DYNAMIC_PROVIDERS = {'libSceNet.sprx': 'libSceNet.so'}
 DYNAMIC_FUNCTIONS = {
-    'libkernel.sprx': ('sceKernelLoadStartModule', 'sceKernelDlsym'),
-    'libSceSysmodule.sprx': ('sceSysmoduleLoadModuleInternal', 'sceSysmoduleGetModuleHandleInternal'),
+    'libkernel.sprx': ('sceKernelDlsym',),
+    'libSceSysmodule.sprx': SYSMODULE_FUNCTIONS,
     'libSceNet.sprx': ('sceNetInit', 'sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
                         'sceNetSetsockopt', 'sceNetSocketClose', 'sceNetErrnoLoc')}
 HELPER_SHA = '43fab6d8045b525403f025a7b15e313aeaeac174bba6bff19a32b0000293c647'
@@ -91,8 +94,8 @@ def output_directory(path, inputs):
 
 
 def ordinary_graph(linked, converted, providers):
-    require(set(linked.needed) == set(PROVIDERS) and len(linked.needed) == 2,
-            'full-CRT child needs exactly ordinary libc and kernel providers')
+    require(set(linked.needed) == set(PROVIDERS) and len(linked.needed) == 3,
+            'full-CRT child needs exactly ordinary libc, kernel and Sysmodule providers')
     graph = inspect_bindings(linked, converted, providers)
     for index, symbol in enumerate(linked.symbols[1:], 1):
         name = symbol['name']; entry = graph[name]
@@ -106,7 +109,9 @@ def ordinary_graph(linked, converted, providers):
             converted.offset(relocation['address'], 8, 6)
     require(all(name in graph and graph[name]['provider'] == expected for name, expected in CRT_IMPORTS.items()),
             'full-CRT lifecycle imports missing or bound to wrong providers')
-    require(not any(name in graph for names in list(DYNAMIC_FUNCTIONS.values())[1:] for name in names),
+    require({name for name, entry in graph.items() if entry['provider'] == 'libSceSysmodule.sprx'} ==
+            set(SYSMODULE_FUNCTIONS), 'child requires exactly two static Sysmodule imports')
+    require(not any(name in graph for name in DYNAMIC_FUNCTIONS['libSceNet.sprx']),
             'child dynamically resolved calls must not become static imports')
     return graph
 
@@ -150,8 +155,9 @@ def dynamic_inputs(sdk, bindir, commands):
         item = provider(path, bindir, commands)
         require(item['soname'] == name and all(item['definitions'].get(call) == 'FUNC' for call in calls),
                 'child dynamic provider/exports differ: ' + name)
-        result[name] = {**record(path), 'functions': list(calls)}
-    return {'providers': result, 'sysmodule_path': '/system/common/lib/libSceSysmodule.sprx',
+        result[name] = {**record(path), 'functions': list(calls),
+                        'binding': 'dynamic' if name in DYNAMIC_PROVIDERS else 'static'}
+    return {'providers': result, 'sysmodule_acquisition': 'static-imports',
             'net_internal_id': '0x8000001c', 'net_init_required_return': 0, 'runtime_validated': False}
 
 
@@ -269,7 +275,7 @@ def build(args):
                  '-ffunction-sections', '-fdata-sections', '-fasynchronous-unwind-tables',
                  '-c', title / 'tooling/native/app_crt.cpp', '-o', crt)
     linked = out / 'child.linked.elf'
-    stubs = [sdk / 'target/lib' / name for name in ('libSceLibcInternal.so', 'libkernel.so')]
+    stubs = [sdk / 'target/lib' / name for name in PROVIDERS.values()]
     commands.run(*environment, sdk / 'bin/prospero-lld', '-T', title / 'tooling/native/ps5-pie-high.ld',
                  '--eh-frame-hdr', '-e', '_start', '-z', 'defs', '-o', linked, crt, *objects, '--as-needed', *stubs)
     # The high layout and its executable converter are a matched title input.
@@ -285,7 +291,7 @@ def build(args):
                  '-I', zroot / 'usr/include', '-I', native, native / 'native_app_builder.cpp', native / 'self_container.cpp',
                  native / 'elf_object.cpp', writer, archives[0], '-o', tool)
     converted, signed, final = out / 'child.elf', out / 'child.original.self', out / 'native-wine-child.self'
-    commands.run(tool, 'link', '--in', linked, '--out', converted, '--stub', stubs[0], '--stub', stubs[1],
+    commands.run(tool, 'link', '--in', linked, '--out', converted, *[arg for stub in stubs for arg in ('--stub', stub)],
                  '--module-sdk', '0x02000009', '--companion-sdk', '0x08050001', '--file-name', 'native-wine-child.elf',
                  '--component', 'pw_wine_service_child')
     providers = {name: provider(sdk / 'target/lib' / leaf, bindir, commands) for name, leaf in PROVIDERS.items()}

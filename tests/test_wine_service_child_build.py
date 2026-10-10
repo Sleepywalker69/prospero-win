@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Pure metadata/command controls for the distinct full-CRT builder."""
+import ast
 import copy
 from pathlib import Path
 import sys
@@ -27,14 +28,14 @@ class Mapping:
 
 
 def fixture():
-    needed = ['libSceLibcInternal.sprx', 'libkernel.sprx']
+    needed = ['libSceLibcInternal.sprx', 'libkernel.sprx', 'libSceSysmodule.sprx']
     names = list(build.CRT_IMPORTS)
     providers = {name: {'definitions': {}, 'sha256': str(i) * 64} for i, name in enumerate(needed, 1)}
     linked, converted = Mapping(), Mapping()
     linked.kind = 3; converted.kind = 0xfe10
     linked.needed = needed; converted.needed = [s.replace('.sprx', '.prx') for s in needed]
-    converted.modules = {1: 'libSceLibcInternal', 2: 'libkernel'}
-    converted.libraries = {0: 'libSceLibcInternal', 1: 'libkernel'}
+    converted.modules = {1: 'libSceLibcInternal', 2: 'libkernel', 3: 'libSceSysmodule'}
+    converted.libraries = {0: 'libSceLibcInternal', 1: 'libkernel', 2: 'libSceSysmodule'}
     linked.symbols = [{}]; converted.symbols = [{}]
     linked.relocations = []; converted.relocations = []
     for index, name in enumerate(names, 1):
@@ -42,7 +43,7 @@ def fixture():
         providers[provider]['definitions'][name] = 'FUNC'
         symbol = {'name': name, 'type': 2, 'binding': 1, 'visibility': 0, 'section': 0, 'value': 0, 'size': 0}
         linked.symbols.append(symbol)
-        converted.symbols.append({**symbol, 'name': nid(name) + '#' + 'AB'[rank] + '#' + 'BC'[rank]})
+        converted.symbols.append({**symbol, 'name': nid(name) + '#' + 'ABC'[rank] + '#' + 'BCD'[rank]})
         relocation = {'symbol': index, 'type': 6, 'addend': 0, 'address': 0x1000 + index * 8}
         linked.relocations.append(relocation); converted.relocations.append(dict(relocation))
     return linked, converted, providers
@@ -94,6 +95,10 @@ class WineServiceChildBuild(unittest.TestCase):
             with patch.object(build,'provider',side_effect=inspect):
                 result=build.dynamic_inputs(sdk,Path('/inert'),None)
                 self.assertFalse(result['runtime_validated']);self.assertEqual(result['net_internal_id'],'0x8000001c')
+                self.assertEqual(result['sysmodule_acquisition'],'static-imports')
+                self.assertNotIn('sysmodule_path',result)
+                self.assertEqual({name:item['binding'] for name,item in result['providers'].items()},
+                    {'libkernel.sprx':'static','libSceSysmodule.sprx':'static','libSceNet.sprx':'dynamic'})
                 for name,calls in build.DYNAMIC_FUNCTIONS.items():
                     leaf=(build.PROVIDERS|build.DYNAMIC_PROVIDERS)[name]
                     for call in calls:
@@ -158,17 +163,70 @@ class WineServiceChildBuild(unittest.TestCase):
         self.assertEqual(set(graph), set(build.CRT_IMPORTS))
         self.assertEqual(graph['_init_env']['provider'], 'libSceLibcInternal.sprx')
 
-    def test_valid_bound_static_net_or_sysmodule_import_is_refused(self):
-        for name in ('sceNetInit','sceSysmoduleLoadModuleInternal'):
-            linked,converted,providers=fixture();index=len(linked.symbols)
-            providers['libkernel.sprx']['definitions'][name]='FUNC'
-            symbol={'name':name,'type':2,'binding':1,'visibility':0,'section':0,'value':0,'size':0}
-            linked.symbols.append(symbol)
-            converted.symbols.append({**symbol,'name':nid(name)+'#B#C'})
-            relocation={'symbol':index,'type':6,'addend':0,'address':0x1000+index*8}
-            linked.relocations.append(relocation);converted.relocations.append(dict(relocation))
+    def add_import(self, linked, converted, providers, name, provider):
+        index=len(linked.symbols);rank=linked.needed.index(provider)
+        providers[provider]['definitions'][name]='FUNC'
+        symbol={'name':name,'type':2,'binding':1,'visibility':0,'section':0,'value':0,'size':0}
+        linked.symbols.append(symbol)
+        converted.symbols.append({**symbol,'name':nid(name)+'#'+'ABC'[rank]+'#'+'BCD'[rank]})
+        relocation={'symbol':index,'type':6,'addend':0,'address':0x1000+index*8}
+        linked.relocations.append(relocation);converted.relocations.append(dict(relocation))
+
+    def test_valid_bound_static_net_imports_are_refused(self):
+        for name in build.DYNAMIC_FUNCTIONS['libSceNet.sprx']:
+            linked,converted,providers=fixture()
+            self.add_import(linked,converted,providers,name,'libkernel.sprx')
             with self.subTest(name=name),self.assertRaisesRegex(ValueError,'dynamically resolved calls'):
                 build.ordinary_graph(linked,converted,providers)
+
+    def test_sysmodule_import_set_is_exact(self):
+        linked,converted,providers=fixture()
+        self.add_import(linked,converted,providers,'sceSysmoduleUnloadModuleInternal','libSceSysmodule.sprx')
+        with self.assertRaisesRegex(ValueError,'exactly two static Sysmodule imports'):
+            build.ordinary_graph(linked,converted,providers)
+        for name in build.SYSMODULE_FUNCTIONS:
+            linked,converted,providers=fixture()
+            providers['libkernel.sprx']['definitions'][name]='FUNC'
+            index=next(i for i,s in enumerate(linked.symbols) if s.get('name')==name)
+            converted.symbols[index]['name']=nid(name)+'#B#C'
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'lifecycle'):
+                build.ordinary_graph(linked,converted,providers)
+            linked,converted,providers=fixture()
+            index=next(i for i,s in enumerate(linked.symbols) if s.get('name')==name)
+            linked.symbols.pop(index);converted.symbols.pop(index)
+            for image in (linked,converted):
+                image.relocations=[r for r in image.relocations if r['symbol']!=index]
+                for r in image.relocations:
+                    if r['symbol']>index:r['symbol']-=1
+            with self.subTest(missing=name),self.assertRaisesRegex(ValueError,'lifecycle'):
+                build.ordinary_graph(linked,converted,providers)
+
+    def test_actual_link_and_converter_commands_receive_all_three_stubs(self):
+        # Execute only these actual builder AST statements with an inert recorder.
+        # This checks routing; no compiler, converter or target binary runs.
+        function=next(n for n in ast.parse(Path(build.__file__).read_text()).body
+                      if isinstance(n,ast.FunctionDef) and n.name=='build')
+        statements=[]
+        for node in function.body:
+            if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='stubs' for t in node.targets):
+                statements.append(node)
+            elif isinstance(node,ast.Expr) and isinstance(node.value,ast.Call):
+                call=node.value
+                if isinstance(call.func,ast.Attribute) and call.func.attr=='run' and (
+                        any(isinstance(n,ast.Constant) and n.value=='bin/prospero-lld' for n in ast.walk(call)) or
+                        any(isinstance(n,ast.Constant) and n.value=='--component' for n in ast.walk(call))):
+                    statements.append(node)
+        self.assertEqual(len(statements),3)
+        calls=[]
+        scope={'sdk':Path('/sdk'),'title':Path('/title'),'environment':[],
+               'linked':Path('/linked'),'converted':Path('/converted'),'crt':Path('/crt'),
+               'objects':[],'tool':Path('/tool'),'PROVIDERS':build.PROVIDERS,
+               'commands':types.SimpleNamespace(run=lambda *args:calls.append(args))}
+        exec(compile(ast.Module(body=statements,type_ignores=[]),build.__file__,'exec'),scope)
+        expected=[Path('/sdk/target/lib')/leaf for leaf in
+                  ('libSceLibcInternal.so','libkernel.so','libSceSysmodule.so')]
+        self.assertEqual(list(calls[0][-3:]),expected)
+        self.assertEqual([calls[1][i+1] for i,arg in enumerate(calls[1]) if arg=='--stub'],expected)
 
     def test_wrong_provider_set(self):
         linked, converted, providers = fixture()

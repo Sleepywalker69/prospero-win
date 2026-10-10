@@ -130,7 +130,7 @@ def collect(args):
         c.copy(app/name,app,'target/app')
     # Only actual SDK providers and wrapper bytes, not a blanket SDK/tool upload.
     sdk=args.title_foundation/'.deps/native/ps5-payload-sdk'
-    for name in ('libkernel.so','libSceLibcInternal.so','libSceSystemService.so'):
+    for name in ('libkernel.so','libSceLibcInternal.so','libSceSystemService.so','libSceSysmodule.so','libSceNet.so'):
         c.copy(sdk/'target/lib'/name,sdk,'providers/sdk')
     c.copy(sdk/'bin/prospero-clang',sdk,'providers/sdk')
     return c.finish(identities)

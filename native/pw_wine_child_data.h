@@ -16,6 +16,8 @@ enum { PW_WCD_ARGUMENT=0x200, PW_WCD_BUDGET, PW_WCD_CONTROL, PW_WCD_DATA_STAT,
        PW_WCD_REQUEST, PW_WCD_PREPARE, PW_WCD_LOCAL_PREPARE, PW_WCD_PREPARED,
        PW_WCD_RESULT, PW_WCD_SETTLE, PW_WCD_NET_CLOSE,
        PW_WCD_DATA_LSTAT, PW_WCD_DATA_LSTAT_TYPE };
+/* MODULE_LOAD/START and SYSMODULE_LOAD/HANDLE resolution indices remain
+ * reserved for historical diagnostics. Sysmodule now uses static imports. */
 /* Every bootstrap FAILURE reserves returned_length bits16..21 for the state
  * mask below; low16 bits preserve the operation auxiliary. For data APIs it
  * is zero. returned_value is
