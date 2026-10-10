@@ -37,18 +37,13 @@ HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'n
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
            'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h')
 PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so',
-             'libSceSysmodule.sprx': 'libSceSysmodule.so'}
-SYSMODULE_FUNCTIONS = ('sceSysmoduleLoadModuleInternal', 'sceSysmoduleGetModuleHandleInternal')
+             'libSceNet.sprx': 'libSceNet.so'}
+NET_FUNCTIONS = ('sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
+                 'sceNetSetsockopt', 'sceNetSocketClose', 'sceNetErrnoLoc')
 CRT_IMPORTS = {'_init_env': 'libSceLibcInternal.sprx', 'atexit': 'libSceLibcInternal.sprx',
                'exit': 'libSceLibcInternal.sprx', 'pthread_create': 'libkernel.sprx',
-               'sceKernelDlsym': 'libkernel.sprx', 'sceKernelLoadStartModule': 'libkernel.sprx',
-               **{name: 'libSceSysmodule.sprx' for name in SYSMODULE_FUNCTIONS}}
-DYNAMIC_PROVIDERS = {'libSceNet.sprx': 'libSceNet.so'}
-DYNAMIC_FUNCTIONS = {
-    'libkernel.sprx': ('sceKernelDlsym',),
-    'libSceSysmodule.sprx': SYSMODULE_FUNCTIONS,
-    'libSceNet.sprx': ('sceNetInit', 'sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
-                        'sceNetSetsockopt', 'sceNetSocketClose', 'sceNetErrnoLoc')}
+               'sceKernelLoadStartModule': 'libkernel.sprx',
+               **{name: 'libSceNet.sprx' for name in NET_FUNCTIONS}}
 HELPER_SHA = '43fab6d8045b525403f025a7b15e313aeaeac174bba6bff19a32b0000293c647'
 HELPER_RELEASE = 'v0.3.2-experimental'
 HELPER_SOURCE = 'b48b7d7236eca25c7b9dfd6c040c763ae05dde80'
@@ -95,7 +90,7 @@ def output_directory(path, inputs):
 
 def ordinary_graph(linked, converted, providers):
     require(set(linked.needed) == set(PROVIDERS) and len(linked.needed) == 3,
-            'full-CRT child needs exactly ordinary libc, kernel and Sysmodule providers')
+            'full-CRT child needs exactly ordinary libc, kernel and Net providers')
     graph = inspect_bindings(linked, converted, providers)
     for index, symbol in enumerate(linked.symbols[1:], 1):
         name = symbol['name']; entry = graph[name]
@@ -109,10 +104,11 @@ def ordinary_graph(linked, converted, providers):
             converted.offset(relocation['address'], 8, 6)
     require(all(name in graph and graph[name]['provider'] == expected for name, expected in CRT_IMPORTS.items()),
             'full-CRT lifecycle imports missing or bound to wrong providers')
-    require({name for name, entry in graph.items() if entry['provider'] == 'libSceSysmodule.sprx'} ==
-            set(SYSMODULE_FUNCTIONS), 'child requires exactly two static Sysmodule imports')
-    require(not any(name in graph for name in DYNAMIC_FUNCTIONS['libSceNet.sprx']),
-            'child dynamically resolved calls must not become static imports')
+    require({name for name, entry in graph.items() if entry['provider'] == 'libSceNet.sprx'} ==
+            set(NET_FUNCTIONS) and {name for name in graph if name.startswith('sceNet')} == set(NET_FUNCTIONS),
+            'child requires exactly seven native-root Net imports')
+    require('sceKernelDlsym' not in graph and not any(name.startswith('sceSysmodule') for name in graph),
+            'child must not use dynamic Net acquisition')
     return graph
 
 
@@ -147,18 +143,14 @@ def helper_inputs(args, root):
             'release_tag': HELPER_RELEASE, 'runtime_validated': False}
 
 
-def dynamic_inputs(sdk, bindir, commands):
-    result = {}
-    for name, calls in DYNAMIC_FUNCTIONS.items():
-        leaf = (PROVIDERS | DYNAMIC_PROVIDERS)[name]
-        path = sdk / 'target/lib' / leaf
-        item = provider(path, bindir, commands)
-        require(item['soname'] == name and all(item['definitions'].get(call) == 'FUNC' for call in calls),
-                'child dynamic provider/exports differ: ' + name)
-        result[name] = {**record(path), 'functions': list(calls),
-                        'binding': 'dynamic' if name in DYNAMIC_PROVIDERS else 'static'}
-    return {'providers': result, 'sysmodule_acquisition': 'static-imports',
-            'net_internal_id': '0x8000001c', 'net_init_required_return': 0, 'runtime_validated': False}
+def net_inputs(sdk, bindir, commands):
+    name = 'libSceNet.sprx'; path = sdk / 'target/lib' / PROVIDERS[name]
+    item = provider(path, bindir, commands)
+    require(item['soname'] == name and all(item['definitions'].get(call) == 'FUNC' for call in NET_FUNCTIONS),
+            'child static Net provider/exports differ')
+    return {'provider': {'soname': name, **record(path)}, 'functions': list(NET_FUNCTIONS),
+            'acquisition': 'static-imports', 'initialization': 'native-root-transport',
+            'explicit_net_init': False, 'runtime_validated': False}
 
 
 def check_disassembly(disassembly):
@@ -215,8 +207,8 @@ def inputs(args, commands):
     require(declaration == {'enabled': True, 'unix_define': 'PW_WINE_SERVICE_FIXTURE=1',
                             'abi': 1, 'runtime_validated': False}, 'Wine service consumers were not explicitly built')
     helper = helper_inputs(args, root)
-    dynamic = dynamic_inputs(sdk, bindir, commands)
-    result = {'helper': helper, 'dynamic_modules': dynamic, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
+    net = net_inputs(sdk, bindir, commands)
+    result = {'helper': helper, 'net_transport': net, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
               'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
               'candidate_capabilities': [
                   {'mode': 1, 'prefix': 'windows-child-fixture-v1', 'guest_machine': 'AMD64',
@@ -332,7 +324,7 @@ def build(args):
         stream.write('};\nconst size_t pw_wine_child_image_size = sizeof(pw_wine_child_image);\n')
     for original, name in zip((args.helper, args.helper_manifest, args.helper_release), HELPER_FILES):
         shutil.copyfile(original, out / name)
-    for name, leaf in (PROVIDERS | DYNAMIC_PROVIDERS).items():
+    for name, leaf in PROVIDERS.items():
         shutil.copyfile(sdk / 'target/lib' / leaf, out / leaf)
     return manifest
 
@@ -380,9 +372,6 @@ def verify_child(args, commands):
             manifest['zlib_headers'] == tree_files(zroot / 'usr/include'), 'converter zlib inputs differ')
     for name, leaf in PROVIDERS.items():
         require(record(work / leaf) == bound['providers'][name], 'retained service provider differs')
-    for name, leaf in DYNAMIC_PROVIDERS.items():
-        require(record(work / leaf) == {k: bound['dynamic_modules']['providers'][name][k] for k in ('bytes', 'sha256')},
-                'retained dynamic provider differs')
     require((work / 'wine-child-build.h').read_text() == child_header(bound, identity(bound)), 'child generated helper/ABI header differs')
     for key in ('console_execution_verified', 'windows_process_support', 'platform_authentication_verified'):
         require(manifest.get(key) is False, 'child manifest makes unsupported execution claim')

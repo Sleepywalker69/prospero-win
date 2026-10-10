@@ -78,7 +78,7 @@ two jobs. The measured resources and chosen limit are retained in the evidence.
 - `--out`: a new owned child-output directory
 
 The output `native-wine-child-build.json` uses `pw-wine-service-child/1`. It binds
-the project, input sources, unchanged CRT/layout, ordinary libc/kernel/Sysmodule stubs,
+the project, input sources, unchanged CRT/layout, ordinary libc/kernel/Net stubs,
 compiler/SDK, exact ntdll PRX, linked/converted/recovered bytes, import NIDs and
 provider ranks, and preload metadata before signing and after recovery. The
 child uses the high-address executable converter from title foundation 9c0b994,
@@ -351,28 +351,33 @@ source-to-binary reproducibility claim. The child hashes one bounded heap buffer
 and uploads those exact bytes, after matching the packaged helper pin. It does
 not hash and then reread a changing file.
 
-The child imports `sceSysmoduleLoadModuleInternal` and
-`sceSysmoduleGetModuleHandleInternal` from ordinary `libSceSysmodule.sprx`,
-using the same module API and variadic static loader declaration as the
-[native title adapter](../native/pw_agc_ps5.c). The one-ID invocation and Net
-mapping follow the [pinned SDK module source](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/crt/rtld_sprx.c);
-that source uses a nonvariadic function pointer for its dynamic call. Its exact static provider graph
-is libc/kernel/Sysmodule, with exactly those two Sysmodule functions and the
-existing service preload mask. The child does not reopen a firmware Sysmodule
-path: the earlier path-load attempt failed with raw `0x80020002` at DATA
-operation 516 in both console profiles before Net or helper dispatch.
+The child uses the same seven ordinary Net transport/error imports as the
+working [native root helper](../native/pw_lapy_elevation.c) and its
+[Net adapter](../native/ps5log/ps5log_ps5_net.c): `sceNetSocket`,
+`sceNetConnect`, `sceNetSend`, `sceNetRecv`, `sceNetSetsockopt`,
+`sceNetSocketClose` and `sceNetErrnoLoc`. Its exact static provider graph is
+libc/kernel/Net, with exactly those seven Net functions and the existing service
+preload mask. Link, conversion and recovered SELF checks use the same providers,
+actual provider ranks, NIDs and relocations. Additional Net imports, including
+`sceNetInit`, and the old Sysmodule/Dlsym acquisition route are refused.
 
-After HELLO, the child loads internal Net ID `0x8000001c`, resolves its eight
-functions with `sceKernelDlsym`, and requires `sceNetInit() == 0`. Modules remain
-loaded for the process lifetime. The builder verifies the static Sysmodule
-imports, each actual provider/NID/relocation, and the dynamic Net export bytes;
-all eight Net calls remain forbidden as static imports. Link, conversion and
-recovered SELF checks use the same three providers. These checks do not prove
-that console firmware admits the new service dependency or initializes Net.
-No helper request is sent after a failed module load, resolution or init.
-SceNet socket IDs and inherited native fd3 stay in separate descriptor domains.
-Once data readiness observes a parent-control refusal, it suppresses the final
-diagnostic send too, even when an earlier operation remains the primary error.
+This follows the observed root transport route without an additional explicit
+Net initialization call. It does not ignore an initialization error or claim
+firmware auto-initialization. The first socket and every subsequent operation
+remain checked, with immediate Net errno, the original deadline and no retry.
+The earlier Sysmodule path load failed with raw `0x80020002` at DATA operation
+516; replacing it with ordinary static Sysmodule imports progressed to the
+first Net symbol lookup, which failed with raw `0x80020003` at DATA operation
+518, resolution index 3 (`sceNetInit`). Neither attempt called NetInit or sent a
+helper request. This route removes those unsupported acquisition steps together.
+The exact cause of the Net lookup failure remains unproved.
+
+Static Net is a service dependency before HELLO, so a host import check cannot
+establish console admission. Root success also does not prove the service
+child's helper admission or thread count. SceNet socket IDs and inherited native
+fd3 stay in separate descriptor domains. Once data readiness observes a
+parent-control refusal, it suppresses the final diagnostic send too, even when
+an earlier operation remains the primary error.
 
 Before sending BOOTSTRAP, the owner logs `helper_possible` and latches possible
 helper activity. Only the exact successful BOOTSTRAP_ACK clears that latch.
@@ -409,17 +414,36 @@ bootstrap FAILURE, `returned_length` bits 16–21 hold possible-apply, terminal,
 data-before, data-after, successful-directory-lstat-before and
 successful-directory-lstat-after flags; its low 16 bits preserve the existing
 operation auxiliary. `returned_value` retains the operation detail: CONTROL
-uses the exact native poll revents mask, RESOLVE uses the following fixed index,
-and other data operations use the observed helper status. Raw return and
-immediate errno remain separate. Resolution indices 1 and 2 remain reserved for the historical dynamic
-Sysmodule lookups. Current indices are 3 NetInit, 4 NetSocket, 5 NetConnect, 6 NetSend,
-7 NetRecv, 8 NetSetsockopt, 9 NetSocketClose and 10 NetErrnoLoc.
+uses the exact native poll revents mask; other current data operations use the
+observed helper status. Raw return and immediate errno remain separate. The
+historical module and resolution operation IDs stay reserved, without changing
+wire decoding. Historical RESOLVE indices are 1 SysmoduleLoad, 2 SysmoduleHandle,
+3 NetInit, 4 NetSocket, 5 NetConnect, 6 NetSend, 7 NetRecv, 8 NetSetsockopt,
+9 NetSocketClose and 10 NetErrnoLoc. The static transport does not emit these
+resolution operations.
 
 The compiler manifest binds the exact helper ELF, release record, helper
-manifest, protocol, generated hash, static import graph and dynamic SDK provider
-bytes. Bounded failure retention includes the exact Sysmodule and Net SDK stubs
+manifest, protocol, generated hash, static import graph and exact Net provider
+bytes. Its `net_transport` record identifies static imports, the seven functions
+and the absence of an explicit NetInit call, with `runtime_validated=false`.
+Bounded failure retention includes the exact Sysmodule and Net SDK stubs
 even when the child build fails before its own provider copies are written. Title and
 archive checks compare the packaged helper and retained metadata to that child
 binding. Host controls mock native/filesystem/transport boundaries; they do not
 execute the helper or establish service-console admission. A held result needs
 manual recovery and remains inconclusive, never an automatic compatibility pass.
+
+
+### Remaining service-child gates
+
+These gates need observations from the exact new artifact. Earlier root success
+or mocked host controls do not establish them for a service child.
+
+| Gate | Required observation | Current boundary |
+| --- | --- | --- |
+| Static Net and helper transport | HELLO followed by checked socket/connect/upload/response | Seven imports reuse the root route; service dependency and calls need console proof. |
+| Helper admission | Exact self PID, `PPSA99995` title checks before/after PREPARED, accepted local preparation and terminal response | Existing one-thread/credential guards remain; no bypass or retry. |
+| Data and paths | Both directory observations, measured settle, actual log/prefix/CWD access | Visibility alone never skips the actual path checks. |
+| Wine startup | Bound ntdll bytes/descriptor, inherited server stream, successful Windows initialization | BOOTSTRAP_ACK alone is insufficient. |
+| Guest networking | Actual ws2_32 resolver/pool calls and TLS with the packaged CA roots | The helper's seven calls do not prove DNS, TLS or repeated guest Net initialization. |
+| Further processes and presentation | Separately checked descendant creation and child-window evidence | The original leaf fixture does not prove grandchildren or GUI presentation. |

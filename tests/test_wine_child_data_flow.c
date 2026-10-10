@@ -278,6 +278,19 @@ static Generation *flow(unsigned profile,int which,int data_mode)
 }
 int main(void)
 {
+#ifdef PW_DATA_NET_LOOKUP_CONTROL
+ for(unsigned profile=1;profile<=2;profile++){
+  Generation *g=flow(profile,CASE_SUCCESS,10);
+  printf("Observed Net lookup through child/codec/owner: profile=%u api=%u raw=%d index=%d status=%d held=%u\n",profile,child_result.failure.failure_api,child_result.failure.failure_raw,child_result.failure.returned_value,child_result.failure.status,g->helper_possible);fflush(stdout);
+  CHECK(child_result.failure.kind==PW_WC_FAILURE&&child_result.failure.status==-PW_WCB_DATA);
+  CHECK(child_result.failure.failure_api==PW_WCD_RESOLVE&&child_result.failure.failure_raw==(int32_t)UINT32_C(0x80020003));
+  CHECK(child_result.failure.returned_value==PW_WCD_NET_INIT_SYMBOL&&!child_result.failure.returned_length&&!child_result.failure.errno_valid&&!child_result.failure.native_error);
+  CHECK(child_result.sends==2&&!child_result.loads&&!child_result.threads&&!child_result.data.possible_apply&&!child_result.parked&&child_result.exit_code==14);
+  CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.closes[5]);
+  CHECK(g->helper_possible&&!g->ack&&atomic_load(&g->state)==G_UNCERTAIN&&!m.kills&&!child_result.data_sends);
+ }
+ return 0;
+#endif
 #ifdef PW_DATA_CONTROL_RED
  Generation *red=flow(1,CASE_SUCCESS,PW_DATA_CONTROL_RED==1?4:6);
  printf("control refusal: mode=%d sends=%d primary_api=%u failure_api=%u possible=%u terminal=%u held=%u\n",PW_DATA_CONTROL_RED,child_result.sends,child_result.data.api,child_result.failure.failure_api,child_result.data.possible_apply,child_result.data.terminal,red->helper_possible);fflush(stdout);
@@ -309,17 +322,17 @@ int main(void)
   CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==(PW_WCD_POSSIBLE<<PW_WCD_STATE_SHIFT)&&g->helper_possible);
   CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.closes[5]);
   g=flow(profile,CASE_SUCCESS,5);CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads);
-  CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==0&&child_result.failure.returned_value==PW_WCD_NET_INIT_SYMBOL);
+  CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==0&&child_result.failure.returned_value==0&&child_result.failure.failure_api==PW_WCD_SOCKET&&child_result.failure.failure_raw==-1&&child_result.failure.errno_valid&&child_result.failure.native_error==EIO);
   const unsigned stopped_modes[]={4,6,7};
   for(unsigned i=0;i<3;i++){
    unsigned mode=stopped_modes[i];g=flow(profile,CASE_SUCCESS,(int)mode);
    CHECK(child_result.sends==1&&child_result.data.control_refused&&!g->ack&&!child_result.loads&&!child_result.threads);
    CHECK(g->helper_possible&&atomic_load(&g->state)==G_UNCERTAIN&&!m.kills);
-   CHECK(child_result.data.api==(mode==6?PW_WCD_RESOLVE:PW_WCD_CONTROL));
+   CHECK(child_result.data.api==(mode==6?PW_WCD_SOCKET:PW_WCD_CONTROL));
    CHECK(child_result.parked==(mode==7)&&child_result.exit_code==(mode==7?0:14));
    CHECK(child_result.data.possible_apply==(mode==7)&&!child_result.data.terminal);
    CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.closes[5]);
-   if(mode==6)CHECK(child_result.data.raw==0&&!child_result.data.errno_valid&&child_result.data.resolution_index==PW_WCD_NET_INIT_SYMBOL);
+   if(mode==6)CHECK(child_result.data.raw==-1&&child_result.data.errno_valid&&child_result.data.native_error==EIO&&!child_result.data.resolution_index);
   }
   g=flow(profile,CASE_SUCCESS,3);CHECK(child_result.data.possible_apply&&child_result.data.terminal&&!child_result.data.ready);
   CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads&&g->helper_possible);

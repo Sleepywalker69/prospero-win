@@ -14,30 +14,25 @@
 #include <time.h>
 #include <unistd.h>
 
-int sceSysmoduleLoadModuleInternal(unsigned,...);
-int sceSysmoduleGetModuleHandleInternal(uint32_t,int32_t *);
-int sceKernelDlsym(int32_t,const char *,void **);
-#define NET_ID UINT32_C(0x8000001c)
+/* Match the native root helper's ordinary Net imports. Service startup uses
+ * the same checked socket operations, without an extra module query/dlsym or
+ * explicit NetInit prerequisite. No Net initialization error is ignored. */
+int sceNetSocket(const char *,int,int,int);
+int sceNetConnect(int,const struct sockaddr *,socklen_t);
+int sceNetSend(int,const void *,size_t,int);
+int sceNetRecv(int,void *,size_t,int);
+int sceNetSetsockopt(int,int,int,const void *,socklen_t);
+int sceNetSocketClose(int);
+int *sceNetErrnoLoc(void);
 #define HELPER_LIMIT (4u*1024u*1024u)
 #define SETTLE_MS 1000u
 #define VISIBLE_MS 5000u
 _Static_assert(sizeof(struct lapy_elevation_message)==24,"fixed helper protocol");
 _Static_assert(__BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__,"helper wire is little endian");
 
-typedef struct ChildNet {
-    int (*init)(void);
-    int (*socket)(const char *,int,int,int);
-    int (*connect)(int,const struct sockaddr *,socklen_t);
-    int (*send)(int,const void *,size_t,int);
-    int (*receive)(int,void *,size_t,int);
-    int (*option)(int,int,int,const void *,socklen_t);
-    int (*close)(int);
-    int *(*error)(void);
-} ChildNet;
 typedef struct DataContext {
     PwWineChildData *result;
     PwNativeChildIo *original,io;
-    ChildNet net;
 } DataContext;
 static int data_fail(DataContext *c,unsigned api,int32_t raw,int error)
 {
@@ -77,43 +72,10 @@ static int data_budget(DataContext *c,unsigned *remaining)
     if(remaining)*remaining=left;
     return 0;
 }
-static int net_error(DataContext *c,int rc)
+static int net_error(int rc)
 {
     if(rc>=0)return 0;
-    int *value=c->net.error();return value&&*value>0?*value:0;
-}
-static int resolve(DataContext *c,int32_t module,const char *name,void *slot,unsigned index)
-{
-    if(data_budget(c,NULL))return -1;
-    void *address=NULL;int rc=sceKernelDlsym(module,name,&address);
-    if(rc||!address){
-        if(!c->result->api)c->result->resolution_index=index;
-        return data_fail(c,PW_WCD_RESOLVE,rc,0);
-    }
-    /* Function/object pointers have the same representation in this target ABI. */
-    _Static_assert(sizeof(void *)==sizeof(c->net.init),"native function pointer ABI");
-    memcpy(slot,&address,sizeof(address));
-    return data_budget(c,NULL);
-}
-static int net_start(DataContext *c)
-{
-    if(data_budget(c,NULL))return -1;
-    /* Sysmodule is a checked static provider. Do not reopen a firmware path
-     * from the service child's filesystem namespace. Net stays dynamic. */
-    int rc=sceSysmoduleLoadModuleInternal(NET_ID);if(rc)return data_fail(c,PW_WCD_NET_LOAD,rc,0);
-    if(data_budget(c,NULL))return -1;
-    int32_t net=-1;rc=sceSysmoduleGetModuleHandleInternal(NET_ID,&net);
-    if(rc||net<0)return data_fail(c,PW_WCD_NET_HANDLE,rc,0);
-    if(data_budget(c,NULL))return -1;
-    if(resolve(c,net,"sceNetInit",&c->net.init,PW_WCD_NET_INIT_SYMBOL)||resolve(c,net,"sceNetSocket",&c->net.socket,PW_WCD_NET_SOCKET_SYMBOL)||
-       resolve(c,net,"sceNetConnect",&c->net.connect,PW_WCD_NET_CONNECT_SYMBOL)||resolve(c,net,"sceNetSend",&c->net.send,PW_WCD_NET_SEND_SYMBOL)||
-       resolve(c,net,"sceNetRecv",&c->net.receive,PW_WCD_NET_RECV_SYMBOL)||resolve(c,net,"sceNetSetsockopt",&c->net.option,PW_WCD_NET_OPTION_SYMBOL)||
-       resolve(c,net,"sceNetSocketClose",&c->net.close,PW_WCD_NET_CLOSE_SYMBOL)||resolve(c,net,"sceNetErrnoLoc",&c->net.error,PW_WCD_NET_ERRNO_SYMBOL))return -1;
-    if(data_budget(c,NULL))return -1;
-    rc=c->net.init();int error=net_error(c,rc);
-    if(rc)return data_fail(c,PW_WCD_NET_INIT,rc,error);
-    /* These modules and Net initialization remain live for subsequent Wine. */
-    return data_budget(c,NULL);
+    int *value=sceNetErrnoLoc();return value&&*value>0?*value:0;
 }
 static unsigned char *helper_bytes(DataContext *c,const char *expected,size_t *size)
 {
@@ -164,7 +126,7 @@ static int timeouts(DataContext *c,int socket)
     for(unsigned i=0;i<3;i++){
         unsigned left;if(data_budget(c,&left))return -1;
         uint32_t timeout=(left>5000?5000:left)*1000u;
-        int rc=c->net.option(socket,0xffff,options[i],&timeout,sizeof(timeout)),error=net_error(c,rc);
+        int rc=sceNetSetsockopt(socket,0xffff,options[i],&timeout,sizeof(timeout)),error=net_error(rc);
         if(rc)return data_fail(c,PW_WCD_OPTION,rc,error);
         if(data_budget(c,NULL))return -1;
     }
@@ -177,9 +139,9 @@ static int transfer(DataContext *c,int socket,void *bytes,size_t size,int sendin
     size_t used=0;
     while(used<size){
         if(timeouts(c,socket)||data_budget(c,NULL))return -1;
-        int got=sending?c->net.send(socket,(unsigned char *)bytes+used,size-used,0):
-                        c->net.receive(socket,(unsigned char *)bytes+used,size-used,0);
-        int error=net_error(c,got);
+        int got=sending?sceNetSend(socket,(unsigned char *)bytes+used,size-used,0):
+                        sceNetRecv(socket,(unsigned char *)bytes+used,size-used,0);
+        int error=net_error(got);
         if(got<=0||(size_t)got>size-used)return data_fail(c,api,got,error);
         used+=(size_t)got;
         if(data_budget(c,NULL))return used==size?1:-1;
@@ -311,9 +273,9 @@ int pw_wine_child_data_prepare(PwWineChildData *result,PwNativeChildIo *io,const
     size_t size=0;unsigned char *bytes=helper_bytes(&c,expected,&size);
     if(!bytes)return -1;
     int socket=-1,success=0;
-    if(net_start(&c)||data_budget(&c,NULL))goto done;
-    socket=c.net.socket("pw-wine-child-data",AF_INET,SOCK_STREAM,6);
-    int error=net_error(&c,socket);
+    if(data_budget(&c,NULL))goto done;
+    socket=sceNetSocket("pw-wine-child-data",AF_INET,SOCK_STREAM,6);
+    int error=net_error(socket);
     if(socket<0){data_fail(&c,PW_WCD_SOCKET,socket,error);goto done;}
     if(data_budget(&c,NULL)||timeouts(&c,socket))goto done;
     /* SceNet uses the target BSD sockaddr layout even in host controls. */
@@ -322,7 +284,7 @@ int pw_wine_child_data_prepare(PwWineChildData *result,PwNativeChildIo *io,const
     address.length=sizeof(address);address.family=AF_INET;
     address.port=(uint16_t)((9021u<<8)|(9021u>>8));address.address=UINT32_C(0x0100007f);
     if(data_budget(&c,NULL))goto done;
-    rc=c.net.connect(socket,(const struct sockaddr *)&address,sizeof(address));error=net_error(&c,rc);
+    rc=sceNetConnect(socket,(const struct sockaddr *)&address,sizeof(address));error=net_error(rc);
     if(rc){data_fail(&c,PW_WCD_CONNECT,rc,error);goto done;}
     if(data_budget(&c,NULL)||transfer(&c,socket,bytes,size,1,PW_WCD_UPLOAD))goto done;
     free(bytes);bytes=NULL;
@@ -331,7 +293,7 @@ int pw_wine_child_data_prepare(PwWineChildData *result,PwNativeChildIo *io,const
  done:
     free(bytes);
     if(socket>=0){
-        rc=c.net.close(socket);error=net_error(&c,rc);
+        rc=sceNetSocketClose(socket);error=net_error(rc);
         if(rc){data_fail(&c,PW_WCD_NET_CLOSE,rc,error);success=0;}
     }
     if(data_budget(&c,NULL))success=0;

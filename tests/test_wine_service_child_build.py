@@ -28,14 +28,14 @@ class Mapping:
 
 
 def fixture():
-    needed = ['libSceLibcInternal.sprx', 'libkernel.sprx', 'libSceSysmodule.sprx']
+    needed = ['libSceLibcInternal.sprx', 'libkernel.sprx', 'libSceNet.sprx']
     names = list(build.CRT_IMPORTS)
     providers = {name: {'definitions': {}, 'sha256': str(i) * 64} for i, name in enumerate(needed, 1)}
     linked, converted = Mapping(), Mapping()
     linked.kind = 3; converted.kind = 0xfe10
     linked.needed = needed; converted.needed = [s.replace('.sprx', '.prx') for s in needed]
-    converted.modules = {1: 'libSceLibcInternal', 2: 'libkernel', 3: 'libSceSysmodule'}
-    converted.libraries = {0: 'libSceLibcInternal', 1: 'libkernel', 2: 'libSceSysmodule'}
+    converted.modules = {1: 'libSceLibcInternal', 2: 'libkernel', 3: 'libSceNet'}
+    converted.libraries = {0: 'libSceLibcInternal', 1: 'libkernel', 2: 'libSceNet'}
     linked.symbols = [{}]; converted.symbols = [{}]
     linked.relocations = []; converted.relocations = []
     for index, name in enumerate(names, 1):
@@ -83,31 +83,27 @@ class WineServiceChildBuild(unittest.TestCase):
                 bad=dict(release,tag_name='different');(work/'lapy-release.json').write_text(json.dumps(bad))
                 with self.assertRaisesRegex(ValueError,'release identity'):build.helper_inputs(args,root)
 
-    def test_dynamic_providers_require_all_exact_function_exports(self):
+    def test_static_net_input_policy_binds_exact_functions_and_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             sdk=Path(directory);(sdk/'target/lib').mkdir(parents=True)
-            providers={}
-            for name,calls in build.DYNAMIC_FUNCTIONS.items():
-                leaf=(build.PROVIDERS|build.DYNAMIC_PROVIDERS)[name]
-                (sdk/'target/lib'/leaf).write_bytes(('inert '+name).encode())
-                providers[leaf]={'soname':name,'definitions':{call:'FUNC' for call in calls}}
-            def inspect(path,*unused):return providers[path.name]
-            with patch.object(build,'provider',side_effect=inspect):
-                result=build.dynamic_inputs(sdk,Path('/inert'),None)
-                self.assertFalse(result['runtime_validated']);self.assertEqual(result['net_internal_id'],'0x8000001c')
-                self.assertEqual(result['sysmodule_acquisition'],'static-imports')
-                self.assertNotIn('sysmodule_path',result)
-                self.assertEqual({name:item['binding'] for name,item in result['providers'].items()},
-                    {'libkernel.sprx':'static','libSceSysmodule.sprx':'static','libSceNet.sprx':'dynamic'})
-                for name,calls in build.DYNAMIC_FUNCTIONS.items():
-                    leaf=(build.PROVIDERS|build.DYNAMIC_PROVIDERS)[name]
-                    for call in calls:
-                        providers[leaf]['definitions'][call]='OBJECT'
-                        with self.subTest(call=call),self.assertRaises(ValueError):build.dynamic_inputs(sdk,Path('/inert'),None)
-                        providers[leaf]['definitions'][call]='FUNC'
-                    providers[leaf]['soname']='wrong'
-                    with self.assertRaises(ValueError):build.dynamic_inputs(sdk,Path('/inert'),None)
-                    providers[leaf]['soname']=name
+            path=sdk/'target/lib/libSceNet.so';path.write_bytes(b'original inert Net provider')
+            description={'soname':'libSceNet.sprx','definitions':{call:'FUNC' for call in build.NET_FUNCTIONS}}
+            with patch.object(build,'provider',return_value=description):
+                result=build.net_inputs(sdk,Path('/inert'),None)
+                self.assertEqual(result,{'provider':{'soname':'libSceNet.sprx',**build.record(path)},
+                    'functions':list(build.NET_FUNCTIONS),'acquisition':'static-imports',
+                    'initialization':'native-root-transport','explicit_net_init':False,'runtime_validated':False})
+                self.assertNotIn('sceNetInit',result['functions'])
+                path.write_bytes(b'changed provider bytes')
+                self.assertNotEqual(result['provider'],build.net_inputs(sdk,Path('/inert'),None)['provider'])
+                for call in build.NET_FUNCTIONS:
+                    for kind in ('OBJECT',None):
+                        description['definitions'][call]=kind
+                        with self.subTest(call=call,kind=kind),self.assertRaises(ValueError):
+                            build.net_inputs(sdk,Path('/inert'),None)
+                    description['definitions'][call]='FUNC'
+                description['soname']='wrong'
+                with self.assertRaises(ValueError):build.net_inputs(sdk,Path('/inert'),None)
 
     def test_converter_replay_binds_every_specialization_field(self):
         original = b"/* original high-layout writer */\n" + b"".join(before for before, _ in converter.EDITS)
@@ -172,24 +168,28 @@ class WineServiceChildBuild(unittest.TestCase):
         relocation={'symbol':index,'type':6,'addend':0,'address':0x1000+index*8}
         linked.relocations.append(relocation);converted.relocations.append(dict(relocation))
 
-    def test_valid_bound_static_net_imports_are_refused(self):
-        for name in build.DYNAMIC_FUNCTIONS['libSceNet.sprx']:
+    def test_extra_bound_net_calls_including_init_are_refused(self):
+        for name,provider in [('sceNetInit','libSceNet.sprx'),('sceNetTerm','libSceNet.sprx'),
+                              ('sceNetShutdown','libSceNet.sprx'),('sceNetInit','libkernel.sprx')]:
             linked,converted,providers=fixture()
-            self.add_import(linked,converted,providers,name,'libkernel.sprx')
-            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'dynamically resolved calls'):
+            self.add_import(linked,converted,providers,name,provider)
+            with self.subTest(name=name,provider=provider),self.assertRaisesRegex(ValueError,'exactly seven'):
                 build.ordinary_graph(linked,converted,providers)
 
-    def test_sysmodule_import_set_is_exact(self):
-        linked,converted,providers=fixture()
-        self.add_import(linked,converted,providers,'sceSysmoduleUnloadModuleInternal','libSceSysmodule.sprx')
-        with self.assertRaisesRegex(ValueError,'exactly two static Sysmodule imports'):
-            build.ordinary_graph(linked,converted,providers)
-        for name in build.SYSMODULE_FUNCTIONS:
+    def test_old_dynamic_acquisition_calls_are_refused(self):
+        for name in ('sceKernelDlsym','sceSysmoduleLoadModuleInternal','sceSysmoduleGetModuleHandleInternal'):
+            linked,converted,providers=fixture()
+            self.add_import(linked,converted,providers,name,'libkernel.sprx')
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'dynamic Net acquisition'):
+                build.ordinary_graph(linked,converted,providers)
+
+    def test_each_required_net_import_and_provider_is_exact(self):
+        for name in build.NET_FUNCTIONS:
             linked,converted,providers=fixture()
             providers['libkernel.sprx']['definitions'][name]='FUNC'
             index=next(i for i,s in enumerate(linked.symbols) if s.get('name')==name)
             converted.symbols[index]['name']=nid(name)+'#B#C'
-            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'lifecycle'):
+            with self.subTest(wrong_provider=name),self.assertRaisesRegex(ValueError,'lifecycle'):
                 build.ordinary_graph(linked,converted,providers)
             linked,converted,providers=fixture()
             index=next(i for i,s in enumerate(linked.symbols) if s.get('name')==name)
@@ -224,13 +224,17 @@ class WineServiceChildBuild(unittest.TestCase):
                'commands':types.SimpleNamespace(run=lambda *args:calls.append(args))}
         exec(compile(ast.Module(body=statements,type_ignores=[]),build.__file__,'exec'),scope)
         expected=[Path('/sdk/target/lib')/leaf for leaf in
-                  ('libSceLibcInternal.so','libkernel.so','libSceSysmodule.so')]
+                  ('libSceLibcInternal.so','libkernel.so','libSceNet.so')]
         self.assertEqual(list(calls[0][-3:]),expected)
         self.assertEqual([calls[1][i+1] for i,arg in enumerate(calls[1]) if arg=='--stub'],expected)
 
     def test_wrong_provider_set(self):
         linked, converted, providers = fixture()
         linked.needed.append('libkernel_web.sprx')
+        with self.assertRaisesRegex(ValueError, 'exactly ordinary'):
+            build.ordinary_graph(linked, converted, providers)
+        linked, converted, providers = fixture()
+        linked.needed[-1] = 'libSceSysmodule.sprx'
         with self.assertRaisesRegex(ValueError, 'exactly ordinary'):
             build.ordinary_graph(linked, converted, providers)
 

@@ -16,13 +16,14 @@ enum { PW_WCD_ARGUMENT=0x200, PW_WCD_BUDGET, PW_WCD_CONTROL, PW_WCD_DATA_STAT,
        PW_WCD_REQUEST, PW_WCD_PREPARE, PW_WCD_LOCAL_PREPARE, PW_WCD_PREPARED,
        PW_WCD_RESULT, PW_WCD_SETTLE, PW_WCD_NET_CLOSE,
        PW_WCD_DATA_LSTAT, PW_WCD_DATA_LSTAT_TYPE };
-/* MODULE_LOAD/START and SYSMODULE_LOAD/HANDLE resolution indices remain
- * reserved for historical diagnostics. Sysmodule now uses static imports. */
+/* MODULE_LOAD/START, RESOLVE, NET_LOAD/HANDLE/INIT and all resolution indices
+ * remain reserved for historical diagnostics. Net transport now uses the
+ * native root helper's seven static imports, without an explicit NetInit. */
 /* Every bootstrap FAILURE reserves returned_length bits16..21 for the state
  * mask below; low16 bits preserve the operation auxiliary. For data APIs it
  * is zero. returned_value is
  * control_revents for CONTROL, resolution_index for RESOLVE, otherwise the
- * observed helper status. Resolution indices follow this fixed table: */
+ * observed helper status. Historical resolution indices keep this fixed table: */
 enum { PW_WCD_RESOLVE_NONE, PW_WCD_SYSMODULE_LOAD, PW_WCD_SYSMODULE_HANDLE,
        PW_WCD_NET_INIT_SYMBOL, PW_WCD_NET_SOCKET_SYMBOL, PW_WCD_NET_CONNECT_SYMBOL,
        PW_WCD_NET_SEND_SYMBOL, PW_WCD_NET_RECV_SYMBOL, PW_WCD_NET_OPTION_SYMBOL,
