@@ -35,7 +35,7 @@ UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'nat
          'native/pw_native_child_protocol.c', 'src/pw_wine_start.c', 'wine/ps5/pw_wine_prx.c', 'wine/ps5/pw_wine_threads.c')
 HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
-           'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h')
+           'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h', 'wine/ps5/pw_wine_creation.h')
 PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so',
              'libSceNet.sprx': 'libSceNet.so'}
 NET_FUNCTIONS = ('sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
@@ -67,7 +67,7 @@ def source_identity(root, commands):
                'tree': commands.run('git', '-C', root, 'rev-parse', 'HEAD^{tree}').strip()}
     sources = {name: sha(root / name) for name in (*UNITS, *HEADERS, 'tools/build_wine_service_child.py',
                'tools/native_service_converter.py', 'tools/native_probe_elf.py', 'tools/check_native_suite.py',
-               'tools/fetch_lapy_helper.py', 'tools/build_native.sh')}
+               'tools/fetch_lapy_helper.py', 'tools/build_native.sh', 'tools/wine_creation_abi.py')}
     return project, sources
 
 
@@ -206,10 +206,12 @@ def inputs(args, commands):
     declaration = json.loads((runtime / 'report.json').read_text()).get('service_fixture')
     require(declaration == {'enabled': True, 'unix_define': 'PW_WINE_SERVICE_FIXTURE=1',
                             'abi': 1, 'runtime_validated': False}, 'Wine service consumers were not explicitly built')
+    require(abi.get('creation', {}).get('abi') == 1 and abi['creation'].get('protocol') == 962,
+            'child requires actual matched creation protocol and broker')
     helper = helper_inputs(args, root)
     net = net_inputs(sdk, bindir, commands)
     result = {'helper': helper, 'net_transport': net, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
-              'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
+              'creation_abi': 1, 'creation_protocol': 962, 'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
               'candidate_capabilities': [
                   {'mode': 1, 'prefix': 'windows-child-fixture-v1', 'guest_machine': 'AMD64',
                    'backend': 'native-amd64', 'runtime_validated': False},
@@ -225,7 +227,8 @@ def inputs(args, commands):
 
 
 def child_header(bound, build_id):
-    require(bound['runtime'].get('private_dispatch_abi') == 1 and
+    require(bound['runtime'].get('creation_abi') == 1 and bound['runtime'].get('creation_protocol') == 962 and
+            bound['runtime'].get('private_dispatch_abi') == 1 and
             bound['runtime'].get('private_dispatch_wow64_abi') == 1,
             'child header cannot assert an absent ABI capability')
     require(re.fullmatch('[0-9a-f]{40}', build_id) and
@@ -235,6 +238,8 @@ def child_header(bound, build_id):
             '#define PW_WINE_CHILD_NTDLL_SHA256 "' + bound['runtime']['ntdll_sha256'] + '"\n' +
             '#define PW_WINE_CHILD_PRIVATE_DISPATCH_ABI 1\n' +
             '#define PW_WINE_CHILD_WOW64_ABI 1\n' +
+            '#define PW_WINE_CHILD_CREATION_ABI 1\n' +
+            '#define PW_WINE_CHILD_CREATION_PROTOCOL 962\n' +
             '#define PW_WINE_CHILD_HELPER_SHA256 \"' + bound['helper']['elf']['sha256'] + '\"\n')
 
 

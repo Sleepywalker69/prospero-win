@@ -27,6 +27,8 @@ if os.environ.get('PW_WINDOWS_CHILD_DEPENDENCY_TOOLS'):
 import package_windows_child_fixture as package
 import check_private_dispatch_abi as abi
 import private_dispatch_wow64 as wow
+import wine_creation_abi as creation
+from test_wine_creation_abi import cohort as creation_cohort
 from check_wine_prx_build import MODULES, PE
 
 
@@ -118,17 +120,20 @@ class ArchiveControls(unittest.TestCase):
         self.put(package.LIB + '/' + cpu_name, b'original inert CPU PE')
         self.put(package.CONSOLE_PREFIX + '/drive_c/windows/system32/wowprospero.dll', b'original inert CPU PE')
         cpu = {'outputs': {cpu_name: package.record(self.root / package.LIB / cpu_name)}}
+        creation_root=self.temp/'inert-creation';creation_report=creation_cohort(creation_root)
         declaration = {'mode': 1, 'executed': False, 'pe_identity': {'abi': 1, 'modules': modules}}
+        declaration['creation']=creation.check_runtime(creation_root,creation_report)
         self.json(package.ABI_REPORT, declaration)
         checked = {}
         for name in MODULES:
             target = package.LIB + '/x86_64-unix/' + name + '.prx'
-            self.put(target, ('inert ' + name).encode())
+            self.put(target, (creation_root/'prx/sce_module'/f'{name}.prx').read_bytes() if name in creation.EXPORTS else ('inert ' + name).encode())
             checked[name] = {'sha256': package.digest_file(self.root / target)}
         for name in ('lapy-helper-manifest.json', 'lapy-helper-release.json'):
             self.put('sources/' + name, ('original inert ' + name).encode())
         worker = {'schema': 'pw-wine-service-child/1', 'project': self.project,
-                  'runtime': {'private_dispatch_abi': 1, 'ntdll_sha256': checked['ntdll']['sha256']},
+                  'runtime': {'creation_abi':1, 'creation_protocol':962, 'abi_check': {'creation':declaration['creation']},
+                              'private_dispatch_abi': 1, 'ntdll_sha256': checked['ntdll']['sha256']},
                   'worker': package.record(self.root / 'PPSA99995/native-wine-child.self'),
                   'helper': {'elf': package.record(self.root / 'PPSA99995/lapy.elf'),
                              'manifest': package.record(self.root / 'sources/lapy-helper-manifest.json'),
@@ -143,7 +148,7 @@ class ArchiveControls(unittest.TestCase):
         self.json('provenance/prefix.json', prepared)
         self.json('provenance/fixture-source.json', pair)
         self.json('provenance/wine-prx-checks.json', {'schema': 'pw-prx-ci-check/1', 'modules': checked})
-        self.json('provenance/wine-build.json', {'wine_commit': package.prefix.WINE, 'patches': [], 'pe': built_pe})
+        self.json('provenance/wine-build.json', {**creation_report,'wine_commit': package.prefix.WINE, 'patches': [], 'pe': built_pe})
         self.json('provenance/retained-sources.json', {'schema': 'pw-windows-child-retained-sources/1',
                   'project': self.project, 'inventory': package.prefix.inventory(self.root / 'sources')})
         self.json('provenance/title.json', {'schema': 'pw-windows-child-title/1', 'project': self.project,

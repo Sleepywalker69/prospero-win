@@ -38,21 +38,52 @@ def check_dependency_inventory(wine, out, compiler):
     macro is off. The small input tree derives membership and bytes from the
     fully composed source; it never substitutes a model of that lookup.
     """
-    headers = ('wine/pw_wine_fixture_provider.h', 'wine/pw_wine_fixture_socket.h')
+    headers = ('wine/pw_wine_fixture_provider.h', 'wine/pw_wine_fixture_socket.h', 'wine/pw_wine_creation.h')
     work = out / 'makedep-check'; work.mkdir()
     source = work / 'source'
     (source / 'include/wine').mkdir(parents=True)
     (source / 'dlls/probe').mkdir(parents=True)
+    (source / 'dlls/ntdll/unix').mkdir(parents=True)
     inventory = set((wine / 'include/Makefile.in').read_text().replace('\\\n', ' ').split())
     for name in headers:
         shutil.copyfile(wine / 'include' / name, source / 'include' / name)
-    (source / 'include/Makefile.in').write_text('SOURCES = ' + ' '.join(n for n in headers if n in inventory) + '\n')
+    shutil.copyfile(wine / 'include/config.h.in', source / 'include/config.h.in')
+    (source / 'include/Makefile.in').write_text('SOURCES = ' +
+        ' '.join(n for n in headers + ('config.h.in',) if n in inventory) + '\n')
     (source / 'dlls/probe/Makefile.in').write_text('UNIXLIB = probe.so\nSOURCES = probe.c\n')
     (source / 'dlls/probe/probe.c').write_text('#ifdef PW_WINE_SERVICE_FIXTURE\n' +
         ''.join('#include "' + n + '"\n' for n in headers) + '#endif\nint original_probe;\n')
+    # Preserve the real translation unit's lexical preamble through its first
+    # config include. A MODULE defaults to PE even when it also has UNIXLIB;
+    # the pragma must select the Unix rule and generated config dependency.
+    # This is a dependency-classification probe, not a translation-unit build.
+    creation = (wine / 'dlls/ntdll/unix/creation.c').read_text()
+    config_include = '#include "config.h"'
+    preamble = creation[:creation.index(config_include) + len(config_include)]
+    module = (wine / 'dlls/ntdll/Makefile.in').read_text()
+    for variable, value in (('MODULE', 'ntdll.dll'), ('UNIXLIB', 'ntdll.so'),
+                            ('EXTRADLLFLAGS', '-nodefaultlibs')):
+        assert re.search(r'^' + variable + r'\s*=\s*' + re.escape(value) + r'\s*$', module, re.M)
+    assert 'unix/creation.c' in module.replace('\\\n', ' ').split()
+    (source / 'dlls/ntdll/Makefile.in').write_text(
+        'MODULE = ntdll.dll\nUNIXLIB = ntdll.so\nEXTRADLLFLAGS = -nodefaultlibs\nSOURCES = unix/creation.c\n')
+    shutil.copyfile(wine / 'dlls/ntdll/ntdll.spec', source / 'dlls/ntdll/ntdll.spec')
+    (source / 'dlls/ntdll/unix/creation.c').write_text(preamble + '\nint original_unix_probe;\n')
+    # Only library metadata is needed to emit the unused PE module rule.
+    # No probe library is compiled, linked or represented as a real artifact.
+    for name in ('winecrt0', 'compiler-rt'):
+        library = source / 'libs' / name
+        library.mkdir(parents=True)
+        declaration = re.search(r'^STATICLIB\s*=\s*([^\n]+)',
+                                (wine / 'libs' / name / 'Makefile.in').read_text(), re.M)
+        assert declaration
+        (library / 'Makefile.in').write_text(declaration[0] + '\n')
     (work / 'config.h').write_text('#define __WINE_CONFIG_H\n#define HAVE_SIGPROCMASK 1\n')
     (work / 'Makefile').write_text('srcdir = ' + str(source) + '\nHOST_ARCH = x86_64\n' +
-                                  'SUBDIRS = include dlls/probe\nLN_S = ln -s\nCC = cc\n')
+        'PE_ARCHS = i386 x86_64\nSUBDIRS = include dlls/probe dlls/ntdll libs/winecrt0 libs/compiler-rt\nLN_S = ln -s\nCC = cc\n' +
+        'i386_CC = i686-w64-mingw32-gcc\nx86_64_CC = x86_64-w64-mingw32-gcc\n' +
+        'i386_TARGET = i686-w64-mingw32\nx86_64_TARGET = x86_64-w64-mingw32\n' +
+        'i386_STRIP = i686-w64-mingw32-strip\nx86_64_STRIP = x86_64-w64-mingw32-strip\n')
     executable = work / 'makedep'
     commands = [shlex.split(compiler) + ['-std=gnu11', '-O2', '-I' + str(work),
                 '-I' + str(wine / 'include'), str(wine / 'tools/makedep.c'), '-o', str(executable)],
@@ -62,7 +93,10 @@ def check_dependency_inventory(wine, out, compiler):
         result = subprocess.run(command, cwd=work, capture_output=True, text=True)
         results.append({'command': command, 'exit': result.returncode, 'output': result.stdout + result.stderr})
         if result.returncode: break
-    inputs = ('tools/makedep.c', 'tools/tools.h', 'include/wine/list.h', 'include/Makefile.in') + tuple('include/' + n for n in headers)
+    inputs = ('tools/makedep.c', 'tools/tools.h', 'include/wine/list.h', 'include/Makefile.in',
+              'include/config.h.in', 'dlls/ntdll/Makefile.in', 'dlls/ntdll/ntdll.spec',
+              'libs/winecrt0/Makefile.in', 'libs/compiler-rt/Makefile.in',
+              'dlls/ntdll/unix/creation.c') + tuple('include/' + n for n in headers)
     (out / 'makedep-source-hashes.json').write_text(json.dumps({
         n: hashlib.sha256((wine / n).read_bytes()).hexdigest() for n in inputs
     }, indent=2) + '\n')
@@ -70,6 +104,14 @@ def check_dependency_inventory(wine, out, compiler):
     assert len(results) == 2 and results[-1]['exit'] == 0, results[-1]['output']
     generated = (work / 'Makefile').read_text()
     assert all(str(source / 'include' / n) in generated for n in headers), 'missing emitted header dependency'
+    logical = generated.replace('\\\n', ' ')
+    obj = 'dlls/ntdll/unix/creation.o'
+    assert obj + ': include/config.h' in logical, 'Unix config dependency absent'
+    recipe = re.search(r'^' + re.escape(obj) + r': [^\n]*\n(\t[^\n]*)', logical, re.M)
+    assert recipe and '$(CC)' in recipe[1] and '-DWINE_UNIX_LIB' in recipe[1], 'wrong creation compiler rule'
+    linked = re.search(r'^dlls/ntdll/ntdll\.so: ([^\n]*)', logical, re.M)
+    assert linked and obj in linked[1].split(), 'creation object absent from Unix library'
+    assert not re.search(r'dlls/ntdll/(?:i386|x86_64)-windows/unix/creation\.o', generated), 'unexpected PE creation object'
 
 
 def main():
@@ -94,7 +136,7 @@ def main():
     startup = proc[begin:end]
     assert "if (status != STATUS_WAIT_0)" in startup
     if args.mutate_remove_final_budget:
-        guard = "#ifdef PW_WINE_SERVICE_FIXTURE\n    if (!fixture->startup_remaining_ms( fixture->context, fixture_generation ))\n    { success = FALSE; status = STATUS_IO_TIMEOUT; goto done; }\n#endif\n"
+        guard = "#ifdef PW_WINE_SERVICE_FIXTURE\n    if (!(fixture ? fixture->startup_remaining_ms( fixture->context, fixture_generation ) : pw_creation_client_remaining( &creation_call )))\n    { success = FALSE; status = STATUS_IO_TIMEOUT; goto done; }\n#endif\n"
         assert startup.count(guard) == 1
         startup = startup.replace(guard, "/* DELIBERATE MUTATION: final budget check removed. */\n")
     (out/"startup.inc").write_text(startup)

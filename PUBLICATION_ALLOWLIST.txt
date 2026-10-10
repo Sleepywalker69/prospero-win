@@ -953,3 +953,9 @@ tests/wine_child_data_main.c
 tests/wine_child_data_bridge.h
 tests/data_adapter_fixture.h
 tests/data_child_fixture/wine-child-build.h
+
+wine/ps5/pw_wine_creation.h
+wine/patches/0915-wine-owned-descendant-creation.patch
+tools/wine_creation_abi.py
+tests/test_pw_wine_creation_install.c
+tests/test_wine_creation_abi.py

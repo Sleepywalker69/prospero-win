@@ -94,6 +94,8 @@ int pw_wine_fixture_owner_init(void *storage, unsigned bytes,
     out->abi = PW_WINE_FIXTURE_ABI; out->bytes = sizeof(*out); out->context = storage;
     return init_result;
 }
+int pw_wine_fixture_owner_creation(PwWineFixtureOwner *owner,PwWineCreationProvider *out)
+{assert(owner==(PwWineFixtureOwner*)owner_storage&&out);memset(out,0,sizeof(*out));out->abi=1;out->bytes=sizeof(*out);out->context=owner;return 0;}
 int pw_wine_fixture_owner_pump(PwWineFixtureOwner *owner)
 {
     assert(owner == (PwWineFixtureOwner *)owner_storage);
@@ -113,7 +115,11 @@ static int provider_install(const PwWineFixtureProvider *p)
 { assert(p == &title.provider && sink_calls == 1); ++provider_calls; if (cancel_at == 4) pw_wine_child_title_cancel(); return provider_result; }
 static int sink_install(PwWineFixtureSocketSink sink, void *context)
 { ++sink_calls; installed_sink = sink; installed_context = context; if (cancel_at == 3) pw_wine_child_title_cancel(); return sink_result; }
-static struct Descriptor { uint64_t magic; uint32_t version, count; PwPrxExport exports[5]; } descriptor;
+static unsigned creation_abi(void){return PW_WINE_CREATION_ABI;}
+static unsigned creation_protocol(void){return PW_WINE_CREATION_PROTOCOL;}
+static int creation_install(const PwWineCreationProvider *p)
+{assert(p==&title.creation&&p->abi==1&&p->bytes==sizeof(*p)&&provider_calls==1);return 0;}
+static struct Descriptor { uint64_t magic; uint32_t version, count; PwPrxExport exports[8]; } descriptor;
 static const PwPrxDescriptor *desc(void) { return (const PwPrxDescriptor *)&descriptor; }
 static void reset(void)
 {
@@ -126,11 +132,14 @@ static void reset(void)
     cancel_at = early_start = 0;
     clock_seconds = 123; clock_nsec = 456000000; created_entry = NULL; created_context = NULL;
     installed_sink = NULL; installed_context = NULL;
-    descriptor = (struct Descriptor){ PW_PRX_MAGIC, PW_PRX_VERSION, 4,
+    descriptor = (struct Descriptor){ PW_PRX_MAGIC, PW_PRX_VERSION, 7,
         {{"__wine_ps5_private_dispatch_abi", (const void *)(uintptr_t)abi},
          {"__wine_ps5_private_dispatch_wow64_abi", (const void *)(uintptr_t)wow64},
          {"pw_wine_fixture_install", (const void *)(uintptr_t)provider_install},
-         {"pw_wine_fixture_socket_set_sink", (const void *)(uintptr_t)sink_install}} };
+         {"pw_wine_fixture_socket_set_sink", (const void *)(uintptr_t)sink_install},
+         {"__wine_ps5_creation_abi", (const void *)(uintptr_t)creation_abi},
+         {"__wine_ps5_creation_protocol", (const void *)(uintptr_t)creation_protocol},
+         {"pw_wine_creation_install", (const void *)(uintptr_t)creation_install}} };
 }
 static PwGameProfile profile(unsigned mode)
 {
@@ -206,12 +215,12 @@ static void installation(void)
         assert(atomic_load(&title.installed) == 1 && !pw_wine_child_title_restart_ready());
         assert(pw_wine_child_title_install(desc()) < 0 && provider_calls == 1);
     }
-    for (unsigned i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < 7; ++i) {
         reset(); assert(!pw_wine_child_title_prepare(2, NULL)); descriptor.exports[i].name = "missing";
         assert(pw_wine_child_title_install(desc()) < 0 && !sink_calls && !provider_calls);
         assert(!pw_wine_child_title_restart_ready() && cancel_calls == 1);
     }
-    reset(); assert(!pw_wine_child_title_prepare(2, NULL)); descriptor.exports[4] = descriptor.exports[0]; descriptor.count = 5;
+    reset(); assert(!pw_wine_child_title_prepare(2, NULL)); descriptor.exports[7] = descriptor.exports[0]; descriptor.count = 8;
     assert(pw_wine_child_title_install(desc()) < 0 && !abi_calls && !sink_calls);
     reset(); assert(!pw_wine_child_title_prepare(2, NULL)); descriptor.magic = 0;
     assert(pw_wine_child_title_install(desc()) < 0 && !abi_calls);

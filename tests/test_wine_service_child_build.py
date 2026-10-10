@@ -127,7 +127,7 @@ class WineServiceChildBuild(unittest.TestCase):
                 build.verify_converter_copy(native, work, manifest)
 
     def test_generated_header_requires_both_actual_capabilities(self):
-        bound={'runtime': {'private_dispatch_abi':1, 'private_dispatch_wow64_abi':1,
+        bound={'runtime': {'creation_abi':1, 'creation_protocol':962, 'private_dispatch_abi':1, 'private_dispatch_wow64_abi':1,
                            'ntdll_sha256':'b'*64}, 'helper': {'elf': {'sha256': build.HELPER_SHA}}}
         text=build.child_header(bound,'a'*40)
         self.assertIn('#define PW_WINE_CHILD_WOW64_ABI 1\n',text)
@@ -135,7 +135,7 @@ class WineServiceChildBuild(unittest.TestCase):
         self.assertIn(build.HELPER_SHA,text)
         wrong=copy.deepcopy(bound);wrong['helper']['elf']['sha256']='0'*64
         with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
-        for name in ('private_dispatch_abi','private_dispatch_wow64_abi'):
+        for name in ('private_dispatch_abi','private_dispatch_wow64_abi','creation_abi','creation_protocol'):
             wrong=copy.deepcopy(bound);wrong['runtime'].pop(name)
             with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
         with self.assertRaises(ValueError):build.child_header(bound,'old-build')

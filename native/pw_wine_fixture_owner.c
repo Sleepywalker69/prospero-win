@@ -22,7 +22,7 @@ enum { WF_OK=0, WF_BAD=0xc0000001u, WF_UNSUPPORTED=0xc00000bbu,
        WF_TIMEOUT=0xc00000b5u, WF_CANCELLED=0xc0000120u };
 enum { API_CLOCK=1,API_IMAGE,API_CLOSE,API_APP,API_LIST,API_PAIR,API_ADD,
        API_DUP,API_HANDOFF,API_SIGNAL,API_KILL,API_WINE,API_SOCKET };
-enum { G_EMPTY,G_ADMITTED,G_BOUND,G_LAUNCH,G_STARTING,G_RUNNING,G_SETTLING,G_RETIRED,G_UNCERTAIN };
+enum { G_EMPTY,G_ADMITTED,G_BOUND,G_LAUNCH,G_STARTING,G_RUNNING,G_SETTLING,G_RETIRED,G_UNCERTAIN,G_REQUESTED,G_SUBMITTING };
 #define CANARY UINT32_C(0x4a357bc1)
 typedef struct { int32_t id;char name[32]; } ServiceEntry;
 typedef struct { uint32_t size;int32_t fd,crash;uint32_t other[15]; } ServiceOptions;
@@ -33,6 +33,9 @@ typedef struct Generation {
     atomic_uint state,released,startup_done,startup_success,cleanup_requested,identity_ready,launch_failed;
     atomic_uint startup_status,pending_signal,signal_sequence,signal_ack,signal_failure;
     atomic_flag send_claim;
+    atomic_uint origin_dead,remote_lease,abandoned,request_status;
+    PwWineCreationRequest creation;
+    unsigned depth,start_phase;
     uint64_t generation,started,startup_end,end,last_clock,next_list;
     uint32_t caller_pid,caller_tid,wine_pid,wine_tid,machine;
     int stream_fd,control_fd,passed_fd,service_id,baseline[PW_WFO_LIST_CAP];
@@ -56,6 +59,7 @@ struct PwWineFixtureOwner {
     uint64_t started,end,last_clock;
     int app_id,helper_index;
     uint32_t root_pid,root_tid;
+    unsigned creation_enabled;
 };
 static void failure(PwWineFixtureOwner *o,unsigned api,int64_t raw,int error,int uncertain)
 {
@@ -184,7 +188,7 @@ static uint32_t admit(void *context,uint32_t pid,uint32_t tid,uint32_t machine,c
        clock_now(o,o->end-PW_WFO_CLEANUP_MS,&now,0)||atomic_load(&o->root_done))goto done;
     Generation *g=&o->generations[count];
     g->generation=(o->config.session&~UINT64_C(31))+(uint64_t)count+1;
-    g->caller_pid=pid;g->caller_tid=tid;g->machine=machine;g->started=g->last_clock=now;
+    g->caller_pid=pid;g->caller_tid=tid;g->machine=machine;g->depth=1;g->started=g->last_clock=now;
     uint64_t limit=o->end-PW_WFO_CLEANUP_MS;
     unsigned lifetime=o->config.profile==1?PW_WFO_CHILD_MS:PW_WFO_VENDOR_CHILD_MS;
     g->startup_end=limit-now<PW_WFO_STARTUP_MS?limit:now+PW_WFO_STARTUP_MS;
@@ -219,7 +223,7 @@ static void release_process(void *context,uint64_t id,uint32_t pid)
 static uint32_t remaining(void *context,uint64_t id)
 {
     PwWineFixtureOwner *o=context;Generation *g=find(o,id);uint64_t now;
-    if(!g||atomic_load(&o->blocked)||atomic_load(&o->root_done)||clock_now(o,g->startup_end,&now,0))return 0;
+    if(!g||atomic_load(&g->origin_dead)||atomic_load(&o->blocked)||atomic_load(&o->root_done)||clock_now(o,g->startup_end,&now,0))return 0;
     uint64_t n=g->startup_end-now;return n>PW_WFO_STARTUP_MS?0:(uint32_t)n;
 }
 static uint32_t spawn(void *context,uint64_t id,int borrowed,uint32_t pid,uint32_t tid)
@@ -294,7 +298,8 @@ static uint32_t root_exit(void *context,uint32_t status)
     }
     expected=0;
     if(!atomic_compare_exchange_strong(&o->admission_claim,&expected,1))return 0;
-    atomic_store_explicit(&o->admission_closed,1,memory_order_release);
+    if(!o->creation_enabled||o->config.profile!=2)
+        atomic_store_explicit(&o->admission_closed,1,memory_order_release);
     unsigned ready=atomic_load_explicit(&o->release_ready,memory_order_acquire)==2;
     atomic_store(&o->admission_claim,0);
     return ready;
@@ -383,6 +388,160 @@ static void root_detached(void *context,uint32_t success,int32_t raw,int32_t err
     }
     if(!success)failure(o,API_WINE,raw,error,1);
 }
+/* These callbacks execute on the serialized Wine server. They only perform
+ * bounded copies, comparisons and atomic publication, never native I/O/waits. */
+static uint32_t creation_prepare(void *context,const PwWineCreationRequest *q,uint64_t *out)
+{
+    PwWineFixtureOwner *o=context;unsigned claim=0;uint32_t result=WF_UNSUPPORTED;
+    if(!q||!out||!callback_enter(o))return result;
+    if(!o->creation_enabled||o->config.profile!=2||!q->origin||!q->lease||!q->key||
+       !q->caller_pid||!q->caller_tid||!q->image_bytes||q->image_bytes>PW_WINE_CREATION_IMAGE_BYTES||
+       (q->image_bytes&1)||q->path_bytes<2||q->path_bytes>PW_WINE_CREATION_PATH_BYTES||
+       q->path[q->path_bytes-1]||memchr(q->path,0,q->path_bytes-1)||
+       q->now<o->started||q->deadline<=q->now||q->deadline-q->now>PW_WFO_STARTUP_MS||
+       atomic_load(&o->blocked)||atomic_load(&o->cancelled)||atomic_load(&o->admission_closed))goto done;
+    if(!atomic_compare_exchange_strong(&o->admission_claim,&claim,1))goto done;
+    Generation *origin=find(o,q->origin);unsigned count=atomic_load_explicit(&o->count,memory_order_acquire);
+    unsigned origin_state=origin?atomic_load_explicit(&origin->state,memory_order_acquire):G_EMPTY;
+    if(!origin||!atomic_load_explicit(&origin->identity_ready,memory_order_acquire)||
+       origin->wine_pid!=q->caller_pid||origin->depth>=2||atomic_load(&origin->origin_dead)||
+       (origin_state!=G_RUNNING&&origin_state!=G_STARTING)||count>=PW_WFO_MAX_GENERATIONS||
+       q->now>=o->end-PW_WFO_CLEANUP_MS||atomic_load(&o->admission_closed))goto unlock;
+    for(unsigned i=0;i<count;i++)if(o->generations[i].creation.lease==q->lease)goto unlock;
+    Generation *g=&o->generations[count];g->creation=*q;g->depth=origin->depth+1;
+    g->generation=(o->config.session&~UINT64_C(31))+(uint64_t)count+1;
+    g->caller_pid=q->caller_pid;g->caller_tid=q->caller_tid;g->machine=q->machine;
+    g->started=g->last_clock=q->now;
+    uint64_t limit=o->end-PW_WFO_CLEANUP_MS;
+    g->startup_end=q->deadline<limit?q->deadline:limit;
+    g->end=limit-q->now<PW_WFO_VENDOR_CHILD_MS?limit:q->now+PW_WFO_VENDOR_CHILD_MS;
+    atomic_store(&g->remote_lease,1);
+    atomic_store_explicit(&g->state,G_REQUESTED,memory_order_release);
+    atomic_store_explicit(&o->count,count+1,memory_order_release);
+    *out=g->generation;result=WF_OK;
+ unlock:atomic_store(&o->admission_claim,0);
+ done:atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);return result;
+}
+static Generation *creation_find(PwWineFixtureOwner *o,uint64_t id,uint64_t lease)
+{
+    Generation *g=find(o,id);
+    return g&&lease&&g->creation.lease==lease?g:NULL;
+}
+static int creation_origin_live(PwWineFixtureOwner *o,Generation *g)
+{
+    Generation *origin=g?find(o,g->creation.origin):NULL;
+    if(!origin||atomic_load(&origin->origin_dead)||atomic_load(&origin->cleanup_requested))return 0;
+    unsigned state=atomic_load_explicit(&origin->state,memory_order_acquire);
+    return state==G_RUNNING||state==G_STARTING;
+}
+static uint32_t creation_budget(PwWineFixtureOwner *o,Generation *g,uint64_t now)
+{
+    if(atomic_load(&o->cancelled))return WF_CANCELLED;
+    if(!g)return WF_BAD;
+    /* The launch flag is independently published; failure metadata may still
+     * be owned by another writer and is not needed to classify this result. */
+    if(atomic_load_explicit(&g->launch_failed,memory_order_acquire))return WF_BAD;
+    if(now<g->started)return WF_BAD;
+    if(now>=g->startup_end)return WF_TIMEOUT;
+    if(!creation_origin_live(o,g)||atomic_load(&g->abandoned)||
+       atomic_load(&o->blocked)||atomic_load(&o->admission_closed))return WF_BAD;
+    return WF_OK;
+}
+static uint32_t creation_query(void *context,uint64_t id,uint64_t lease,uint64_t now,PwWineCreationStatus *out)
+{
+    PwWineFixtureOwner *o=context;uint32_t result=WF_BAD;
+    if(!out||!callback_enter(o))return result;
+    Generation *g=creation_find(o,id,lease);
+    if(!g)goto done;
+    out->deadline=g->startup_end;out->status=atomic_load(&g->request_status);
+    unsigned state=atomic_load_explicit(&g->state,memory_order_acquire);
+    out->phase=state==G_REQUESTED?PW_WCR_PENDING:state==G_ADMITTED?PW_WCR_ADMITTED:
+        state==G_BOUND?PW_WCR_BOUND:(state==G_LAUNCH||state==G_STARTING||state==G_SUBMITTING)?PW_WCR_SUBMITTED:
+        (state==G_RUNNING||(state==G_RETIRED&&g->ack))?PW_WCR_BOOTSTRAPPED:PW_WCR_FAILED;
+    uint32_t refusal=creation_budget(o,g,now);
+    if(refusal){out->phase=PW_WCR_FAILED;if(refusal==WF_CANCELLED||!out->status)out->status=refusal;}
+    if(out->phase==PW_WCR_FAILED&&!out->status)out->status=WF_BAD;
+    result=WF_OK;
+ done:atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);return result;
+}
+static uint32_t creation_bind(void *context,uint64_t id,uint64_t lease,uint64_t now,
+                              uint32_t pid,uint32_t machine,const void *image,uint32_t bytes)
+{
+    PwWineFixtureOwner *o=context;uint32_t result=WF_BAD;unsigned expected=G_ADMITTED;
+    if(!callback_enter(o))return result;
+    Generation *g=creation_find(o,id,lease);
+    if(!pid||!image||creation_budget(o,g,now)||g->machine!=machine||g->creation.image_bytes!=bytes||
+       memcmp(g->creation.image,image,bytes)||
+       !atomic_compare_exchange_strong(&g->state,&expected,G_SUBMITTING))goto done;
+    g->wine_pid=pid;atomic_store_explicit(&g->state,G_BOUND,memory_order_release);result=WF_OK;
+ done:atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);return result;
+}
+static uint32_t creation_submit(void *context,uint64_t id,uint64_t lease,uint64_t now,
+                                uint32_t pid,uint32_t tid,int *stream)
+{
+    PwWineFixtureOwner *o=context;uint32_t result=WF_BAD;unsigned expected=G_BOUND;
+    if(!stream||*stream<0||!callback_enter(o))return result;
+    Generation *g=creation_find(o,id,lease);
+    if(!tid||creation_budget(o,g,now)||g->wine_pid!=pid||
+       !atomic_compare_exchange_strong(&g->state,&expected,G_SUBMITTING))goto done;
+    g->stream_fd=*stream;*stream=-1;g->wine_tid=tid;
+    atomic_store_explicit(&g->state,G_LAUNCH,memory_order_release);result=WF_OK;
+ done:atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);return result;
+}
+static uint32_t creation_result(void *context,uint64_t id,uint64_t lease,uint32_t success,uint32_t status)
+{
+    PwWineFixtureOwner *o=context;uint32_t result=WF_BAD;
+    if(!callback_enter(o))return result;
+    Generation *g=creation_find(o,id,lease);unsigned expected=1;
+    if(g&&atomic_compare_exchange_strong(&g->remote_lease,&expected,2)){
+        startup_result(o,id,success,status);atomic_store_explicit(&g->remote_lease,0,memory_order_release);result=WF_OK;
+    }
+    atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);return result;
+}
+static void creation_abandon(void *context,uint64_t id,uint64_t lease)
+{
+    PwWineFixtureOwner *o=context;if(!callback_enter(o))return;
+    Generation *g=creation_find(o,id,lease);unsigned expected=1;
+    if(g&&atomic_compare_exchange_strong(&g->remote_lease,&expected,0)){
+        atomic_store(&g->abandoned,1);atomic_store(&g->cleanup_requested,1);
+    }
+    atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);
+}
+static void creation_transport_failure(void *context,uint64_t id,uint64_t lease,int32_t raw,int32_t error)
+{
+    PwWineFixtureOwner *o=context;if(!callback_enter(o))return;
+    Generation *g=creation_find(o,id,lease);
+    failure(o,API_HANDOFF,raw,error,1);
+    if(g)atomic_store_explicit(&g->state,G_UNCERTAIN,memory_order_release);
+    atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);
+}
+static void creation_origin_dead(void *context,uint64_t id,uint32_t pid)
+{
+    PwWineFixtureOwner *o=context;if(!callback_enter(o))return;
+    Generation *g=find(o,id);
+    if(g&&g->wine_pid==pid)atomic_store_explicit(&g->origin_dead,1,memory_order_release);
+    else failure(o,API_WINE,pid,0,1);
+    atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);
+}
+static uint32_t creation_join(void *context,uint64_t id,uint32_t pid,uint32_t tid,int32_t native)
+{
+    PwWineFixtureOwner *o=context;uint32_t result=WF_BAD;
+    if(!callback_enter(o))return result;
+    Generation *g=find(o,id);
+    if(g&&atomic_load_explicit(&g->identity_ready,memory_order_acquire)&&
+       pid==g->wine_pid&&tid==g->wine_tid&&native>0&&native==(int32_t)g->session.child_pid&&
+       !atomic_load(&g->origin_dead)&&!atomic_load(&o->blocked)&&!atomic_load(&o->cancelled)&&
+       (atomic_load(&g->state)==G_STARTING||atomic_load(&g->state)==G_RUNNING))result=WF_OK;
+    atomic_fetch_sub_explicit(&o->active_callbacks,1,memory_order_release);return result;
+}
+int pw_wine_fixture_owner_creation(PwWineFixtureOwner *o,PwWineCreationProvider *out)
+{
+    if(!o||!out||o->creation_enabled)return -1;
+    o->creation_enabled=1;
+    *out=(PwWineCreationProvider){PW_WINE_CREATION_ABI,sizeof(*out),o,creation_prepare,creation_query,
+        creation_bind,creation_submit,creation_result,creation_abandon,creation_transport_failure,creation_origin_dead,creation_join};
+    return 0;
+}
 unsigned pw_wine_fixture_owner_bytes(void){return sizeof(PwWineFixtureOwner);}
 int pw_wine_fixture_owner_init(void *storage,unsigned bytes,const PwWineFixtureOwnerConfig *c,PwWineFixtureProvider *out)
 {
@@ -432,8 +591,17 @@ static int close_control(PwWineFixtureOwner *o,Generation *g)
     atomic_flag_clear_explicit(&g->send_claim,memory_order_release);
     return 1;
 }
+static void helper_hold(PwWineFixtureOwner *o,Generation *g)
+{
+    atomic_store(&o->blocked,1);atomic_store(&o->uncertain,1);
+    unsigned previous=atomic_exchange_explicit(&g->state,G_UNCERTAIN,memory_order_acq_rel);
+    if(previous!=G_UNCERTAIN)
+        record(o,"helper_unsettled",g,g->session.child_pid,g->service_id,g->wire.status);
+}
 static void retire(PwWineFixtureOwner *o,Generation *g)
 {
+    /* Absence, channel closure and Stop are not helper-settlement evidence. */
+    if(g->helper_possible){helper_hold(o,g);return;}
     atomic_store_explicit(&g->state,G_SETTLING,memory_order_release);
     close_slot(o,&g->stream_fd);close_slot(o,&g->passed_fd);
     if(!close_control(o,g)){g->close_pending=1;return;}
@@ -517,14 +685,16 @@ static int io_clock(void *context,uint64_t *value)
 static int io_cancel(void *context)
 {
     Generation *g=context;PwWineFixtureOwner *o=g->owner;
-    return (atomic_load(&o->root_done)&&atomic_load_explicit(&g->state,memory_order_acquire)!=G_RUNNING)||
+    return (atomic_load(&o->root_done)&&!g->creation.lease&&
+            atomic_load_explicit(&g->state,memory_order_acquire)!=G_RUNNING)||
            atomic_load(&o->blocked)||atomic_load(&o->cancelled)||
            atomic_load(&g->cleanup_requested)||o->config.cancelled(o->config.context);
 }
 static int budget(PwWineFixtureOwner *o,Generation *g,int startup)
 {
     uint64_t now;
-    return (startup&&atomic_load(&o->root_done))||atomic_load(&o->blocked)||atomic_load(&g->cleanup_requested)||
+    return (startup&&(atomic_load(&g->origin_dead)||(atomic_load(&o->root_done)&&!g->creation.lease)))||
+           atomic_load(&o->blocked)||atomic_load(&g->cleanup_requested)||
            clock_now(o,startup?g->startup_end:g->end,&now,0);
 }
 static void wire_failure(PwWineFixtureOwner *o,Generation *g)
@@ -536,8 +706,11 @@ static void wire_failure(PwWineFixtureOwner *o,Generation *g)
 }
 static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
 {
+    int async=o->creation_enabled&&o->config.profile==2;
+    int rc,received=-1;
+    if(g->start_phase==0){
     if(budget(o,g,1)||service_list(o,g,1)<0){retire(o,g);return;}
-    int pair[2]={-1,-1};int rc=socketpair(AF_UNIX,SOCK_SEQPACKET,0,pair),error=rc<0?errno:0;
+    int pair[2]={-1,-1};rc=socketpair(AF_UNIX,SOCK_SEQPACKET,0,pair);int error=rc<0?errno:0;
     record(o,"pair",g,rc,pair[0],pair[1]);
     if(rc){
         if(rc>0||pair[0]!=-1||pair[1]!=-1)uncertain(o,g,API_PAIR,rc,error);
@@ -582,10 +755,15 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
     for(unsigned i=0;i<count;i++)if(&o->generations[i]!=g&&o->generations[i].service_id==rc){
         uncertain(o,g,API_ADD,rc,0);close_slot(o,&g->stream_fd);close_control(o,g);return;
     }
-    g->service_id=rc;
+    g->service_id=rc;g->start_phase=1;
+    if(async)return;
+    }
     if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}
-    PwWineChildFrame hello;int received=-1;
-    rc=pw_wine_child_wire_receive(&g->io,g->control_fd,PW_WC_KIND(PW_WC_HELLO),&hello,&received,&g->wire);
+    if(g->start_phase==1){
+    PwWineChildFrame hello;
+    rc=async?pw_wine_child_wire_receive_nowait(&g->io,g->control_fd,PW_WC_KIND(PW_WC_HELLO),&hello,&received,&g->wire):
+             pw_wine_child_wire_receive(&g->io,g->control_fd,PW_WC_KIND(PW_WC_HELLO),&hello,&received,&g->wire);
+    if(rc==PW_WC_IDLE)return;
     if(rc!=PW_WC_RECORD||received>=0){close_slot(o,&received);wire_failure(o,g);return;}
     if(hello.generation||hello.sequence||!hello.child_pid||!hello.child_ppid||
        hello.child_pid==(uint32_t)getpid()||strcmp(hello.build_id,o->config.build_id)){
@@ -597,16 +775,31 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
     g->session.profile=o->config.profile;g->session.machine=g->machine;
     g->hello=1;atomic_store_explicit(&g->identity_ready,1,memory_order_release);
     record(o,"hello",g,hello.child_pid,hello.child_ppid,g->service_id);
+    g->start_phase=2;
+    if(async)return;
+    }
+    if(g->start_phase==2){
     if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}
     /* This matching child may dispatch the fixed PID-targeted data helper as
      * soon as BOOTSTRAP arrives. Latch before even a possibly partial send. */
-    g->helper_possible=1;
-    record(o,"helper_possible",g,g->session.child_pid,g->service_id,0);
-    rc=pw_wine_child_wire_send(&g->io,g->control_fd,&g->session,g->stream_fd,&g->wire);
+    if(!g->helper_possible){
+        g->helper_possible=1;
+        record(o,"helper_possible",g,g->session.child_pid,g->service_id,0);
+    }
+    if(async){
+        rc=pw_wine_child_wire_send_step(&g->io,g->control_fd,&g->session,g->stream_fd,&g->wire);
+        if(rc==PW_WC_IDLE)return;
+        rc=rc==PW_WC_RECORD?0:-1;
+    }else rc=pw_wine_child_wire_send(&g->io,g->control_fd,&g->session,g->stream_fd,&g->wire);
     close_slot(o,&g->stream_fd);
     if(rc){wire_failure(o,g);return;}
+    g->start_phase=3;
+    if(async)return;
+    }
     PwWineChildFrame ack;
-    rc=pw_wine_child_wire_receive(&g->io,g->control_fd,PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE),&ack,&received,&g->wire);
+    rc=async?pw_wine_child_wire_receive_nowait(&g->io,g->control_fd,PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE),&ack,&received,&g->wire):
+             pw_wine_child_wire_receive(&g->io,g->control_fd,PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE),&ack,&received,&g->wire);
+    if(rc==PW_WC_IDLE)return;
     if(rc!=PW_WC_RECORD||received>=0){close_slot(o,&received);wire_failure(o,g);return;}
     if(!pw_wine_child_wire_same_session(&g->session,&ack)||ack.sequence!=1){
         /* Do not attribute diagnostic payload from a different generation or
@@ -623,28 +816,30 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
      * full settle and actual bootstrap readiness in this exact child build. */
     g->helper_possible=0;
     if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}
-    g->ack=1;g->io.stage_end=g->end;
+    g->ack=1;g->start_phase=4;g->io.stage_end=g->end;
     atomic_store_explicit(&g->state,G_RUNNING,memory_order_release);
     record(o,"bootstrap_ready",g,g->wine_pid,g->wine_tid,0);
 }
 static void start_generation(PwWineFixtureOwner *o,Generation *g)
 {
     start_generation_attempt(o,g);
-    if(g->helper_possible){
+    if(g->helper_possible&&(g->wire.status||atomic_load(&g->cleanup_requested)||atomic_load(&o->blocked)||
+                           atomic_load(&o->cancelled)||atomic_load(&g->state)==G_UNCERTAIN)){
         /* A timeout/failure cannot recall a helper request or safely recycle
          * its target PID. Even a possibly settled rejection stays conservative
          * without the exact ACK. Existing uncertainty blocks Kill and release. */
-        atomic_store(&o->blocked,1);atomic_store(&o->uncertain,1);
-        atomic_store_explicit(&g->state,G_UNCERTAIN,memory_order_release);
-        record(o,"helper_unsettled",g,g->session.child_pid,g->service_id,g->wire.status);
+        helper_hold(o,g);
     }
 }
 static void observe_control(PwWineFixtureOwner *o,Generation *g)
 {
     if(g->control_fd<0)return;
     PwWineChildFrame frame;int right=-1;
-    int rc=pw_wine_child_wire_receive_step(&g->io,g->control_fd,
-        PW_WC_KIND(PW_WC_SIGNAL_ACK)|PW_WC_KIND(PW_WC_FAILURE),&frame,&right,&g->wire);
+    int rc=o->creation_enabled&&o->config.profile==2?
+        pw_wine_child_wire_receive_nowait(&g->io,g->control_fd,
+            PW_WC_KIND(PW_WC_SIGNAL_ACK)|PW_WC_KIND(PW_WC_FAILURE),&frame,&right,&g->wire):
+        pw_wine_child_wire_receive_step(&g->io,g->control_fd,
+            PW_WC_KIND(PW_WC_SIGNAL_ACK)|PW_WC_KIND(PW_WC_FAILURE),&frame,&right,&g->wire);
     if(rc==PW_WC_IDLE)return;
     if(rc==PW_WC_CHANNEL_CLOSED){record(o,"channel_zero_hup",g,1,1,0);g->close_pending=1;return;}
     if(rc!=PW_WC_RECORD||right>=0){close_slot(o,&right);wire_failure(o,g);return;}
@@ -668,10 +863,44 @@ static void observe_control(PwWineFixtureOwner *o,Generation *g)
 static void supervise(PwWineFixtureOwner *o,Generation *g)
 {
     unsigned state=atomic_load_explicit(&g->state,memory_order_acquire);
+    if(g->creation.lease&&atomic_load_explicit(&g->abandoned,memory_order_acquire)&&
+       !atomic_load_explicit(&g->remote_lease,memory_order_acquire)&&
+       atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2&&!g->missing_reported){
+        g->missing_reported=1;
+        record(o,"startup_result_missing",g,g->caller_pid,g->caller_tid,(int64_t)g->creation.lease);
+        failure(o,API_WINE,0,0,0);
+    }
     if(state==G_RETIRED)return;
     if(state==G_UNCERTAIN){close_slot(o,&g->stream_fd);close_slot(o,&g->passed_fd);close_control(o,g);return;}
     if(state==G_SETTLING||g->absent){retire(o,g);return;}
     if(g->close_pending)close_control(o,g);
+    /* Bounded server submissions are progressed here, never under its lock.
+     * G_SUBMITTING is a publication lease: the supervisor cannot close a slot
+     * while bind/submit is writing identity or moving descriptor ownership. */
+    if(state==G_SUBMITTING)return;
+    if(g->creation.lease&&(state==G_REQUESTED||state==G_ADMITTED||state==G_BOUND)){
+        uint64_t now=0;
+        uint32_t refused=sample_clock(o,&now)?WF_BAD:creation_budget(o,g,now);
+        if(!refused&&(atomic_load(&g->cleanup_requested)||!admitted_path(o,g->creation.path,g->machine)))refused=WF_BAD;
+        if(refused){
+            unsigned expected=state;
+            if(atomic_compare_exchange_strong(&g->state,&expected,G_SETTLING)){
+                atomic_store(&g->request_status,atomic_load(&o->cancelled)?WF_CANCELLED:refused);
+                retire(o,g);
+            }
+            return;
+        }
+        if(state==G_REQUESTED){
+            Generation *origin=find(o,g->creation.origin);
+            /* A valid first join can beat parent-side ACK observation. Wait
+             * without extending the request deadline or clearing helper hold. */
+            if(atomic_load_explicit(&origin->state,memory_order_acquire)!=G_RUNNING)return;
+            unsigned expected=G_REQUESTED;
+            atomic_compare_exchange_strong_explicit(&g->state,&expected,G_ADMITTED,
+                                                    memory_order_release,memory_order_relaxed);
+        }
+        return;
+    }
     if(state==G_ADMITTED||state==G_BOUND){
         if(atomic_load(&o->root_done)&&!atomic_load_explicit(&o->active_callbacks,memory_order_acquire)){
             if(atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2){
@@ -683,17 +912,23 @@ static void supervise(PwWineFixtureOwner *o,Generation *g)
         else if(atomic_load_explicit(&g->startup_done,memory_order_acquire)==2&&!atomic_load(&g->startup_success))retire(o,g);
         return;
     }
-    if(state==G_LAUNCH){start_generation(o,g);state=atomic_load_explicit(&g->state,memory_order_acquire);}
+    if(state==G_LAUNCH||state==G_STARTING){start_generation(o,g);state=atomic_load_explicit(&g->state,memory_order_acquire);}
     if(state==G_RETIRED||state==G_UNCERTAIN)return;
     uint64_t now;
     if(sample_clock(o,&now)){uncertain(o,g,API_CLOCK,-1,0);return;}
-    if(atomic_load(&o->root_done)&&atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2){
+    if(!g->creation.lease&&atomic_load(&o->root_done)&&atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2){
         if(!g->missing_reported){g->missing_reported=1;record(o,"startup_result_missing",g,g->caller_pid,g->caller_tid,0);}
         failure(o,API_WINE,0,0,0);atomic_store(&g->cleanup_requested,1);
     }
     if(now>=g->end||atomic_load(&o->cancelled)||atomic_load(&o->blocked)||o->config.cancelled(o->config.context)){
         atomic_store(&g->cleanup_requested,1);
         if(now>=g->end)failure(o,API_CLOCK,0,0,0);
+    }
+    if(g->helper_possible){
+        /* Keep pumping other generations, but never list/retire/Kill a child
+         * while its helper may still be applying to this native PID. */
+        if(atomic_load(&g->cleanup_requested)||atomic_load(&o->cancelled)||atomic_load(&o->blocked))helper_hold(o,g);
+        return;
     }
     if(state==G_RUNNING&&!atomic_load(&g->cleanup_requested))observe_control(o,g);
     if(now<g->next_list)return;
@@ -708,9 +943,11 @@ static void supervise(PwWineFixtureOwner *o,Generation *g)
         retire(o,g);return;
     }
     if(atomic_load(&g->cleanup_requested)&&!g->kill_called){
+        if(g->helper_possible){helper_hold(o,g);return;}
         if(clock_now(o,o->end,&now,1)){uncertain(o,g,API_CLOCK,0,0);return;}
         record(o,"kill_possible",g,o->app_id,g->service_id,0);
         if(clock_now(o,o->end,&now,1)){uncertain(o,g,API_CLOCK,0,0);return;}
+        if(g->helper_possible){helper_hold(o,g);return;}
         g->kill_called=1;
         g->kill_result=sceSystemServiceKillLocalProcess(o->app_id,g->service_id);
         record(o,"kill_return",g,g->kill_result,g->service_id,0);
@@ -729,7 +966,8 @@ int pw_wine_fixture_owner_pump(PwWineFixtureOwner *o)
     }
     unsigned count=atomic_load_explicit(&o->count,memory_order_acquire);
     for(unsigned i=0;i<count;i++)supervise(o,&o->generations[i]);
-    if(atomic_load_explicit(&o->root_done,memory_order_acquire)==2&&atomic_load(&o->admission_closed)){
+    if(atomic_load_explicit(&o->root_done,memory_order_acquire)==2&&
+       (atomic_load(&o->admission_closed)||(o->creation_enabled&&o->config.profile==2))){
         unsigned zero=0;
         if(atomic_compare_exchange_strong(&o->admission_claim,&zero,1)){
             int idle=!atomic_load_explicit(&o->active_callbacks,memory_order_acquire);
@@ -737,12 +975,14 @@ int pw_wine_fixture_owner_pump(PwWineFixtureOwner *o)
             count=atomic_load_explicit(&o->count,memory_order_acquire);
             for(unsigned i=0;i<count;i++){
                 Generation *g=&o->generations[i];
-                if(idle&&atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2&&!g->missing_reported){
+                if(idle&&(!g->creation.lease||atomic_load_explicit(&g->abandoned,memory_order_acquire))&&
+                   atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2&&!g->missing_reported){
                     g->missing_reported=1;
                     record(o,"startup_result_missing",g,g->caller_pid,g->caller_tid,0);
                     failure(o,API_WINE,0,0,0);
                 }
-                if(atomic_load_explicit(&g->state,memory_order_acquire)!=G_RETIRED)ready=0;
+                if(atomic_load_explicit(&g->state,memory_order_acquire)!=G_RETIRED||
+                   atomic_load_explicit(&g->remote_lease,memory_order_acquire))ready=0;
             }
             unsigned open=0;
             if(ready&&!atomic_load(&o->release_ready)&&
@@ -753,9 +993,21 @@ int pw_wine_fixture_owner_pump(PwWineFixtureOwner *o)
                  * after no further callback may enter. Never reopen on failure. */
                 ready=!atomic_load_explicit(&o->uncertain,memory_order_acquire)&&
                       atomic_load_explicit(&o->root_detach_state,memory_order_acquire)==1;
-                for(unsigned i=0;i<count;i++)
-                    if(atomic_load_explicit(&o->generations[i].state,memory_order_acquire)!=G_RETIRED)ready=0;
+                for(unsigned i=0;i<count;i++){
+                    Generation *g=&o->generations[i];
+                    if(atomic_load_explicit(&g->state,memory_order_acquire)!=G_RETIRED||
+                       atomic_load_explicit(&g->remote_lease,memory_order_acquire))ready=0;
+                    /* Abandonment may have published after the earlier scan
+                     * but before this seal. Preserve its missing-result fact. */
+                    if(g->creation.lease&&atomic_load(&g->abandoned)&&
+                       atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2&&!g->missing_reported){
+                        g->missing_reported=1;
+                        record(o,"startup_result_missing",g,g->caller_pid,g->caller_tid,(int64_t)g->creation.lease);
+                        failure(o,API_WINE,0,0,0);
+                    }
+                }
                 if(!ready){atomic_store(&o->admission_claim,0);record_failure(o);return -1;}
+                atomic_store_explicit(&o->admission_closed,1,memory_order_release);
                 atomic_store(&o->release_ready,1);
                 record_failure(o);
                 record(o,"root_release_safe",NULL,atomic_load(&o->root_result),atomic_load(&o->blocked),count);

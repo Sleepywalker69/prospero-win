@@ -4,6 +4,7 @@
 #include "pw_wine_child_wire.h"
 #include "../src/pw_wine_start.h"
 #include "../wine/ps5/pw_wine_fixture_socket.h"
+#include "../wine/ps5/pw_wine_creation.h"
 #include <pthread.h>
 #define PW_WINE_CHILD_PREFIX "/data/prospero-win/prefixes/windows-child-fixture-v1"
 #define PW_WINE_CHILD_CWD PW_WINE_CHILD_PREFIX "/drive_c/windows-child-fixture"
@@ -28,6 +29,7 @@ typedef struct PwWineChildBootstrapOps {
     void (*output)(const char *, size_t);
     PwWineFixtureSocketSink socket_sink;
     void (*record)(void *, unsigned stage, int status); /* optional bounded observer */
+    PwWineCreationChild child; /* exact validated BOOTSTRAP session, copied once */
 } PwWineChildBootstrapOps;
 typedef struct PwWineChildBootstrap {
     PwWineStart start;

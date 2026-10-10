@@ -24,6 +24,8 @@ _Static_assert(sizeof(PW_WINE_CHILD_NTDLL_SHA256)==65,"ntdll hash shape");
 _Static_assert(sizeof(PW_WINE_CHILD_HELPER_SHA256)==65,"helper hash shape");
 _Static_assert(PW_WINE_CHILD_PRIVATE_DISPATCH_ABI==1,"private dispatcher cohort");
 _Static_assert(PW_WINE_CHILD_WOW64_ABI==1,"checked translated I386 cohort");
+_Static_assert(PW_WINE_CHILD_CREATION_ABI==PW_WINE_CREATION_ABI,"creation broker cohort");
+_Static_assert(PW_WINE_CHILD_CREATION_PROTOCOL==PW_WINE_CREATION_PROTOCOL,"creation protocol cohort");
 static PwNativeChildIo child_io;
 static PwWineChildWireResult wire_result;
 static PwWineChildBootstrap bootstrap;
@@ -332,7 +334,9 @@ static int run_child(void)
     child_io.total_end=begun+(session->profile==PW_WC_PROFILE_FIXTURE?PW_WC_LIFETIME_MS:PW_WC_BATTLENET_LIFETIME_MS);
     const PwWineChildBootstrapOps ops={.context=session,.wine={sceKernelLoadStartModule,sceKernelGetModuleInfo,set_env,start_thread},
         .runtime=runtime,.directory=directory,.register_thread=pw_wine_thread_register,
-        .unregister_thread=pw_wine_thread_unregister,.output=output,.socket_sink=socket_failure_sink,.record=record};
+        .unregister_thread=pw_wine_thread_unregister,.output=output,.socket_sink=socket_failure_sink,.record=record,
+        .child={PW_WINE_CREATION_ABI,sizeof(PwWineCreationChild),session->generation,
+                session->wine_pid,session->wine_tid,session->profile,session->machine}};
     int rc=pw_wine_child_data_prepare(&data_readiness,&child_io,PW_WINE_CHILD_HELPER_SHA256);
     if(rc){
         bootstrap.stage=PW_WCB_DATA;

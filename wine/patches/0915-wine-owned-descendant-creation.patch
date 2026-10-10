@@ -1,0 +1,1485 @@
+From: Prospero Wine project
+Subject: [PATCH] wine: bind bounded descendant creation to the native owner
+
+diff --git a/dlls/ntdll/Makefile.in b/dlls/ntdll/Makefile.in
+--- a/dlls/ntdll/Makefile.in
++++ b/dlls/ntdll/Makefile.in
+@@ -51,6 +51,7 @@
+ 	time.c \
+ 	unix/alpc.c \
+ 	unix/cdrom.c \
++	unix/creation.c \
+ 	unix/debug.c \
+ 	unix/env.c \
+ 	unix/file.c \
+diff --git a/dlls/ntdll/unix/creation.c b/dlls/ntdll/unix/creation.c
+new file mode 100644
+--- /dev/null
++++ b/dlls/ntdll/unix/creation.c
+@@ -0,0 +1,159 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++#include <errno.h>
++#include <stdint.h>
++#include <stdatomic.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++#include "ntstatus.h"
++#include "windef.h"
++#include "winternl.h"
++#include "wine/server.h"
++#include "wine/debug.h"
++#include "unix_private.h"
++#include "creation.h"
++#ifdef PW_WINE_SERVICE_FIXTURE
++#include "wine/pw_wine_creation.h"
++#include "wine/pw_wine_fixture_socket.h"
++WINE_DEFAULT_DEBUG_CHANNEL(process);
++static _Atomic uint64_t creation_next_key;
++static uint32_t creation_clock(struct pw_creation_call *c,uint64_t *now)
++{
++    struct timespec ts;
++    if(clock_gettime(CLOCK_MONOTONIC,&ts)||ts.tv_sec<0||ts.tv_nsec<0||ts.tv_nsec>=1000000000||
++       (uint64_t)ts.tv_sec>UINT64_MAX/1000)return STATUS_UNSUCCESSFUL;
++    uint64_t ms=(uint64_t)ts.tv_sec*1000,part=(uint64_t)ts.tv_nsec/1000000;
++    if(part>UINT64_MAX-ms)return STATUS_UNSUCCESSFUL;
++    uint64_t value=ms+part;
++    if(value<c->last_clock)return STATUS_UNSUCCESSFUL;
++    c->last_clock=value;*now=value;
++    return c->deadline&&value>=c->deadline?STATUS_IO_TIMEOUT:0;
++}
++static uint32_t creation_query(struct pw_creation_call *c,unsigned int *phase)
++{
++    uint64_t now;uint32_t status=creation_clock(c,&now);
++    if(status)return status;
++    SERVER_START_REQ(creation_query)
++    {
++        req->generation=c->generation;req->lease=c->lease;req->key=c->key;
++        status=wine_server_call(req);
++        if(!status){
++            if(reply->deadline!=c->deadline)status=STATUS_INTERNAL_ERROR;
++            else if(reply->phase==PW_WCR_FAILED)status=reply->status?reply->status:STATUS_UNSUCCESSFUL;
++            else if(reply->phase>PW_WCR_BOOTSTRAPPED||reply->status)status=STATUS_INTERNAL_ERROR;
++            else *phase=reply->phase;
++        }
++    }
++    SERVER_END_REQ;
++    if(!status)status=creation_clock(c,&now);
++    return status;
++}
++static uint32_t creation_wait(struct pw_creation_call *c,unsigned int wanted)
++{
++    for(;;){
++        unsigned int phase=PW_WCR_FAILED;uint32_t status=creation_query(c,&phase);
++        if(status)return status;
++        if(phase==wanted)return 0;
++        if(phase>wanted)return STATUS_INTERNAL_ERROR;
++        uint64_t now;
++        if((status=creation_clock(c,&now)))return status;
++        uint64_t left=c->deadline-now;
++        /* Existing creation-wait cadence, capped by the original endpoint. */
++        LARGE_INTEGER delay;delay.QuadPart=-(LONGLONG)(left<10?left:10)*10000;
++        status=NtDelayExecution(FALSE,&delay);
++        if(status)return status;
++    }
++}
++unsigned int pw_creation_client_prepare(struct pw_creation_call *c,unsigned int machine,
++                                        const void *image,unsigned int bytes,const char *path)
++{
++    const PwWineCreationChild *child=pw_wine_creation_child_get();
++    uint64_t now;uint32_t status;size_t length;
++    if(!c||c->key||!child||child->profile!=2||!image||!bytes||(bytes&1)||
++       bytes>PW_WINE_CREATION_IMAGE_BYTES||!path)return STATUS_NOT_SUPPORTED;
++    length=strnlen(path,PW_WINE_CREATION_PATH_BYTES);
++    if(!length||length>=PW_WINE_CREATION_PATH_BYTES)return STATUS_NOT_SUPPORTED;
++    uint64_t old=atomic_load_explicit(&creation_next_key,memory_order_relaxed);
++    for(unsigned int attempt=0;attempt<8&&!c->key;attempt++){
++        if(old==UINT64_MAX)return STATUS_TOO_MANY_OPENED_FILES;
++        if(atomic_compare_exchange_strong_explicit(&creation_next_key,&old,old+1,
++                                                   memory_order_relaxed,memory_order_relaxed))c->key=old+1;
++    }
++    if(!c->key)return STATUS_TOO_MANY_OPENED_FILES;
++    if((status=creation_clock(c,&now)))return status;
++    if(now>UINT64_MAX-PW_WINE_CREATION_STARTUP_MS)return STATUS_UNSUCCESSFUL;
++    c->deadline=now+PW_WINE_CREATION_STARTUP_MS;
++    SERVER_START_REQ(creation_prepare)
++    {
++        req->key=c->key;req->deadline=c->deadline;req->machine=machine;
++        req->image_bytes=bytes;req->path_bytes=length+1;
++        wine_server_add_data(req,image,bytes);wine_server_add_data(req,path,length+1);
++        status=wine_server_call(req);
++        if(!status){
++            c->generation=reply->generation;c->lease=reply->lease;c->tag=reply->tag;
++            if(!c->generation||!c->lease||c->tag>-2||c->tag<-(int)(PW_WINE_CREATION_REQUESTS+1)||
++               reply->deadline>c->deadline||reply->deadline<=now)status=STATUS_INTERNAL_ERROR;
++            else c->deadline=reply->deadline;
++        }
++    }
++    SERVER_END_REQ;
++    if(status)return status;
++    return creation_wait(c,PW_WCR_ADMITTED);
++}
++unsigned int pw_creation_client_spawn(struct pw_creation_call *c,int borrowed,HANDLE process,HANDLE thread)
++{
++    uint64_t now;uint32_t status=creation_clock(c,&now);
++    if(status)return status;
++    int fd=dup(borrowed);
++    if(fd<0)return STATUS_TOO_MANY_OPENED_FILES;
++    PwWineFixtureSocketResult checked;
++    status=pw_wine_fixture_socket_prepare(fd,PW_WF_SOCKET_CLOEXEC,&checked)?STATUS_UNSUCCESSFUL:0;
++    if(!status)status=creation_clock(c,&now);
++    if(!status){
++        status=pw_creation_send_fd(fd,c->tag,&c->transfer_raw,&c->transfer_error);
++        if(status)c->transfer_uncertain=1;
++    }
++    int closed=close(fd),error=closed<0?errno:0;
++    if(closed){
++        if(!c->transfer_uncertain){c->transfer_raw=closed;c->transfer_error=error;}
++        c->transfer_uncertain=1;if(!status)status=STATUS_UNSUCCESSFUL;
++    }
++    if(status)return status;
++    if((status=creation_clock(c,&now)))return status;
++    SERVER_START_REQ(creation_spawn)
++    {
++        req->generation=c->generation;req->lease=c->lease;req->key=c->key;
++        req->process=wine_server_obj_handle(process);req->thread=wine_server_obj_handle(thread);
++        status=wine_server_call(req);
++    }
++    SERVER_END_REQ;
++    return status?status:creation_wait(c,PW_WCR_BOOTSTRAPPED);
++}
++unsigned int pw_creation_client_remaining(struct pw_creation_call *c)
++{
++    unsigned int phase;uint64_t now;
++    if(!c||!c->generation||creation_query(c,&phase)||phase!=PW_WCR_BOOTSTRAPPED||creation_clock(c,&now))return 0;
++    uint64_t left=c->deadline-now;
++    return left>PW_WINE_CREATION_STARTUP_MS?0:(unsigned int)left;
++}
++unsigned int pw_creation_client_result(struct pw_creation_call *c,unsigned int success,unsigned int status)
++{
++    unsigned int ret;
++    if(!c||!c->generation)return STATUS_INVALID_PARAMETER;
++    SERVER_START_REQ(creation_result)
++    {
++        req->generation=c->generation;req->lease=c->lease;req->key=c->key;
++        req->success=success;req->status=status;req->transfer_uncertain=c->transfer_uncertain;
++        req->transfer_raw=c->transfer_uncertain?c->transfer_raw:0;
++        req->transfer_error=c->transfer_uncertain?c->transfer_error:0;
++        ret=wine_server_call(req);
++    }
++    SERVER_END_REQ;
++    return ret; /* caller preserves its actual result, cleans local resources, then aborts if needed */
++}
++#endif
+diff --git a/dlls/ntdll/unix/creation.h b/dlls/ntdll/unix/creation.h
+new file mode 100644
+--- /dev/null
++++ b/dlls/ntdll/unix/creation.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_NTDLL_CREATION_H
++#define PW_NTDLL_CREATION_H
++#include <stdint.h>
++struct pw_creation_call {
++    uint64_t key,generation,lease,deadline,last_clock;
++    int tag,transfer_raw,transfer_error;
++    unsigned int transfer_uncertain;
++};
++unsigned int pw_creation_client_prepare(struct pw_creation_call *,unsigned int machine,
++                                        const void *image,unsigned int bytes,const char *unix_path);
++unsigned int pw_creation_client_spawn(struct pw_creation_call *,int borrowed,HANDLE process,HANDLE thread);
++unsigned int pw_creation_client_remaining(struct pw_creation_call *);
++unsigned int pw_creation_client_result(struct pw_creation_call *,unsigned int success,unsigned int status);
++unsigned int pw_creation_send_fd(int fd,int tag,int *raw,int *error);
++#endif
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -72,6 +72,8 @@
+ 
+ #ifdef PW_WINE_SERVICE_FIXTURE
+ #include "wine/pw_wine_fixture_provider.h"
++#include "wine/pw_wine_creation.h"
++#include "creation.h"
+ #endif
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(process);
+@@ -716,6 +718,9 @@
+ #ifdef PW_WINE_SERVICE_FIXTURE
+     const PwWineFixtureProvider *fixture = pw_wine_fixture_get();
+     uint64_t fixture_generation = 0;
++    const PwWineCreationChild *creation_child = pw_wine_creation_child_get();
++    struct pw_creation_call creation_call = {0};
++    unsigned int creation_result_error = 0;
+     sigset_t fixture_old_mask;
+     BOOL fixture_masked = FALSE;
+ #endif
+@@ -793,15 +798,18 @@
+         goto done;
+     }
+ #ifdef PW_WINE_SERVICE_FIXTURE
+-    if (!fixture) { status = STATUS_NOT_SUPPORTED; goto done; }
++    if (!fixture && !creation_child) { status = STATUS_NOT_SUPPORTED; goto done; }
+     if (pthread_sigmask( SIG_BLOCK, &server_block_set, &fixture_old_mask ))
+     { status = STATUS_NOT_SUPPORTED; goto done; }
+     fixture_masked = TRUE;
+-    status = fixture->admit( fixture->context, HandleToULong(NtCurrentTeb()->ClientId.UniqueProcess),
+-                            HandleToULong(NtCurrentTeb()->ClientId.UniqueThread),
+-                            pe_info.machine, unix_name, &fixture_generation );
+-    if (status) { fixture_generation = 0; goto done; }
+-    if (!fixture_generation) { status = STATUS_INTERNAL_ERROR; goto done; }
++    if (fixture)
++    {
++        status = fixture->admit( fixture->context, HandleToULong(NtCurrentTeb()->ClientId.UniqueProcess),
++                                HandleToULong(NtCurrentTeb()->ClientId.UniqueThread),
++                                pe_info.machine, unix_name, &fixture_generation );
++        if (status) { fixture_generation = 0; goto done; }
++        if (!fixture_generation) { status = STATUS_INTERNAL_ERROR; goto done; }
++    }
+ #endif
+     if (!machine)
+     {
+@@ -811,6 +819,15 @@
+     }
+     if (!(startup_info = create_startup_info( attr.ObjectName, process_flags, params, &pe_info, &startup_info_size )))
+         goto done;
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (!fixture)
++    {
++        const void *image = (const char *)(startup_info + 1) + startup_info->curdir_len + startup_info->dllpath_len;
++        status = pw_creation_client_prepare( &creation_call, machine, image, startup_info->imagepath_len, unix_name );
++        fixture_generation = creation_call.generation;
++        if (status) goto done;
++    }
++#endif
+     env_size = get_env_size( params, &winedebug );
+ 
+     if ((status = wine_server_alloc_object_attributes( process_attr, &objattr, &attr_len ))) goto done;
+@@ -862,6 +879,10 @@
+         req->info_size      = startup_info_size;
+         req->handles_size   = handles_size;
+         req->jobs_size      = jobs_size;
++        req->creation       = 0;
++#ifdef PW_WINE_SERVICE_FIXTURE
++        if (!fixture) req->creation=creation_call.generation;
++#endif
+         wine_server_add_data( req, objattr, attr_len );
+         wine_server_add_data( req, handles, handles_size );
+         wine_server_add_data( req, jobs, jobs_size );
+@@ -917,7 +938,8 @@
+     /* create the child process */
+ 
+ #ifdef PW_WINE_SERVICE_FIXTURE
+-    status = fixture->spawn( fixture->context, fixture_generation, socketfd[0], process_id, thread_id );
++    status = fixture ? fixture->spawn( fixture->context, fixture_generation, socketfd[0], process_id, thread_id ) :
++                       pw_creation_client_spawn( &creation_call, socketfd[0], process_handle, thread_handle );
+ #else
+     status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info );
+ #endif
+@@ -931,7 +953,7 @@
+ #ifdef PW_WINE_SERVICE_FIXTURE
+     {
+         LARGE_INTEGER timeout;
+-        ULONG remaining = fixture->startup_remaining_ms( fixture->context, fixture_generation );
++        ULONG remaining = (fixture ? fixture->startup_remaining_ms( fixture->context, fixture_generation ) : pw_creation_client_remaining( &creation_call ));
+         if (!remaining || remaining > 30000) { status = STATUS_IO_TIMEOUT; goto done; }
+         timeout.QuadPart = -(LONGLONG)remaining * 10000;
+         status = NtWaitForSingleObject( process_info, FALSE, &timeout );
+@@ -940,7 +962,7 @@
+             if (status == STATUS_TIMEOUT) status = STATUS_IO_TIMEOUT;
+             goto done;
+         }
+-        if (!fixture->startup_remaining_ms( fixture->context, fixture_generation ))
++        if (!(fixture ? fixture->startup_remaining_ms( fixture->context, fixture_generation ) : pw_creation_client_remaining( &creation_call )))
+         { status = STATUS_IO_TIMEOUT; goto done; }
+     }
+ #else
+@@ -973,7 +995,7 @@
+            process_id, thread_id, process_handle, thread_handle );
+ 
+ #ifdef PW_WINE_SERVICE_FIXTURE
+-    if (!fixture->startup_remaining_ms( fixture->context, fixture_generation ))
++    if (!(fixture ? fixture->startup_remaining_ms( fixture->context, fixture_generation ) : pw_creation_client_remaining( &creation_call )))
+     { success = FALSE; status = STATUS_IO_TIMEOUT; goto done; }
+ #endif
+     /* update output attributes */
+@@ -1014,7 +1036,10 @@
+ done:
+ #ifdef PW_WINE_SERVICE_FIXTURE
+     if (fixture_generation)
+-        fixture->startup_result( fixture->context, fixture_generation, success, status );
++    {
++        if (fixture) fixture->startup_result( fixture->context, fixture_generation, success, status );
++        else creation_result_error = pw_creation_client_result( &creation_call, success, status );
++    }
+ #endif
+     if (file_handle) NtClose( file_handle );
+     if (process_info) NtClose( process_info );
+@@ -1037,6 +1062,11 @@
+             ERR( "cannot restore fixture process-creation signal mask: %d\n", mask_error );
+             abort_thread( 1 );
+         }
++    }
++    if (creation_result_error)
++    {
++        ERR( "creation result acknowledgement failed after cleanup: %08x\n", creation_result_error );
++        abort_thread( 1 );
+     }
+ #endif
+     return status;
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -86,6 +86,8 @@
+ #include "wine/server.h"
+ #ifdef PW_WINE_SERVICE_FIXTURE
+ #include "wine/pw_wine_fixture_socket.h"
++#include "wine/pw_wine_creation.h"
++#include "creation.h"
+ #endif
+ #include "wine/debug.h"
+ #include "unix_private.h"
+@@ -1405,6 +1407,27 @@
+ }
+ 
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++/* Reservation-tagged transfer: one nonblocking attempt, no reuse/retry. */
++unsigned int pw_creation_send_fd(int fd,int tag,int *raw,int *error)
++{
++    struct send_fd data={GetCurrentThreadId(),tag};
++    struct iovec vec={&data,sizeof(data)};
++    union { struct cmsghdr align; unsigned char bytes[CMSG_SPACE(sizeof(int))]; } control;
++    struct msghdr msg={0};memset(&control,0,sizeof(control));
++    if(fd<0||tag>-2||tag<-(int)(PW_WINE_CREATION_REQUESTS+1)||!raw||!error)return STATUS_INVALID_PARAMETER;
++    msg.msg_iov=&vec;msg.msg_iovlen=1;msg.msg_control=control.bytes;msg.msg_controllen=sizeof(control.bytes);
++    struct cmsghdr *cmsg=&control.align;
++    cmsg->cmsg_level=SOL_SOCKET;cmsg->cmsg_type=SCM_RIGHTS;cmsg->cmsg_len=CMSG_LEN(sizeof(fd));
++    memcpy(CMSG_DATA(cmsg),&fd,sizeof(fd));
++    int rc=sendmsg(fd_socket,&msg,MSG_DONTWAIT|MSG_NOSIGNAL),err=rc<0?errno:0;
++    *raw=rc;*error=err;
++    return rc==sizeof(data)?STATUS_SUCCESS:STATUS_UNSUCCESSFUL;
++}
++_Static_assert(SERVER_PROTOCOL_VERSION==PW_WINE_CREATION_PROTOCOL,"matched creation protocol");
++unsigned int DECLSPEC_EXPORT __wine_ps5_creation_protocol(void) { return SERVER_PROTOCOL_VERSION; }
++#endif
++
+ /***********************************************************************
+  *           receive_fd
+  *
+@@ -1936,6 +1959,13 @@
+         int (*install)(const PwWineFixtureProvider *) = dlsym( module, "pw_wineserver_fixture_install" );
+         if (!install || install( pw_wine_fixture_get() ))
+             fatal_error( "in-process server lacks matching fixture ownership ABI\n" );
++        int (*creation_install)(const PwWineCreationProvider *) = dlsym( module, "pw_wineserver_creation_install" );
++        unsigned (*creation_abi)(void) = dlsym( module, "__wine_ps5_creation_abi" );
++        unsigned (*creation_protocol)(void) = dlsym( module, "__wine_ps5_creation_protocol" );
++        if (!pw_wine_creation_get() || !creation_install || !creation_abi || !creation_protocol ||
++            creation_abi()!=PW_WINE_CREATION_ABI || creation_protocol()!=SERVER_PROTOCOL_VERSION ||
++            creation_install(pw_wine_creation_get()))
++            fatal_error( "in-process server lacks matching creation broker ABI\n" );
+     }
+ #endif
+ #ifdef PW_WINE_SERVICE_FIXTURE
+@@ -2381,10 +2411,19 @@
+         req->wait_fd     = data->wait_fd[1];
+         req->debug_level = (TRACE_ON(server) != 0);
+         req->page_size   = get_host_page_size();
++        req->creation = 0;req->expected_pid = 0;req->expected_tid = 0;
++#ifdef PW_WINE_SERVICE_FIXTURE
++        const PwWineCreationChild *child = pw_wine_creation_child_get();
++        if (child) { req->creation=child->generation;req->expected_pid=child->wine_pid;req->expected_tid=child->wine_tid; }
++#endif
+         wine_server_set_reply( req, supported_machines, sizeof(supported_machines) );
+         if (!(ret = wine_server_call( req )))
+         {
+             obj_handle_t handle;
++#ifdef PW_WINE_SERVICE_FIXTURE
++            if (child && (reply->pid!=child->wine_pid || reply->tid!=child->wine_tid))
++                server_protocol_error( "creation first-thread identity mismatch\n" );
++#endif
+             pid               = reply->pid;
+             data->tid         = reply->tid;
+ #if defined(__PROSPERO__) || defined(WINE_INPROCESS_SERVER)
+diff --git a/include/Makefile.in b/include/Makefile.in
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1147,6 +1147,7 @@
+ 	wine/ps5_sync_backend.h \
+ 	wine/ps5_sync_word.h \
+ 	wine/pw_wine_fixture_provider.h \
++	wine/pw_wine_creation.h \
+ 	wine/pw_wine_fixture_socket.h \
+ 	wine/rbtree.h \
+ 	wine/schrpc.idl \
+diff --git a/include/wine/pw_wine_creation.h b/include/wine/pw_wine_creation.h
+new file mode 100644
+--- /dev/null
++++ b/include/wine/pw_wine_creation.h
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_WINE_CREATION_H
++#define PW_WINE_CREATION_H
++#include <stdint.h>
++/* Same-address-space owner callbacks. No pointer in this contract is a wire
++ * value. Descendant clients use ordinary Wine requests, never this table. */
++#define PW_WINE_CREATION_ABI 1u
++#define PW_WINE_CREATION_PROTOCOL 962u
++#define PW_WINE_CREATION_PATH_BYTES 1024u
++#define PW_WINE_CREATION_IMAGE_BYTES 2048u
++#define PW_WINE_CREATION_REQUESTS 16u
++#define PW_WINE_CREATION_STARTUP_MS 30000u
++
++typedef struct PwWineCreationRequest {
++    uint64_t origin, lease, key, now, deadline;
++    uint32_t caller_pid, caller_tid, machine, image_bytes, path_bytes;
++    unsigned char image[PW_WINE_CREATION_IMAGE_BYTES];
++    char path[PW_WINE_CREATION_PATH_BYTES];
++} PwWineCreationRequest;
++enum { PW_WCR_PENDING, PW_WCR_ADMITTED, PW_WCR_BOUND, PW_WCR_SUBMITTED,
++       PW_WCR_BOOTSTRAPPED, PW_WCR_FAILED };
++typedef struct PwWineCreationStatus {
++    uint64_t deadline;
++    uint32_t phase, status;
++} PwWineCreationStatus;
++typedef struct PwWineCreationProvider {
++    uint32_t abi, bytes;
++    void *context;
++    /* Bounded copies/CAS only: all file, service and wait operations belong
++     * to the independent native supervisor. Every record is nonrecycled. */
++    uint32_t (*prepare)(void *, const PwWineCreationRequest *, uint64_t *generation);
++    uint32_t (*query)(void *, uint64_t generation, uint64_t lease, uint64_t now,
++                      PwWineCreationStatus *);
++    uint32_t (*bind)(void *, uint64_t generation, uint64_t lease, uint64_t now,
++                     uint32_t child_pid, uint32_t machine, const void *image, uint32_t bytes);
++    /* The handler owns *stream. Only successful acceptance sets it to -1;
++     * subsequent failure does not undo the move or authorize resubmission. */
++    uint32_t (*submit)(void *, uint64_t generation, uint64_t lease, uint64_t now,
++                       uint32_t child_pid, uint32_t child_tid, int *stream);
++    uint32_t (*result)(void *, uint64_t generation, uint64_t lease,
++                       uint32_t success, uint32_t status);
++    void (*abandon)(void *, uint64_t generation, uint64_t lease);
++    void (*transport_failure)(void *, uint64_t generation, uint64_t lease,
++                               int32_t raw, int32_t native_error);
++    void (*origin_dead)(void *, uint64_t generation, uint32_t wine_pid);
++    /* Called before init_thread or native identity writes. Expected values
++     * are independently compared to the actual server process/thread first. */
++    uint32_t (*join)(void *, uint64_t generation, uint32_t wine_pid,
++                     uint32_t wine_tid, int32_t native_pid);
++} PwWineCreationProvider;
++typedef struct PwWineCreationChild {
++    uint32_t abi, bytes;
++    uint64_t generation;
++    uint32_t wine_pid, wine_tid, profile, machine;
++} PwWineCreationChild;
++int pw_wine_creation_install(const PwWineCreationProvider *);
++int pw_wineserver_creation_install(const PwWineCreationProvider *);
++const PwWineCreationProvider *pw_wine_creation_get(void);
++int pw_wine_creation_child_install(const PwWineCreationChild *);
++const PwWineCreationChild *pw_wine_creation_child_get(void);
++unsigned __wine_ps5_creation_abi(void);
++unsigned __wine_ps5_creation_protocol(void);
++#endif
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -1122,12 +1122,13 @@
+     data_size_t  info_size;
+     data_size_t  handles_size;
+     data_size_t  jobs_size;
++    char __pad_52[4];
++    unsigned __int64 creation;
+     /* VARARG(objattr,object_attributes); */
+     /* VARARG(handles,uints,handles_size); */
+     /* VARARG(jobs,uints,jobs_size); */
+     /* VARARG(info,startup_info,info_size); */
+     /* VARARG(env,unicode_str); */
+-    char __pad_52[4];
+ };
+ struct new_process_reply
+ {
+@@ -1217,6 +1218,9 @@
+     int          wait_fd;
+     unsigned int page_size;
+     char __pad_36[4];
++    unsigned __int64 creation;
++    process_id_t expected_pid;
++    thread_id_t expected_tid;
+ };
+ struct init_first_thread_reply
+ {
+@@ -6240,6 +6244,79 @@
+     struct reply_header __header;
+     obj_handle_t        handle;
+     char __pad_12[4];
++};
++
++
++struct creation_prepare_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++    unsigned __int64 key;
++    unsigned __int64 deadline;
++    unsigned int machine;
++    unsigned int image_bytes;
++    unsigned int path_bytes;
++    /* VARARG(data,bytes); */
++    char __pad_44[4];
++};
++struct creation_prepare_reply
++{
++    struct reply_header __header;
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 deadline;
++    int tag;
++    char __pad_36[4];
++};
++
++struct creation_query_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 key;
++};
++struct creation_query_reply
++{
++    struct reply_header __header;
++    unsigned __int64 deadline;
++    unsigned int phase;
++    unsigned int status;
++};
++
++struct creation_spawn_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 key;
++    obj_handle_t process;
++    obj_handle_t thread;
++};
++struct creation_spawn_reply
++{
++    struct reply_header __header;
++};
++
++struct creation_result_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 key;
++    unsigned int success;
++    unsigned int status;
++    int transfer_raw;
++    int transfer_error;
++    unsigned int transfer_uncertain;
++    char __pad_60[4];
++};
++struct creation_result_reply
++{
++    struct reply_header __header;
+ };
+ 
+ 
+@@ -6553,6 +6630,10 @@
+     REQ_d3dkmt_mutex_acquire,
+     REQ_d3dkmt_mutex_release,
+     REQ_alpc_create_port,
++    REQ_creation_prepare,
++    REQ_creation_query,
++    REQ_creation_spawn,
++    REQ_creation_result,
+     REQ_NB_REQUESTS
+ };
+ 
+@@ -6868,6 +6949,10 @@
+     struct d3dkmt_mutex_acquire_request d3dkmt_mutex_acquire_request;
+     struct d3dkmt_mutex_release_request d3dkmt_mutex_release_request;
+     struct alpc_create_port_request alpc_create_port_request;
++    struct creation_prepare_request creation_prepare_request;
++    struct creation_query_request creation_query_request;
++    struct creation_spawn_request creation_spawn_request;
++    struct creation_result_request creation_result_request;
+ };
+ union generic_reply
+ {
+@@ -7181,8 +7266,12 @@
+     struct d3dkmt_mutex_acquire_reply d3dkmt_mutex_acquire_reply;
+     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
+     struct alpc_create_port_reply alpc_create_port_reply;
+-};
+-
+-#define SERVER_PROTOCOL_VERSION 961
++    struct creation_prepare_reply creation_prepare_reply;
++    struct creation_query_reply creation_query_reply;
++    struct creation_spawn_reply creation_spawn_reply;
++    struct creation_result_reply creation_result_reply;
++};
++
++#define SERVER_PROTOCOL_VERSION 962
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git a/server/Makefile.in b/server/Makefile.in
+--- a/server/Makefile.in
++++ b/server/Makefile.in
+@@ -9,6 +9,7 @@
+ 	clipboard.c \
+ 	completion.c \
+ 	console.c \
++	creation.c \
+ 	d3dkmt.c \
+ 	debugger.c \
+ 	device.c \
+diff --git a/server/creation.c b/server/creation.c
+new file mode 100644
+--- /dev/null
++++ b/server/creation.c
+@@ -0,0 +1,269 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "config.h"
++#include <stdint.h>
++#include <errno.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++#include "ntstatus.h"
++#include "windef.h"
++#include "winbase.h"
++#include "winternl.h"
++#include "file.h"
++#include "process.h"
++#include "thread.h"
++#include "request.h"
++#include "creation.h"
++#ifdef PW_WINE_SERVICE_FIXTURE
++#include "wine/pw_wine_creation.h"
++#include "wine/pw_wine_fixture_socket.h"
++/* Only the serialized server touches these records. Bounded thread/process
++ * references and tombstones survive until native host exit; logical death
++ * cleans endpoints/revokes work independently of object destruction. */
++struct creation_record {
++    struct thread *caller;
++    struct thread *first;
++    struct process *child;
++    struct timeout_user *expiry;
++    uint64_t key, lease, generation, deadline, last_clock;
++    unsigned int terminal, bound, requested, submitted, received, tid;
++    int stream;
++};
++static struct creation_record creation_records[PW_WINE_CREATION_REQUESTS];
++static unsigned int creation_count;
++_Static_assert(SERVER_PROTOCOL_VERSION==PW_WINE_CREATION_PROTOCOL,"matched creation protocol");
++unsigned int DECLSPEC_EXPORT __wine_ps5_creation_protocol(void) { return SERVER_PROTOCOL_VERSION; }
++static uint32_t creation_now(uint64_t *out)
++{
++    struct timespec ts;
++    if(clock_gettime(CLOCK_MONOTONIC,&ts)||ts.tv_sec<0||ts.tv_nsec<0||ts.tv_nsec>=1000000000||
++       (uint64_t)ts.tv_sec>UINT64_MAX/1000)return STATUS_UNSUCCESSFUL;
++    uint64_t ms=(uint64_t)ts.tv_sec*1000,part=(uint64_t)ts.tv_nsec/1000000;
++    if(part>UINT64_MAX-ms)return STATUS_UNSUCCESSFUL;
++    *out=ms+part;return 0;
++}
++void pw_creation_transport_error(int raw,int error)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    if(p)p->transport_failure(p->context,0,0,raw,error);
++}
++void pw_creation_close_fd(int *slot)
++{
++    if(*slot<0)return;
++    int fd=*slot;*slot=-1;
++    int rc=close(fd),error=rc<0?errno:0;
++    if(rc)pw_creation_transport_error(rc,error);
++}
++static void creation_abort(struct creation_record *r)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    if(r->terminal)return;
++    r->terminal=1;
++    if(r->expiry){remove_timeout_user(r->expiry);r->expiry=NULL;}
++    pw_creation_close_fd(&r->stream);
++    if(r->generation&&p)p->abandon(p->context,r->generation,r->lease);
++}
++static void creation_expired(void *context);
++static int creation_arm_expiry(struct creation_record *r)
++{
++    uint64_t now;
++    if(creation_now(&now)||now<r->last_clock||now>=r->deadline){creation_abort(r);return 0;}
++    r->last_clock=now;
++    uint64_t left=r->deadline-now;
++    if(left>PW_WINE_CREATION_STARTUP_MS){creation_abort(r);return 0;}
++    r->expiry=add_timeout_user(-(timeout_t)left*10000,creation_expired,r);
++    if(!r->expiry){creation_abort(r);return 0;}
++    return 1;
++}
++static void creation_expired(void *context)
++{
++    struct creation_record *r=context;
++    /* The event loop removed the expired timer. A stale loop clock may fire
++     * early; resample against the original fixed endpoint, never renew it. */
++    r->expiry=NULL;
++    if(!r->terminal)creation_arm_expiry(r);
++}
++static struct creation_record *creation_find(uint64_t generation,uint64_t lease,uint64_t key)
++{
++    for(unsigned int i=0;i<creation_count;i++){
++        struct creation_record *r=&creation_records[i];
++        if(r->caller==current&&r->generation==generation&&r->lease==lease&&r->key==key)return r;
++    }
++    return NULL;
++}
++static uint32_t creation_check(struct creation_record *r,uint64_t *now)
++{
++    uint32_t status;
++    if(!r||r->terminal||r->caller->state==TERMINATED||r->caller->process->is_terminating)return STATUS_INVALID_PARAMETER;
++    if((status=creation_now(now))||*now<r->last_clock||*now>=r->deadline){
++        creation_abort(r);return status?status:STATUS_IO_TIMEOUT;
++    }
++    r->last_clock=*now;return 0;
++}
++static uint32_t creation_progress(struct creation_record *r,uint64_t now,PwWineCreationStatus *out)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    uint32_t status;
++    if(!p)return STATUS_NOT_SUPPORTED;
++    if(r->requested&&!r->submitted&&r->stream>=0){
++        status=p->submit(p->context,r->generation,r->lease,now,r->child->id,r->tid,&r->stream);
++        if(status){creation_abort(r);return status;}
++        if(r->stream!=-1){creation_abort(r);return STATUS_INTERNAL_ERROR;}
++        r->submitted=1;
++    }
++    status=p->query(p->context,r->generation,r->lease,now,out);
++    if(status)return status;
++    if(out->deadline!=r->deadline)return STATUS_INTERNAL_ERROR;
++    return 0;
++}
++void pw_creation_thread_dead(struct thread *thread)
++{
++    for(unsigned int i=0;i<creation_count;i++)
++        if(creation_records[i].caller==thread||
++           (creation_records[i].child==thread->process&&
++            thread->process->fixture_first==thread&&!thread->process->fixture_joined))
++            creation_abort(&creation_records[i]);
++}
++void pw_creation_process_dead(struct process *process)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    if(process->fixture_generation&&p)p->origin_dead(p->context,process->fixture_generation,process->id);
++}
++int pw_creation_receive_fd(struct thread *thread,int tag,int *owned)
++{
++    if(tag>=-1)return 0;
++    unsigned int index=(unsigned int)(-(int64_t)tag-2);
++    if(index<creation_count){
++        struct creation_record *r=&creation_records[index];
++        uint64_t now;
++        if(r->caller==thread&&r->caller->process==thread->process&&!r->terminal&&r->bound&&
++           !r->received&&!creation_now(&now)&&now>=r->last_clock&&now<r->deadline){
++            PwWineFixtureSocketResult checked;
++            if(!pw_wine_fixture_socket_prepare(*owned,PW_WF_SOCKET_CLOEXEC,&checked)){
++                r->stream=*owned;*owned=-1;r->received=1;r->last_clock=now;return 1;
++            }
++        }
++        if(r->caller==thread)creation_abort(r);
++    }
++    pw_creation_close_fd(owned);
++    return 1;
++}
++unsigned int pw_creation_bind(unsigned long long generation,struct process *child,
++                              unsigned int machine,const void *image,unsigned int bytes)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    if(!p)return STATUS_NOT_SUPPORTED;
++    for(unsigned int i=0;i<creation_count;i++){
++        struct creation_record *r=&creation_records[i];uint64_t now;uint32_t status;
++        if(r->caller!=current||r->generation!=generation)continue;
++        if(r->bound)return STATUS_INVALID_PARAMETER;
++        if((status=creation_check(r,&now)))return status;
++        status=p->bind(p->context,generation,r->lease,now,child->id,machine,image,bytes);
++        if(status)return status;
++        r->child=(struct process *)grab_object(child);r->bound=1;return 0;
++    }
++    return STATUS_INVALID_PARAMETER;
++}
++unsigned int pw_creation_join(unsigned long long generation,unsigned int pid,unsigned int tid,int native)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    if(!p||current->state==TERMINATED||current!=current->process->fixture_first||
++       current->process->fixture_joined||!generation||generation!=current->process->fixture_generation||
++       pid!=current->process->id||tid!=current->id||native<=0)return STATUS_INVALID_PARAMETER;
++    return p->join(p->context,generation,pid,tid,native);
++}
++DECL_HANDLER(creation_prepare)
++{
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    PwWineCreationRequest q={0};uint32_t status;unsigned int n=creation_count;
++    if(!p||!current->process->fixture_generation||!is_process_init_done(current->process)||
++       current->process->is_terminating||!req->key||n>=PW_WINE_CREATION_REQUESTS||
++       !req->image_bytes||req->image_bytes>sizeof(q.image)||(req->image_bytes&1)||
++       req->path_bytes<2||req->path_bytes>sizeof(q.path)||
++       get_req_data_size()!=req->image_bytes+req->path_bytes){set_error(STATUS_INVALID_PARAMETER);return;}
++    for(unsigned int i=0;i<n;i++)if(creation_records[i].caller==current&&
++       (!creation_records[i].terminal||creation_records[i].key>=req->key)){
++        set_error(STATUS_INVALID_PARAMETER);return;
++    }
++    if((status=creation_now(&q.now))){set_error(status);return;}
++    if(req->deadline<=q.now||req->deadline-q.now>PW_WINE_CREATION_STARTUP_MS){set_error(STATUS_IO_TIMEOUT);return;}
++    q.origin=current->process->fixture_generation;q.lease=n+1;q.key=req->key;q.deadline=req->deadline;
++    q.caller_pid=current->process->id;q.caller_tid=current->id;q.machine=req->machine;
++    q.image_bytes=req->image_bytes;q.path_bytes=req->path_bytes;
++    memcpy(q.image,get_req_data(),q.image_bytes);
++    memcpy(q.path,(const char *)get_req_data()+q.image_bytes,q.path_bytes);
++    if(q.path[q.path_bytes-1]||memchr(q.path,0,q.path_bytes-1)){set_error(STATUS_INVALID_PARAMETER);return;}
++    struct creation_record *r=&creation_records[creation_count++];
++    r->caller=(struct thread *)grab_object(current);r->lease=q.lease;r->key=q.key;
++    r->deadline=q.deadline;r->last_clock=q.now;r->stream=-1;
++    status=p->prepare(p->context,&q,&r->generation);
++    if(status||!r->generation){creation_abort(r);set_error(status?status:STATUS_INTERNAL_ERROR);return;}
++    PwWineCreationStatus observed;
++    status=p->query(p->context,r->generation,r->lease,q.now,&observed);
++    if(status||observed.deadline>r->deadline||observed.deadline<=q.now){
++        creation_abort(r);set_error(status?status:STATUS_INTERNAL_ERROR);return;
++    }
++    r->deadline=observed.deadline;
++    if(!creation_arm_expiry(r)){set_error(STATUS_IO_TIMEOUT);return;}
++    reply->generation=r->generation;reply->lease=r->lease;reply->deadline=r->deadline;
++    reply->tag=-(int)(n+2);
++}
++DECL_HANDLER(creation_query)
++{
++    struct creation_record *r=creation_find(req->generation,req->lease,req->key);
++    PwWineCreationStatus observed;uint64_t now;uint32_t status=creation_check(r,&now);
++    if(!status)status=creation_progress(r,now,&observed);
++    if(status){set_error(status);return;}
++    reply->deadline=observed.deadline;reply->phase=observed.phase;reply->status=observed.status;
++}
++DECL_HANDLER(creation_spawn)
++{
++    struct creation_record *r=creation_find(req->generation,req->lease,req->key);
++    struct process *process=NULL;struct thread *thread=NULL;uint64_t now;uint32_t status=creation_check(r,&now);
++    if(status){set_error(status);return;}
++    if(!r->bound||r->requested){set_error(STATUS_INVALID_PARAMETER);return;}
++    process=get_process_from_handle(req->process,0);
++    if(!process)return;
++    thread=get_thread_from_handle(req->thread,0);
++    if(!thread)goto done;
++    if(process!=r->child||thread->process!=process||thread!=process->fixture_first||
++       thread!=get_process_first_thread(process)||
++       process->fixture_generation!=r->generation||thread->state==TERMINATED){set_error(STATUS_INVALID_PARAMETER);goto done;}
++    r->first=(struct thread *)grab_object(thread);r->tid=thread->id;r->requested=1;
++    /* One receive at most; process_poll_event services any later message. */
++    if(r->stream<0)receive_fd(current->process);
++    if(!current)goto done;
++    PwWineCreationStatus observed;
++    if(!(status=creation_check(r,&now)))status=creation_progress(r,now,&observed);
++    if(status)set_error(status);
++ done:if(thread)release_object(thread);release_object(process);
++}
++DECL_HANDLER(creation_result)
++{
++    struct creation_record *r=creation_find(req->generation,req->lease,req->key);
++    const PwWineCreationProvider *p=pw_wine_creation_get();
++    if(!r||r->terminal||!p||req->success>1){set_error(STATUS_INVALID_PARAMETER);return;}
++    if(req->transfer_uncertain>1||req->transfer_error<0||
++       (!req->transfer_uncertain&&(req->transfer_raw||req->transfer_error))){set_error(STATUS_INVALID_PARAMETER);return;}
++    if(req->transfer_uncertain)p->transport_failure(p->context,r->generation,r->lease,req->transfer_raw,req->transfer_error);
++    uint32_t status=p->result(p->context,r->generation,r->lease,req->success,req->status);
++    if(status){set_error(status);return;}
++    r->terminal=1;
++    if(r->expiry){remove_timeout_user(r->expiry);r->expiry=NULL;}
++    pw_creation_close_fd(&r->stream);
++}
++#else
++void pw_creation_close_fd(int *fd) {if(*fd>=0){close(*fd);*fd=-1;}}
++void pw_creation_transport_error(int r,int e) {(void)r;(void)e;}
++void pw_creation_thread_dead(struct thread *t) {(void)t;}
++void pw_creation_process_dead(struct process *p) {(void)p;}
++int pw_creation_receive_fd(struct thread *t,int tag,int *fd) {(void)t;(void)tag;(void)fd;return 0;}
++unsigned int pw_creation_bind(unsigned long long g,struct process *p,unsigned int m,const void *i,unsigned int b)
++{(void)g;(void)p;(void)m;(void)i;(void)b;return STATUS_NOT_SUPPORTED;}
++unsigned int pw_creation_join(unsigned long long g,unsigned int p,unsigned int t,int n)
++{(void)g;(void)p;(void)t;(void)n;return STATUS_NOT_SUPPORTED;}
++DECL_HANDLER(creation_prepare) {set_error(STATUS_NOT_SUPPORTED);}
++DECL_HANDLER(creation_query) {set_error(STATUS_NOT_SUPPORTED);}
++DECL_HANDLER(creation_spawn) {set_error(STATUS_NOT_SUPPORTED);}
++DECL_HANDLER(creation_result) {set_error(STATUS_NOT_SUPPORTED);}
++#endif
+diff --git a/server/creation.h b/server/creation.h
+new file mode 100644
+--- /dev/null
++++ b/server/creation.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_SERVER_CREATION_H
++#define PW_SERVER_CREATION_H
++struct thread;
++struct process;
++void pw_creation_close_fd(int *owned);
++void pw_creation_transport_error(int raw, int native_error);
++void pw_creation_thread_dead(struct thread *);
++void pw_creation_process_dead(struct process *);
++int pw_creation_receive_fd(struct thread *, int tag, int *owned);
++unsigned int pw_creation_bind(unsigned long long generation, struct process *,
++                              unsigned int machine, const void *, unsigned int bytes);
++unsigned int pw_creation_join(unsigned long long generation, unsigned int pid,
++                              unsigned int tid, int native_pid);
++#endif
+diff --git a/server/process.c b/server/process.c
+--- a/server/process.c
++++ b/server/process.c
+@@ -97,6 +97,7 @@
+ #ifdef PW_WINE_SERVICE_FIXTURE
+ #include "wine/pw_wine_fixture_provider.h"
+ #include "wine/pw_wine_fixture_socket.h"
++#include "creation.h"
+ #endif
+ static void process_destroy( struct object *obj );
+ static void terminate_process( struct process *process, struct thread *skip, int exit_code );
+@@ -653,6 +654,8 @@
+     process->unix_pid        = -1;
+ #ifdef PW_WINE_SERVICE_FIXTURE
+     process->fixture_generation = 0;
++    process->fixture_joined = 0;
++    process->fixture_first = NULL;
+ #endif
+     process->exit_code       = STILL_ACTIVE;
+     process->running_threads = 0;
+@@ -970,6 +973,9 @@
+ /* a process has been killed (i.e. its last thread died) */
+ static void process_killed( struct process *process )
+ {
++#ifdef PW_WINE_SERVICE_FIXTURE
++    pw_creation_process_dead( process );
++#endif
+     assert( list_empty( &process->thread_list ));
+     process->end_time = current_time;
+     close_process_desktop( process );
+@@ -1161,6 +1167,14 @@
+         set_error( STATUS_INVALID_PARAMETER );
+         return;
+     }
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (current->process->fixture_generation && !req->creation)
++    {
++        set_error( STATUS_NOT_SUPPORTED );
++        close( socket_fd );
++        return;
++    }
++#endif
+     if (!get_req_object_attributes( &params ))
+     {
+         set_error( STATUS_INVALID_PARAMETER );
+@@ -1264,6 +1278,14 @@
+         release_object( job );
+     }
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (req->creation && (req->info_size < sizeof(*info->data) || req->info_size > info->data_size))
++    {
++        set_error( STATUS_INVALID_PARAMETER );
++        close( socket_fd );
++        goto done;
++    }
++#endif
+     info->info_size = min( req->info_size, info->data_size );
+ 
+     if (req->info_size < sizeof(*info->data))
+@@ -1325,8 +1347,17 @@
+     {
+         const PwWineFixtureProvider *fixture = pw_wine_fixture_get();
+         uint64_t generation = 0;
+-        unsigned int status = fixture ? fixture->bind_process( fixture->context,
+-            current->process->id, current->id, process->id, &generation ) : STATUS_NOT_SUPPORTED;
++        unsigned int status;
++        if (req->creation)
++        {
++            const void *image = (const char *)(info->data + 1) + info->data->curdir_len + info->data->dllpath_len;
++            status = pw_creation_bind( req->creation, process, req->machine, image, info->data->imagepath_len );
++            if (!status) generation = req->creation;
++        }
++        else if (current->process->fixture_generation) status = STATUS_NOT_SUPPORTED;
++        else status = fixture ? fixture->bind_process( fixture->context,
++                       get_process_id(current->process), get_thread_id(current),
++                       get_process_id(process), &generation ) : STATUS_NOT_SUPPORTED;
+         if (status || !generation)
+         {
+             set_error( status ? status : STATUS_INTERNAL_ERROR );
+diff --git a/server/process.h b/server/process.h
+--- a/server/process.h
++++ b/server/process.h
+@@ -47,6 +47,8 @@
+     process_id_t         id;              /* id of the process */
+ #ifdef PW_WINE_SERVICE_FIXTURE
+     unsigned long long   fixture_generation; /* immutable owner binding, never a native PID */
++    unsigned int         fixture_joined; /* one validated first-thread join */
++    struct thread       *fixture_first; /* pinned one-use object, never a reused numeric TID */
+ #endif
+     process_id_t         group_id;        /* group id of the process */
+     unsigned int         session_id;      /* session id */
+diff --git a/server/protocol.def b/server/protocol.def
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1135,6 +1135,7 @@
+     data_size_t  info_size;      /* size of startup info */
+     data_size_t  handles_size;   /* length of explicit handles list */
+     data_size_t  jobs_size;      /* length of jobs list */
++    unsigned __int64 creation;   /* experimental server-owned reservation, never a handle */
+     VARARG(objattr,object_attributes);   /* object attributes */
+     VARARG(handles,uints,handles_size);  /* handles list */
+     VARARG(jobs,uints,jobs_size);        /* jobs list */
+@@ -1198,6 +1199,9 @@
+     int          reply_fd;     /* fd for reply pipe */
+     int          wait_fd;      /* fd for blocking calls pipe */
+     unsigned int page_size;    /* client page size */
++    unsigned __int64 creation; /* expected owned generation or zero for ordinary root */
++    process_id_t expected_pid;
++    thread_id_t expected_tid;
+ @REPLY
+     process_id_t pid;          /* process id of the new thread's process */
+     thread_id_t  tid;          /* thread id of the new thread */
+@@ -4338,3 +4342,47 @@
+ @REPLY
+     obj_handle_t        handle;         /* handle to the ALPC port */
+ @END
++
++/* Experimental creation broker. Off builds refuse these requests. */
++@REQ(creation_prepare)
++    unsigned __int64 key;
++    unsigned __int64 deadline;
++    unsigned int machine;
++    unsigned int image_bytes;
++    unsigned int path_bytes;
++    VARARG(data,bytes);
++@REPLY
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 deadline;
++    int tag;
++@END
++
++@REQ(creation_query)
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 key;
++@REPLY
++    unsigned __int64 deadline;
++    unsigned int phase;
++    unsigned int status;
++@END
++
++@REQ(creation_spawn)
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 key;
++    obj_handle_t process;
++    obj_handle_t thread;
++@END
++
++@REQ(creation_result)
++    unsigned __int64 generation;
++    unsigned __int64 lease;
++    unsigned __int64 key;
++    unsigned int success;
++    unsigned int status;
++    int transfer_raw;
++    int transfer_error;
++    unsigned int transfer_uncertain;
++@END
+diff --git a/server/request.c b/server/request.c
+--- a/server/request.c
++++ b/server/request.c
+@@ -63,6 +63,7 @@
+ #include "security.h"
+ #include "handle.h"
+ #include "request_handlers.h"
++#include "creation.h"
+ #ifdef WINE_INPROCESS_SERVER
+ #include "wine/server.h"
+ #include "wine/ps5_mutex_backend.h"
+@@ -295,6 +296,11 @@
+ 
+ #ifdef WINE_INPROCESS_SERVER
+     ps5_mutex_server_begin();
++#endif
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (current->process->fixture_generation && !current->process->fixture_joined && req != REQ_init_first_thread)
++        set_error( STATUS_INVALID_PARAMETER );
++    else
+ #endif
+     if (req < REQ_NB_REQUESTS)
+         req_handlers[req]( &current->req, &reply );
+@@ -690,6 +696,48 @@
+ 
+     ret = recvmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (ret >= 0)
++    {
++        int rights[64], count=0, valid=1, records=0;
++        size_t used=msghdr.msg_controllen, at=0;
++        if (used>sizeof(cmsg_buffer)) { used=sizeof(cmsg_buffer);valid=0; }
++        while (at<used)
++        {
++            struct cmsghdr h;
++            if (used-at<sizeof(h)) { valid=0;break; }
++            memcpy(&h,cmsg_buffer+at,sizeof(h));
++            size_t head=CMSG_LEN(0),len=h.cmsg_len;
++            if (len<head||len>used-at) { valid=0;break; }
++            size_t bytes=len-head;records++;
++            if (h.cmsg_level!=SOL_SOCKET||h.cmsg_type!=SCM_RIGHTS||!bytes||bytes%sizeof(int))valid=0;
++            else for(size_t n=0;n<bytes;n+=sizeof(int))
++            {
++                int right,duplicate=0;memcpy(&right,cmsg_buffer+at+head+n,sizeof(right));
++                for(int i=0;i<count;i++)if(rights[i]==right)duplicate=1;
++                if(right<0||duplicate||count==64)valid=0;
++                else rights[count++]=right;
++            }
++            if(len==used-at)break;
++            size_t next=CMSG_SPACE(bytes);
++            if(next>used-at) { for(size_t n=len;n<used-at;n++)if(cmsg_buffer[at+n])valid=0;break; }
++            at+=next;
++        }
++        if (ret!=sizeof(data)||records!=1||count!=1||(msghdr.msg_flags&~MSG_EOR))valid=0;
++        if(!valid)
++        {
++            for(int i=0;i<count;i++)
++            {
++                int rc=close(rights[i]),error=rc<0?errno:0;
++                if(rc)pw_creation_transport_error(rc,error);
++            }
++            if(ret||count||msghdr.msg_flags)pw_creation_transport_error(ret,0);
++            kill_process(process,0);
++            return -1;
++        }
++        fd=rights[0];
++    }
++#else
+     if (ret > 0)
+     {
+         struct cmsghdr *cmsg;
+@@ -699,6 +747,8 @@
+             if (cmsg->cmsg_type == SCM_RIGHTS) fd = *(int *)CMSG_DATA(cmsg);
+         }
+     }
++
++#endif
+ 
+     if (ret == sizeof(data))
+     {
+@@ -712,14 +762,15 @@
+             if (debug_level)
+                 fprintf( stderr, "%04x: *fd* %d <- %d bad thread id\n",
+                          data.tid, data.fd, fd );
+-            close( fd );
++            pw_creation_close_fd( &fd );
+         }
+         else
+         {
+             if (debug_level)
+                 fprintf( stderr, "%04x: *fd* %d <- %d\n",
+                          thread->id, data.fd, fd );
+-            thread_add_inflight_fd( thread, data.fd, fd );
++            if (!pw_creation_receive_fd( thread, data.fd, &fd ))
++                thread_add_inflight_fd( thread, data.fd, fd );
+         }
+         if (thread) release_object( thread );
+         return 0;
+@@ -733,7 +784,7 @@
+     {
+         fprintf( stderr, "Protocol error: process %04x: partial recvmsg %d for fd\n",
+                  process->id, ret );
+-        if (fd != -1) close( fd );
++        pw_creation_close_fd( &fd );
+         kill_process( process, 1 );
+     }
+     else
+diff --git a/server/request_handlers.h b/server/request_handlers.h
+--- a/server/request_handlers.h
++++ b/server/request_handlers.h
+@@ -315,6 +315,10 @@
+ DECL_HANDLER(d3dkmt_mutex_acquire);
+ DECL_HANDLER(d3dkmt_mutex_release);
+ DECL_HANDLER(alpc_create_port);
++DECL_HANDLER(creation_prepare);
++DECL_HANDLER(creation_query);
++DECL_HANDLER(creation_spawn);
++DECL_HANDLER(creation_result);
+ 
+ typedef void (*req_handler)( const void *req, void *reply );
+ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+@@ -627,6 +631,10 @@
+     (req_handler)req_d3dkmt_mutex_acquire,
+     (req_handler)req_d3dkmt_mutex_release,
+     (req_handler)req_alpc_create_port,
++    (req_handler)req_creation_prepare,
++    (req_handler)req_creation_query,
++    (req_handler)req_creation_spawn,
++    (req_handler)req_creation_result,
+ };
+ 
+ C_ASSERT( sizeof(abstime_t) == 8 );
+@@ -694,7 +702,8 @@
+ C_ASSERT( offsetof(struct new_process_request, info_size) == 40 );
+ C_ASSERT( offsetof(struct new_process_request, handles_size) == 44 );
+ C_ASSERT( offsetof(struct new_process_request, jobs_size) == 48 );
+-C_ASSERT( sizeof(struct new_process_request) == 56 );
++C_ASSERT( offsetof(struct new_process_request, creation) == 56 );
++C_ASSERT( sizeof(struct new_process_request) == 64 );
+ C_ASSERT( offsetof(struct new_process_reply, info) == 8 );
+ C_ASSERT( offsetof(struct new_process_reply, pid) == 12 );
+ C_ASSERT( offsetof(struct new_process_reply, handle) == 16 );
+@@ -729,7 +738,10 @@
+ C_ASSERT( offsetof(struct init_first_thread_request, reply_fd) == 24 );
+ C_ASSERT( offsetof(struct init_first_thread_request, wait_fd) == 28 );
+ C_ASSERT( offsetof(struct init_first_thread_request, page_size) == 32 );
+-C_ASSERT( sizeof(struct init_first_thread_request) == 40 );
++C_ASSERT( offsetof(struct init_first_thread_request, creation) == 40 );
++C_ASSERT( offsetof(struct init_first_thread_request, expected_pid) == 48 );
++C_ASSERT( offsetof(struct init_first_thread_request, expected_tid) == 52 );
++C_ASSERT( sizeof(struct init_first_thread_request) == 56 );
+ C_ASSERT( offsetof(struct init_first_thread_reply, pid) == 8 );
+ C_ASSERT( offsetof(struct init_first_thread_reply, tid) == 12 );
+ C_ASSERT( offsetof(struct init_first_thread_reply, server_start) == 16 );
+@@ -2392,3 +2404,37 @@
+ C_ASSERT( sizeof(struct alpc_create_port_request) == 24 );
+ C_ASSERT( offsetof(struct alpc_create_port_reply, handle) == 8 );
+ C_ASSERT( sizeof(struct alpc_create_port_reply) == 16 );
++C_ASSERT( offsetof(struct creation_prepare_request, key) == 16 );
++C_ASSERT( offsetof(struct creation_prepare_request, deadline) == 24 );
++C_ASSERT( offsetof(struct creation_prepare_request, machine) == 32 );
++C_ASSERT( offsetof(struct creation_prepare_request, image_bytes) == 36 );
++C_ASSERT( offsetof(struct creation_prepare_request, path_bytes) == 40 );
++C_ASSERT( sizeof(struct creation_prepare_request) == 48 );
++C_ASSERT( offsetof(struct creation_prepare_reply, generation) == 8 );
++C_ASSERT( offsetof(struct creation_prepare_reply, lease) == 16 );
++C_ASSERT( offsetof(struct creation_prepare_reply, deadline) == 24 );
++C_ASSERT( offsetof(struct creation_prepare_reply, tag) == 32 );
++C_ASSERT( sizeof(struct creation_prepare_reply) == 40 );
++C_ASSERT( offsetof(struct creation_query_request, generation) == 16 );
++C_ASSERT( offsetof(struct creation_query_request, lease) == 24 );
++C_ASSERT( offsetof(struct creation_query_request, key) == 32 );
++C_ASSERT( sizeof(struct creation_query_request) == 40 );
++C_ASSERT( offsetof(struct creation_query_reply, deadline) == 8 );
++C_ASSERT( offsetof(struct creation_query_reply, phase) == 16 );
++C_ASSERT( offsetof(struct creation_query_reply, status) == 20 );
++C_ASSERT( sizeof(struct creation_query_reply) == 24 );
++C_ASSERT( offsetof(struct creation_spawn_request, generation) == 16 );
++C_ASSERT( offsetof(struct creation_spawn_request, lease) == 24 );
++C_ASSERT( offsetof(struct creation_spawn_request, key) == 32 );
++C_ASSERT( offsetof(struct creation_spawn_request, process) == 40 );
++C_ASSERT( offsetof(struct creation_spawn_request, thread) == 44 );
++C_ASSERT( sizeof(struct creation_spawn_request) == 48 );
++C_ASSERT( offsetof(struct creation_result_request, generation) == 16 );
++C_ASSERT( offsetof(struct creation_result_request, lease) == 24 );
++C_ASSERT( offsetof(struct creation_result_request, key) == 32 );
++C_ASSERT( offsetof(struct creation_result_request, success) == 40 );
++C_ASSERT( offsetof(struct creation_result_request, status) == 44 );
++C_ASSERT( offsetof(struct creation_result_request, transfer_raw) == 48 );
++C_ASSERT( offsetof(struct creation_result_request, transfer_error) == 52 );
++C_ASSERT( offsetof(struct creation_result_request, transfer_uncertain) == 56 );
++C_ASSERT( sizeof(struct creation_result_request) == 64 );
+diff --git a/server/request_trace.h b/server/request_trace.h
+--- a/server/request_trace.h
++++ b/server/request_trace.h
+@@ -72,6 +72,7 @@
+     fprintf( stderr, ", info_size=%u", req->info_size );
+     fprintf( stderr, ", handles_size=%u", req->handles_size );
+     fprintf( stderr, ", jobs_size=%u", req->jobs_size );
++    dump_uint64( ", creation=", &req->creation );
+     dump_varargs_object_attributes( ", objattr=", cur_size );
+     dump_varargs_uints( ", handles=", min( cur_size, req->handles_size ));
+     dump_varargs_uints( ", jobs=", min( cur_size, req->jobs_size ));
+@@ -145,6 +146,9 @@
+     fprintf( stderr, ", reply_fd=%d", req->reply_fd );
+     fprintf( stderr, ", wait_fd=%d", req->wait_fd );
+     fprintf( stderr, ", page_size=%08x", req->page_size );
++    dump_uint64( ", creation=", &req->creation );
++    fprintf( stderr, ", expected_pid=%04x", req->expected_pid );
++    fprintf( stderr, ", expected_tid=%04x", req->expected_tid );
+ }
+ 
+ static void dump_init_first_thread_reply( const struct init_first_thread_reply *req )
+@@ -3534,6 +3538,59 @@
+ static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *req )
+ {
+     fprintf( stderr, " handle=%04x", req->handle );
++}
++
++static void dump_creation_prepare_request( const struct creation_prepare_request *req )
++{
++    dump_uint64( " key=", &req->key );
++    dump_uint64( ", deadline=", &req->deadline );
++    fprintf( stderr, ", machine=%08x", req->machine );
++    fprintf( stderr, ", image_bytes=%08x", req->image_bytes );
++    fprintf( stderr, ", path_bytes=%08x", req->path_bytes );
++    dump_varargs_bytes( ", data=", cur_size );
++}
++
++static void dump_creation_prepare_reply( const struct creation_prepare_reply *req )
++{
++    dump_uint64( " generation=", &req->generation );
++    dump_uint64( ", lease=", &req->lease );
++    dump_uint64( ", deadline=", &req->deadline );
++    fprintf( stderr, ", tag=%d", req->tag );
++}
++
++static void dump_creation_query_request( const struct creation_query_request *req )
++{
++    dump_uint64( " generation=", &req->generation );
++    dump_uint64( ", lease=", &req->lease );
++    dump_uint64( ", key=", &req->key );
++}
++
++static void dump_creation_query_reply( const struct creation_query_reply *req )
++{
++    dump_uint64( " deadline=", &req->deadline );
++    fprintf( stderr, ", phase=%08x", req->phase );
++    fprintf( stderr, ", status=%08x", req->status );
++}
++
++static void dump_creation_spawn_request( const struct creation_spawn_request *req )
++{
++    dump_uint64( " generation=", &req->generation );
++    dump_uint64( ", lease=", &req->lease );
++    dump_uint64( ", key=", &req->key );
++    fprintf( stderr, ", process=%04x", req->process );
++    fprintf( stderr, ", thread=%04x", req->thread );
++}
++
++static void dump_creation_result_request( const struct creation_result_request *req )
++{
++    dump_uint64( " generation=", &req->generation );
++    dump_uint64( ", lease=", &req->lease );
++    dump_uint64( ", key=", &req->key );
++    fprintf( stderr, ", success=%08x", req->success );
++    fprintf( stderr, ", status=%08x", req->status );
++    fprintf( stderr, ", transfer_raw=%d", req->transfer_raw );
++    fprintf( stderr, ", transfer_error=%d", req->transfer_error );
++    fprintf( stderr, ", transfer_uncertain=%08x", req->transfer_uncertain );
+ }
+ 
+ typedef void (*dump_func)( const void *req );
+@@ -3848,6 +3905,10 @@
+     (dump_func)dump_d3dkmt_mutex_acquire_request,
+     (dump_func)dump_d3dkmt_mutex_release_request,
+     (dump_func)dump_alpc_create_port_request,
++    (dump_func)dump_creation_prepare_request,
++    (dump_func)dump_creation_query_request,
++    (dump_func)dump_creation_spawn_request,
++    (dump_func)dump_creation_result_request,
+ };
+ 
+ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+@@ -4160,6 +4221,10 @@
+     (dump_func)dump_d3dkmt_mutex_acquire_reply,
+     NULL,
+     (dump_func)dump_alpc_create_port_reply,
++    (dump_func)dump_creation_prepare_reply,
++    (dump_func)dump_creation_query_reply,
++    NULL,
++    NULL,
+ };
+ 
+ static const char * const req_names[REQ_NB_REQUESTS] =
+@@ -4472,6 +4537,10 @@
+     "d3dkmt_mutex_acquire",
+     "d3dkmt_mutex_release",
+     "alpc_create_port",
++    "creation_prepare",
++    "creation_query",
++    "creation_spawn",
++    "creation_result",
+ };
+ 
+ static const struct
+@@ -4515,6 +4584,7 @@
+     { "ERROR_INVALID_WINDOW_HANDLE", 0xc0010000 | ERROR_INVALID_WINDOW_HANDLE },
+     { "ERROR_NO_MORE_USER_HANDLES",  0xc0010000 | ERROR_NO_MORE_USER_HANDLES },
+     { "ERROR_WINDOW_OF_OTHER_THREAD", 0xc0010000 | ERROR_WINDOW_OF_OTHER_THREAD },
++    { "FILE_CLOSED",                 STATUS_FILE_CLOSED },
+     { "FILE_DELETED",                STATUS_FILE_DELETED },
+     { "FILE_INVALID",                STATUS_FILE_INVALID },
+     { "FILE_IS_A_DIRECTORY",         STATUS_FILE_IS_A_DIRECTORY },
+@@ -4529,6 +4599,7 @@
+     { "INFO_LENGTH_MISMATCH",        STATUS_INFO_LENGTH_MISMATCH },
+     { "INSTANCE_NOT_AVAILABLE",      STATUS_INSTANCE_NOT_AVAILABLE },
+     { "INSUFFICIENT_RESOURCES",      STATUS_INSUFFICIENT_RESOURCES },
++    { "INTERNAL_ERROR",              STATUS_INTERNAL_ERROR },
+     { "INVALID_ACL",                 STATUS_INVALID_ACL },
+     { "INVALID_ADDRESS",             STATUS_INVALID_ADDRESS },
+     { "INVALID_ADDRESS_COMPONENT",   STATUS_INVALID_ADDRESS_COMPONENT },
+diff --git a/server/thread.c b/server/thread.c
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -55,6 +55,7 @@
+ #include "file.h"
+ #include "handle.h"
+ #include "process.h"
++#include "creation.h"
+ #include "thread.h"
+ #ifdef PW_WINE_SERVICE_FIXTURE
+ #include "wine/pw_wine_fixture_socket.h"
+@@ -626,6 +627,7 @@
+ static void cleanup_thread( struct thread *thread )
+ {
+     int i;
++    pw_creation_thread_dead( thread );
+ 
+     cleanup_thread_completion( thread );
+     if (thread->context)
+@@ -1845,8 +1847,21 @@
+     }
+     if (params.root) release_object( params.root );  /* unused */
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++    /* A failed/dead first thread cannot be replaced and reuse its reservation. */
++    if (process->fixture_generation && !process->fixture_joined && process->fixture_first)
++    {
++        if (request_fd != -1) pw_creation_close_fd( &request_fd );
++        set_error( STATUS_INVALID_PARAMETER );
++        goto done;
++    }
++#endif
+     if ((thread = create_thread( request_fd, process, params.sd )))
+     {
++#ifdef PW_WINE_SERVICE_FIXTURE
++        if (process->fixture_generation && !process->fixture_first)
++            process->fixture_first = (struct thread *)grab_object( thread );
++#endif
+         thread->system_regs = current->system_regs;
+         if (req->flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) thread->suspend++;
+         thread->is_system = req->is_system;
+@@ -1907,8 +1922,20 @@
+     struct process *process = current->process;
+     int fd;
+ 
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (process->fixture_generation)
++    {
++        unsigned int status = pw_creation_join( req->creation, req->expected_pid, req->expected_tid, req->unix_pid );
++        if (status) { set_error(status); return; }
++    }
++    else if (req->creation || req->expected_pid || req->expected_tid)
++    { set_error(STATUS_INVALID_PARAMETER); return; }
++#endif
++    if (!init_thread( current, req->reply_fd, req->wait_fd )) return;
++#ifdef PW_WINE_SERVICE_FIXTURE
++    if (process->fixture_generation) process->fixture_joined = 1;
++#endif
+     process->page_size = req->page_size;
+-    if (!init_thread( current, req->reply_fd, req->wait_fd )) return;
+ 
+     current->unix_pid = process->unix_pid = req->unix_pid;
+     current->unix_tid = req->unix_tid;

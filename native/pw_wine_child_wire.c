@@ -113,13 +113,13 @@ int pw_wine_child_wire_validate(PwNativeChildIo *io,int fd,PwWineChildWireResult
     if(budget(io,r,NULL)||socket_type(fd,SOCK_SEQPACKET,r)) return -1;
     return budget(io,r,NULL);
 }
-static int poll_once(PwNativeChildIo *io,int fd,int writing,PwWineChildWireResult *r)
+static int poll_once(PwNativeChildIo *io,int fd,int writing,unsigned slice,PwWineChildWireResult *r)
 {
     unsigned left;
     if(fd<0)return fail(r,PW_WC_INVALID,PW_WC_API_POLL,fd,0);
     if(budget(io,r,&left)) return -1;
     struct pollfd p={fd,writing?POLLOUT:POLLIN,0};
-    int rc=poll(&p,1,(int)(left<POLL_SLICE?left:POLL_SLICE)),error=rc<0?errno:0;
+    int rc=poll(&p,1,(int)(left<slice?left:slice)),error=rc<0?errno:0;
     r->poll_revents=(uint32_t)(unsigned short)p.revents;
     if(rc<0) return fail(r,PW_WC_OS,PW_WC_API_POLL,rc,error);
     if(rc>1||(!rc&&p.revents)) return fail(r,PW_WC_PROTOCOL,PW_WC_API_POLL,rc,0);
@@ -149,7 +149,7 @@ int pw_wine_child_wire_try_send(int fd,const PwWineChildFrame *f,int right,PwWin
 }
 int pw_wine_child_wire_send(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
 {
-    int rc;do{rc=poll_once(io,fd,1,r);}while(rc==PW_WC_IDLE);
+    int rc;do{rc=poll_once(io,fd,1,POLL_SLICE,r);}while(rc==PW_WC_IDLE);
     if(rc<0||pw_wine_child_wire_try_send(fd,f,right,r)) return -1;
     if(budget(io,r,NULL)){r->delivery_uncertain=1;return -1;}return 0;
 }
@@ -179,11 +179,11 @@ static unsigned collect(int channel,const unsigned char *p,size_t cap,size_t rep
     if(records!=1||count!=1)*valid_control=0;
     return count;
 }
-int pw_wine_child_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,
-                                   PwWineChildFrame *f,int *right,PwWineChildWireResult *r)
+static int receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,
+                                   PwWineChildFrame *f,int *right,unsigned slice,PwWineChildWireResult *r)
 {
     if(!r||!f||!right||*right!=-1||!kinds||kinds&~0x7eu) return fail(r,PW_WC_INVALID,PW_WC_API_RECEIVE,0,0);
-    int rc=poll_once(io,fd,0,r);if(rc!=PW_WC_RECORD)return rc;
+    int rc=poll_once(io,fd,0,slice,r);if(rc!=PW_WC_RECORD)return rc;
     unsigned char bytes[PW_WC_WIRE_BYTES];
     union{struct cmsghdr align;unsigned char bytes[CMSG_SPACE(MAX_RIGHTS*sizeof(int))];} control;
     struct iovec part={bytes,sizeof(bytes)};struct msghdr m={0};memset(&control,0,sizeof(control));
@@ -209,6 +209,22 @@ int pw_wine_child_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,
     if(count)*right=rights[0];
     *f=frame;return PW_WC_RECORD;
 }
+/* Supervisor-only nonwaiting steps retain the same codec, ownership and
+ * original budget checks. An idle channel does not delay any other child. */
+int pw_wine_child_wire_send_step(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
+{
+    int rc=poll_once(io,fd,1,0,r);
+    if(rc!=PW_WC_RECORD)return rc;
+    if(pw_wine_child_wire_try_send(fd,f,right,r))return PW_WC_ERROR;
+    if(budget(io,r,NULL)){r->delivery_uncertain=1;return PW_WC_ERROR;}
+    return PW_WC_RECORD;
+}
+int pw_wine_child_wire_receive_nowait(PwNativeChildIo *io,int fd,uint32_t kinds,
+                                    PwWineChildFrame *f,int *right,PwWineChildWireResult *r)
+{ return receive_step(io,fd,kinds,f,right,0,r); }
+int pw_wine_child_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,
+                                  PwWineChildFrame *f,int *right,PwWineChildWireResult *r)
+{ return receive_step(io,fd,kinds,f,right,POLL_SLICE,r); }
 int pw_wine_child_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,
                               PwWineChildFrame *f,int *right,PwWineChildWireResult *r)
 {

@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-enum{EXPORTS=10};
+enum{EXPORTS=13};
 _Alignas(PW_PRX_ALIGN) static struct{struct{uint64_t magic;uint32_t version,count;PwPrxExport exports[EXPORTS];}d;char names[EXPORTS][64];}module;
 static struct{uint64_t now;int cancel,envs,loads,starts,adopts,bindings,cwds,sinks,threads;
     uint32_t profile,machine;int wow64_abi;
@@ -16,6 +16,10 @@ static int module_start(size_t n,const void*p){assert(!n&&!p);m.starts++;return 
 static void *adopt(const char *p,int32_t h){assert(strstr(p,"ntdll.prx")&&h==7);m.adopts++;return &module;}
 static unsigned abi(void){return(unsigned)m.abi;}
 static unsigned wow64_abi(void){return(unsigned)m.wow64_abi;}
+static unsigned creation_abi(void){return PW_WINE_CREATION_ABI;}
+static unsigned creation_protocol(void){return PW_WINE_CREATION_PROTOCOL;}
+static int creation_install(const PwWineCreationChild *p)
+{assert(p&&p->abi==1&&p->bytes==sizeof(*p)&&p->generation==7&&p->wine_pid==20&&p->wine_tid==24&&p->profile==m.profile&&p->machine==m.machine);return 0;}
 static int cwd(const char *p){assert(!strcmp(p,m.profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_CWD:PW_WINE_CHILD_BATTLENET_CWD));m.cwds++;return m.cwd_fail;}
 static void output(const char *p,size_t n){(void)p;(void)n;}
 static void sink(void(*f)(const char*,size_t)){assert(f==output);m.sinks++;}
@@ -59,15 +63,15 @@ static void reset(void)
 {
     memset(&m,0,sizeof(m));memset(&b,0,sizeof(b));memset(&module,0,sizeof(module));m.now=100;m.abi=1;m.wow64_abi=1;m.profile=PW_WC_PROFILE_FIXTURE;m.machine=PW_WC_MACHINE_AMD64;
     const char *names[]={"__wine_main","module_start","pw_wine_dl_adopt","__wine_ps5_private_dispatch_abi",
-        "pw_cwd_set","__wine_ps5_set_output_sink","pw_wine_fixture_local_threads","pw_wine_fixture_socket_set_sink","pw_wine_fixture_socket_failure","__wine_ps5_private_dispatch_wow64_abi"};
-    const void *fns[]={(void*)fake_main,(void*)module_start,(void*)adopt,(void*)abi,(void*)cwd,(void*)sink,(void*)bind_threads,(void*)set_socket_sink,(void*)socket_failure,(void*)wow64_abi};
+        "pw_cwd_set","__wine_ps5_set_output_sink","pw_wine_fixture_local_threads","pw_wine_fixture_socket_set_sink","pw_wine_fixture_socket_failure","__wine_ps5_private_dispatch_wow64_abi","__wine_ps5_creation_abi","__wine_ps5_creation_protocol","pw_wine_creation_child_install"};
+    const void *fns[]={(void*)fake_main,(void*)module_start,(void*)adopt,(void*)abi,(void*)cwd,(void*)sink,(void*)bind_threads,(void*)set_socket_sink,(void*)socket_failure,(void*)wow64_abi,(void*)creation_abi,(void*)creation_protocol,(void*)creation_install};
     module.d.magic=PW_PRX_MAGIC;module.d.version=PW_PRX_VERSION;module.d.count=EXPORTS;
     for(unsigned i=0;i<EXPORTS;i++){strcpy(module.names[i],names[i]);module.d.exports[i]=(PwPrxExport){module.names[i],fns[i]};}
     io=(PwNativeChildIo){.clock_ms=clock_ms,.cancelled=cancelled,.ready=1,.last_clock=100,.stage_end=500,.total_end=1000};
     ops=(PwWineChildBootstrapOps){.context=&m,.wine={load,info,set_env,thread},.runtime=runtime,.directory=directory,
         .register_thread=add,.unregister_thread=remove_thread,.output=output,.socket_sink=socket_sink,.record=record};
 }
-static int prepare(void){return pw_wine_child_bootstrap_prepare(&b,&io,9,hash,1,m.profile,m.machine,&ops);}
+static int prepare(void){ops.child=(PwWineCreationChild){PW_WINE_CREATION_ABI,sizeof(PwWineCreationChild),7,20,24,m.profile,m.machine};return pw_wine_child_bootstrap_prepare(&b,&io,9,hash,1,m.profile,m.machine,&ops);}
 static void hashes(void)
 {
     PwWineChildHash h;char out[65];pw_wine_child_hash_init(&h);pw_wine_child_hash_final(&h,out);
@@ -90,7 +94,7 @@ int main(void)
     reset();m.cancel=1;assert(prepare()&&!m.envs&&!m.loads);
     reset();m.wrong_path=1;assert(prepare()&&!m.envs&&!m.loads);
     reset();m.load_fail=1;assert(prepare()&&b.stage==PW_WCB_LOAD&&!m.threads);
-    for(unsigned i=1;i<EXPORTS-1;i++){reset();strcpy(module.names[i],"missing");assert(prepare()&&!m.threads);}
+    for(unsigned i=1;i<EXPORTS;i++){if(i==9)continue;reset();strcpy(module.names[i],"missing");assert(prepare()&&!m.threads);}
     reset();m.abi=0;assert(prepare()&&b.stage==PW_WCB_ABI&&!m.bindings);
     reset();m.cwd_fail=-1;assert(prepare()&&b.stage==PW_WCB_CWD&&!m.bindings);
     reset();m.register_fail=-1;assert(prepare()&&b.stage==PW_WCB_REGISTRY&&!m.threads);
@@ -100,7 +104,7 @@ int main(void)
     reset();m.profile=PW_WC_PROFILE_BATTLENET;m.machine=PW_WC_MACHINE_I386;
     assert(!prepare()&&!strcmp(b.config.prefix,PW_WINE_CHILD_BATTLENET_PREFIX)&&!strcmp(b.argv[1],PW_WINE_CHILD_BATTLENET_IMAGE));
     reset();m.profile=PW_WC_PROFILE_BATTLENET;assert(!prepare());
-    reset();m.profile=PW_WC_PROFILE_BATTLENET;strcpy(module.names[EXPORTS-1],"missing");assert(prepare()&&!m.bindings);
+    reset();m.profile=PW_WC_PROFILE_BATTLENET;strcpy(module.names[9],"missing");assert(prepare()&&!m.bindings);
     reset();m.profile=PW_WC_PROFILE_BATTLENET;m.wow64_abi=0;assert(prepare()&&b.stage==PW_WCB_ABI&&!m.bindings);
     reset();m.machine=PW_WC_MACHINE_I386;assert(prepare()&&!m.loads&&!m.envs);
     reset();m.profile=3;assert(prepare()&&!m.loads&&!m.envs);
