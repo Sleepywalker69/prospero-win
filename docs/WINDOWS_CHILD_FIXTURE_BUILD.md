@@ -295,3 +295,33 @@ each archive against its own fixture/provenance records. Do not infer runtime
 compatibility from cache hits or require unrelated complete archives to have
 identical bytes. No hosted speedup is claimed until the cold and warm jobs and
 all their normal checks have completed.
+
+## Child bootstrap diagnostics
+
+Before Wine entry, a matching child `FAILURE` retains the failing operation,
+its raw result and immediate native errno when available. The parent's
+`bootstrap_failure` event carries those three fields;
+`bootstrap_failure_value` carries the two auxiliary values and `errno_valid`.
+Operation IDs are defined in `native/pw_wine_child_wire.h`, starting at `0x100`
+to distinguish them from the existing socket diagnostics. Directory failures
+identify the required prefix or working directory; runtime failures identify
+the attempted fixed runtime root. A permitted unreadable alias does not turn
+an otherwise successful runtime selection into failure. Validation failures
+do not invent an OS error.
+The single final pre-Wine failure send can proceed when this child's logger
+failed. It retains the original deadline and clock history, respects external
+cancellation and earlier transport errors, and never retries uncertain delivery.
+
+After a failed log-file open, the child makes at most one read-only `stat` of
+`/data`, within its existing startup budget. The auxiliary fields distinguish
+a visible directory, a non-directory, a failed `stat` with its own errno, or
+an unavailable observation. This observation never replaces the original
+log-open error, requests access, or retries the open. Parent access does not
+establish the child's filesystem view. A missing child log alone therefore
+cannot establish an access-denied or missing-directory diagnosis.
+
+A child can send its bootstrap failure and exit while the parent is listing
+and terminating that same owned service. A later nonzero `kill_return` is a
+cleanup observation, not the bootstrap cause or proof that the child remains
+alive. The existing ownership-uncertainty hold remains in force; no error code
+is treated as a retirement receipt.

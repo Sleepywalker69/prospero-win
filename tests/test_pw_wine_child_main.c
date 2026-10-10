@@ -89,6 +89,8 @@ static struct {
     uint64_t ms;int battle;int prepare_rc,start_rc,start_owns,wrong_session,kill_rc,log_fail;
     int sends,steps,closes,closed[20],kills,prepares,starts,exit_code,query_failure,send_rc,idle_timeout,bad_sequence;
     int writes,trylock_rc,unlock_rc,write_short;char last_write[512];
+    int log_error,data_error,data_nondir,data_stats,close_error,open_mask,alias_open;
+    int stat_error,read_error;
     int attr_init_rc,attr_stack_rc,attr_destroy_rc,thread_rc,thread_calls,reads,bad_hash;
     PwWineChildFrame frames[8];
 }m;
@@ -98,14 +100,18 @@ static pid_t fake_pid(void){return 600;}static pid_t fake_ppid(void){return 53;}
 static void fake_exit(int code){m.exit_code=code;longjmp(done,1);}
 static int fake_open(const char*p,int flags,...)
 {
-    if(strstr(p,"/logs/wine-child-")){assert(flags&(O_EXCL|O_CREAT));va_list a;va_start(a,flags);assert(va_arg(a,int)==0600);va_end(a);return m.log_fail?-1:5;}
-    assert(flags&O_NOFOLLOW);if(strstr(p,"/mnt/sandbox/")){errno=13;return -1;}return 9;
+    if(strstr(p,"/logs/wine-child-")){assert(flags&(O_EXCL|O_CREAT));va_list a;va_start(a,flags);assert(va_arg(a,int)==0600);va_end(a);if(m.log_fail){errno=m.log_error;return -1;}return 5;}
+    assert(flags&O_NOFOLLOW);int alias=strstr(p,"/mnt/sandbox/")!=NULL;
+    if((alias&&!m.alias_open)||(m.open_mask&(1<<alias))){errno=alias?ENOENT:EACCES;return -1;}
+    m.reads=0;return 9;
 }
-static int fake_stat(const char*p,struct stat*s){assert(p&&p[0]=='/');memset(s,0,sizeof(*s));s->st_mode=S_IFDIR;return 0;}
-static int fake_fstat(int fd,struct stat*s){assert(fd==9);memset(s,0,sizeof(*s));s->st_mode=S_IFREG;s->st_size=3;s->st_ino=1;return 0;}
-static ssize_t fake_read(int fd,void*p,size_t n){assert(fd==9);if(m.reads++)return 0;assert(n==3);memcpy(p,m.bad_hash?"abd":"abc",3);return 3;}
+static int fake_stat(const char*p,struct stat*s)
+{assert(p&&p[0]=='/');if(!strcmp(p,"/data")){m.data_stats++;if(m.data_error){errno=m.data_error;return -1;}}
+ memset(s,0,sizeof(*s));s->st_mode=m.data_nondir?S_IFREG:S_IFDIR;return 0;}
+static int fake_fstat(int fd,struct stat*s){assert(fd==9);if(m.stat_error){errno=m.stat_error;return -1;}memset(s,0,sizeof(*s));s->st_mode=S_IFREG;s->st_size=3;s->st_ino=1;return 0;}
+static ssize_t fake_read(int fd,void*p,size_t n){assert(fd==9);if(m.read_error){errno=m.read_error;return -1;}if(m.reads++)return 0;assert(n==3);memcpy(p,m.bad_hash?"abd":"abc",3);return 3;}
 static ssize_t fake_write(int fd,const void*p,size_t n){assert(fd==5&&p&&n<=65536);m.writes++;size_t take=n<sizeof(m.last_write)-1?n:sizeof(m.last_write)-1;memcpy(m.last_write,p,take);m.last_write[take]=0;return m.write_short?(ssize_t)n-1:(ssize_t)n;}
-static int fake_close(int fd){assert(m.closes<20);m.closed[m.closes++]=fd;return 0;}
+static int fake_close(int fd){assert(m.closes<20);m.closed[m.closes++]=fd;if(m.close_error){errno=m.close_error;return -1;}return 0;}
 static int fake_setenv(const char*a,const char*b,int c){(void)a;(void)b;assert(c==1);return 0;}
 static int fake_attr_init(pthread_attr_t*a){(void)a;return m.attr_init_rc;}
 static int fake_attr_stack(pthread_attr_t*a,size_t n){(void)a;assert(n==(16u<<20));return m.attr_stack_rc;}
@@ -142,10 +148,12 @@ static int fake_start(PwWineChildBootstrap*b,PwNativeChildIo*i,const PwWineChild
 {assert(i==&child_io&&o);m.starts++;b->started=m.start_owns;return m.start_rc;}
 static void reset(void)
 {memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&wire_result,0,sizeof(wire_result));
+ memset(&bootstrap_failure,0,sizeof(bootstrap_failure));
  memset(&child_io,0,sizeof(child_io));memset(&active_session,0,sizeof(active_session));log_fd=-1;log_bytes=0;log_loss_marker=0;atomic_store(&log_dropped_records,0);atomic_store(&log_dropped_bytes,0);atomic_store(&log_counts_incomplete,0);atomic_store(&runtime_failure,0);atomic_store(&socket_failure_attempted,0);atomic_flag_clear(&send_claim);}
 static void run(void){if(!setjmp(done))child_main(0,NULL);}
 static unsigned closed(int fd){unsigned n=0;for(int i=0;i<m.closes;i++)n+=m.closed[i]==fd;return n;}
 static void dummy(void*p){(void)p;}
+static int external_cancel(void*p){(void)p;return 1;}
 int main(void)
 {
     reset();run();assert(m.exit_code==17&&m.prepares==1&&m.starts==1&&m.sends==3&&m.kills==1);
@@ -195,5 +203,57 @@ int main(void)
     reset();m.battle=1;m.trylock_rc=EBUSY;run();assert(m.exit_code==14&&!m.starts); /* missing initial header */
     reset();active_session.profile=PW_WC_PROFILE_BATTLENET;atomic_store(&log_dropped_bytes,ULLONG_MAX-1);dropped_log(3);
     assert(atomic_load(&log_dropped_bytes)==ULLONG_MAX&&atomic_load(&log_counts_incomplete));
+    /* Native errors are captured before the /data probe and descriptor cleanup. */
+    reset();m.log_fail=1;m.log_error=EACCES;m.data_error=ENOENT;m.close_error=EBADF;run();
+    assert(m.exit_code==14&&m.sends==2&&!m.prepares&&!m.starts&&m.data_stats==1);
+    assert(m.frames[1].failure_api==PW_WC_DIAG_LOG_OPEN&&m.frames[1].failure_raw==-1);
+    assert(m.frames[1].errno_valid&&m.frames[1].native_error==EACCES);
+    assert(m.frames[1].returned_length==PW_WC_DATA_STAT_FAILED&&m.frames[1].returned_value==ENOENT);
+    assert(closed(9)==1&&closed(3)==1&&!closed(5));
+    reset();m.log_fail=1;m.log_error=EEXIST;run();
+    assert(m.frames[1].native_error==EEXIST&&m.frames[1].returned_length==PW_WC_DATA_DIRECTORY&&!m.frames[1].returned_value);
+    reset();m.log_fail=1;m.data_nondir=1;run();
+    assert(!m.frames[1].errno_valid&&!m.frames[1].native_error&&m.frames[1].returned_length==PW_WC_DATA_NOT_DIRECTORY);
+    for(unsigned operation=0;operation<4;operation++){
+        reset();child_io=(PwNativeChildIo){.clock_ms=clock_ms,.ready=1,.last_clock=100,.stage_end=1000,.total_end=2000};
+        if(operation==0)m.open_mask=3;
+        if(operation==1){m.stat_error=EACCES;m.close_error=EBADF;}
+        if(operation==2){m.read_error=EIO;m.close_error=EBADF;}
+        if(operation==3)m.close_error=EBADF;
+        assert(runtime(NULL,PW_WINE_CHILD_NTDLL_SHA256,path,sizeof(path))==-1);
+        const unsigned apis[]={PW_WC_DIAG_RUNTIME_OPEN,PW_WC_DIAG_RUNTIME_STAT,PW_WC_DIAG_RUNTIME_READ,PW_WC_DIAG_RUNTIME_CLOSE};
+        const int errors[]={EACCES,EACCES,EIO,EBADF};
+        assert(bootstrap_failure.api==apis[operation]&&bootstrap_failure.raw==-1);
+        assert(bootstrap_failure.errno_valid&&bootstrap_failure.error==errors[operation]&&!bootstrap_failure.auxiliary);
+        assert(closed(9)==(operation?1:0));
+    }
+    /* A permitted unreadable alias must not poison successful selection. */
+    reset();child_io=(PwNativeChildIo){.clock_ms=clock_ms,.ready=1,.last_clock=100,.stage_end=1000,.total_end=2000};
+    m.open_mask=1;m.alias_open=1;
+    assert(!runtime(NULL,PW_WINE_CHILD_NTDLL_SHA256,path,sizeof(path))&&!strcmp(path,PW_WINE_CHILD_RUNTIME_ALIAS));
+    assert(!bootstrap_failure.api&&closed(9)==1);
+    /* The sole final pre-Wine failure report can survive its own failed logger,
+     * but cannot bypass transport errors, external cancellation or the clock. */
+    reset();m.write_short=1;run();
+    assert(m.exit_code==14&&m.sends==2&&m.frames[1].kind==PW_WC_FAILURE);
+    assert(m.frames[1].failure_api==PW_WC_DIAG_LOG_HEADER&&!m.starts&&closed(9)==1&&closed(5)==1&&closed(3)==1);
+    for(unsigned guard=0;guard<9;guard++){
+        reset();child_io=(PwNativeChildIo){.clock_ms=clock_ms,.cancelled=cancelled,.ready=1,.last_clock=100,.stage_end=1000,.total_end=2000};
+        PwWineChildFrame failed=session();failed.kind=PW_WC_FAILURE;failed.status=-1;
+        atomic_store(&runtime_failure,1);
+        if(guard==0)bootstrap.started=1;
+        if(guard==1)wire_result.status=PW_WC_OS;
+        if(guard==2)wire_result.delivery_uncertain=1;
+        if(guard==3)wire_result.ownership_uncertain=1;
+        if(guard==4)wire_result.cleanup_failed=1;
+        if(guard==5)child_io.cancelled=external_cancel;
+        if(guard==6)m.ms=1000;
+        if(guard==7)child_io.last_clock=101;
+        if(guard==8)atomic_flag_test_and_set(&send_claim);
+        assert(send_bootstrap_failure(&failed)==-1&&!m.sends);
+    }
+    reset();child_io=(PwNativeChildIo){.clock_ms=clock_ms,.cancelled=cancelled,.ready=1,.last_clock=99,.stage_end=1000,.total_end=2000};
+    PwWineChildFrame failed=session();failed.kind=PW_WC_FAILURE;failed.status=-1;atomic_store(&runtime_failure,1);
+    assert(!send_bootstrap_failure(&failed)&&m.sends==1&&child_io.last_clock==100&&atomic_load(&runtime_failure)==1);
     puts("wine child main: all mocked lifecycle controls passed");return 0;
 }

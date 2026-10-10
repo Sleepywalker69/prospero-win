@@ -939,3 +939,6 @@ tools/wine_workflow_join.py
 tools/wine_compile_cache.py
 tests/test_wine_build_performance.py
 tests/test_wine_compile_cache.py
+tests/bootstrap_diagnostic_bridge.h
+tests/bootstrap_diagnostic_child.c
+tests/test_bootstrap_diagnostic_flow.c

@@ -16,6 +16,26 @@ enum { PW_WC_OK, PW_WC_INVALID, PW_WC_BUDGET, PW_WC_OS, PW_WC_PROTOCOL };
 enum { PW_WC_API_NONE, PW_WC_API_CLOCK, PW_WC_API_TYPE, PW_WC_API_POLL,
        PW_WC_API_SEND, PW_WC_API_RECEIVE, PW_WC_API_CLOSE };
 
+/* FAILURE diagnostics only; the byte layout and protocol version are unchanged.
+ * Values below 0x100 remain the existing socket-setup API namespace. Native
+ * call failures retain their immediate return/errno; validation failures never
+ * invent errno. For DIRECTORY_* the auxiliary length is PREFIX or CWD. For
+ * RUNTIME_* it is the attempted root index (0 or 1). Other auxiliary values are
+ * zero except LOG_OPEN, whose two words carry the read-only /data observation
+ * and its detail as specified below. */
+enum { PW_WC_DIAG_LOG_PATH=0x100, PW_WC_DIAG_LOG_OPEN, PW_WC_DIAG_LOG_HEADER,
+       PW_WC_DIAG_PATHS_CONTROL, PW_WC_DIAG_DIRECTORY_STAT, PW_WC_DIAG_DIRECTORY_TYPE,
+       PW_WC_DIAG_RUNTIME_PATH, PW_WC_DIAG_RUNTIME_OPEN, PW_WC_DIAG_RUNTIME_STAT,
+       PW_WC_DIAG_RUNTIME_TYPE, PW_WC_DIAG_RUNTIME_SIZE, PW_WC_DIAG_RUNTIME_READ,
+       PW_WC_DIAG_RUNTIME_EXTRA_READ, PW_WC_DIAG_RUNTIME_CHANGED,
+       PW_WC_DIAG_RUNTIME_HASH, PW_WC_DIAG_RUNTIME_CLOSE, PW_WC_DIAG_BUDGET };
+enum { PW_WC_DIRECTORY_PREFIX=1, PW_WC_DIRECTORY_CWD=2 };
+/* LOG_OPEN detail: STAT_FAILED carries immediate errno (zero if unavailable),
+ * UNEXPECTED carries the actual stat return; all other details are zero. The
+ * original log-open error remains in failure_raw/native_error/errno_valid. */
+enum { PW_WC_DATA_UNOBSERVED, PW_WC_DATA_DIRECTORY, PW_WC_DATA_NOT_DIRECTORY,
+       PW_WC_DATA_STAT_FAILED, PW_WC_DATA_UNEXPECTED, PW_WC_DATA_BUDGET };
+
 /* Values, never a wire struct. The codec fixes every byte and reserved zero. */
 typedef struct PwWineChildFrame {
     uint32_t kind, sequence, parent_pid, child_pid, child_ppid, wine_pid, wine_tid;
