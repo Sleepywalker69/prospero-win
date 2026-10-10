@@ -14,7 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
-int32_t sceKernelLoadStartModule(const char *,size_t,const void *,uint32_t,const void *,int *);
+int sceSysmoduleLoadModuleInternal(unsigned,...);
+int sceSysmoduleGetModuleHandleInternal(uint32_t,int32_t *);
 int sceKernelDlsym(int32_t,const char *,void **);
 #define NET_ID UINT32_C(0x8000001c)
 #define HELPER_LIMIT (4u*1024u*1024u)
@@ -97,18 +98,11 @@ static int resolve(DataContext *c,int32_t module,const char *name,void *slot,uns
 static int net_start(DataContext *c)
 {
     if(data_budget(c,NULL))return -1;
-    int started=0;
-    int32_t module=sceKernelLoadStartModule("/system/common/lib/libSceSysmodule.sprx",0,NULL,0,NULL,&started);
-    if(module<=0)return data_fail(c,PW_WCD_MODULE_LOAD,module,0);
-    if(started)return data_fail(c,PW_WCD_MODULE_START,started,0);
+    /* Sysmodule is a checked static provider. Do not reopen a firmware path
+     * from the service child's filesystem namespace. Net stays dynamic. */
+    int rc=sceSysmoduleLoadModuleInternal(NET_ID);if(rc)return data_fail(c,PW_WCD_NET_LOAD,rc,0);
     if(data_budget(c,NULL))return -1;
-    int (*load)(unsigned)=NULL;int (*handle)(uint32_t,int32_t *)=NULL;
-    if(resolve(c,module,"sceSysmoduleLoadModuleInternal",&load,PW_WCD_SYSMODULE_LOAD)||
-       resolve(c,module,"sceSysmoduleGetModuleHandleInternal",&handle,PW_WCD_SYSMODULE_HANDLE))return -1;
-    if(data_budget(c,NULL))return -1;
-    int rc=load(NET_ID);if(rc)return data_fail(c,PW_WCD_NET_LOAD,rc,0);
-    if(data_budget(c,NULL))return -1;
-    int32_t net=-1;rc=handle(NET_ID,&net);
+    int32_t net=-1;rc=sceSysmoduleGetModuleHandleInternal(NET_ID,&net);
     if(rc||net<0)return data_fail(c,PW_WCD_NET_HANDLE,rc,0);
     if(data_budget(c,NULL))return -1;
     if(resolve(c,net,"sceNetInit",&c->net.init,PW_WCD_NET_INIT_SYMBOL)||resolve(c,net,"sceNetSocket",&c->net.socket,PW_WCD_NET_SOCKET_SYMBOL)||

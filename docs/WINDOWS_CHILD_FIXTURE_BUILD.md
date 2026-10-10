@@ -78,7 +78,7 @@ two jobs. The measured resources and chosen limit are retained in the evidence.
 - `--out`: a new owned child-output directory
 
 The output `native-wine-child-build.json` uses `pw-wine-service-child/1`. It binds
-the project, input sources, unchanged CRT/layout, ordinary libc/kernel stubs,
+the project, input sources, unchanged CRT/layout, ordinary libc/kernel/Sysmodule stubs,
 compiler/SDK, exact ntdll PRX, linked/converted/recovered bytes, import NIDs and
 provider ranks, and preload metadata before signing and after recovery. The
 child uses the high-address executable converter from title foundation 9c0b994,
@@ -351,13 +351,25 @@ source-to-binary reproducibility claim. The child hashes one bounded heap buffer
 and uploads those exact bytes, after matching the packaged helper pin. It does
 not hash and then reread a changing file.
 
-Net is resolved after HELLO using the pinned SDK's ordinary module route:
-`/system/common/lib/libSceSysmodule.sprx`, internal Net ID `0x8000001c`, and
-successful `sceNetInit() == 0`. Modules remain loaded for the process lifetime.
-The static child graph remains libc/kernel and the existing preload mask. The
-builder separately verifies the SDK providers' 12 required function exports;
-this is not proof that console firmware loads or initializes them successfully
-inside this service. No helper request is sent after a failed resolution/init.
+The child imports `sceSysmoduleLoadModuleInternal` and
+`sceSysmoduleGetModuleHandleInternal` from ordinary `libSceSysmodule.sprx`,
+using the same module API and variadic static loader declaration as the
+[native title adapter](../native/pw_agc_ps5.c). The one-ID invocation and Net
+mapping follow the [pinned SDK module source](https://github.com/ps5-payload-dev/sdk/blob/4eb701204fc3f8d31e84cf8ca272974e2be9c867/crt/rtld_sprx.c);
+that source uses a nonvariadic function pointer for its dynamic call. Its exact static provider graph
+is libc/kernel/Sysmodule, with exactly those two Sysmodule functions and the
+existing service preload mask. The child does not reopen a firmware Sysmodule
+path: the earlier path-load attempt failed with raw `0x80020002` at DATA
+operation 516 in both console profiles before Net or helper dispatch.
+
+After HELLO, the child loads internal Net ID `0x8000001c`, resolves its eight
+functions with `sceKernelDlsym`, and requires `sceNetInit() == 0`. Modules remain
+loaded for the process lifetime. The builder verifies the static Sysmodule
+imports, each actual provider/NID/relocation, and the dynamic Net export bytes;
+all eight Net calls remain forbidden as static imports. Link, conversion and
+recovered SELF checks use the same three providers. These checks do not prove
+that console firmware admits the new service dependency or initializes Net.
+No helper request is sent after a failed module load, resolution or init.
 SceNet socket IDs and inherited native fd3 stay in separate descriptor domains.
 Once data readiness observes a parent-control refusal, it suppresses the final
 diagnostic send too, even when an earlier operation remains the primary error.
@@ -399,12 +411,14 @@ successful-directory-lstat-after flags; its low 16 bits preserve the existing
 operation auxiliary. `returned_value` retains the operation detail: CONTROL
 uses the exact native poll revents mask, RESOLVE uses the following fixed index,
 and other data operations use the observed helper status. Raw return and
-immediate errno remain separate. Resolution indices are 1 Sysmodule load,
-2 Sysmodule handle query, 3 NetInit, 4 NetSocket, 5 NetConnect, 6 NetSend,
+immediate errno remain separate. Resolution indices 1 and 2 remain reserved for the historical dynamic
+Sysmodule lookups. Current indices are 3 NetInit, 4 NetSocket, 5 NetConnect, 6 NetSend,
 7 NetRecv, 8 NetSetsockopt, 9 NetSocketClose and 10 NetErrnoLoc.
 
 The compiler manifest binds the exact helper ELF, release record, helper
-manifest, protocol, generated hash and dynamic SDK provider bytes. Title and
+manifest, protocol, generated hash, static import graph and dynamic SDK provider
+bytes. Bounded failure retention includes the exact Sysmodule and Net SDK stubs
+even when the child build fails before its own provider copies are written. Title and
 archive checks compare the packaged helper and retained metadata to that child
 binding. Host controls mock native/filesystem/transport boundaries; they do not
 execute the helper or establish service-console admission. A held result needs

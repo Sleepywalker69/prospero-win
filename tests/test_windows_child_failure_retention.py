@@ -54,6 +54,21 @@ class FailureRetention(unittest.TestCase):
                                              'target/title-inspection/inspection/001-tool.log'})
         self.assertFalse(result['raw_prefix_or_registry_retained'])
 
+    def test_failed_child_build_retains_exact_module_provider_inputs(self):
+        names=('repo','title_foundation','foundation','wine_work','tls_work','title_build')
+        args=argparse.Namespace(**{name:self.root/name for name in names},wine_archive=self.root/'wine.tar.gz',
+                                sdk_source_archive=self.root/'sdk.tar.gz',out=self.root/'retained')
+        for name in names:getattr(args,name).mkdir()
+        sdk=args.title_foundation/'.deps/native/ps5-payload-sdk/target/lib';sdk.mkdir(parents=True)
+        for name in ('libSceSysmodule.so','libSceNet.so','unrelated-private.so'):
+            (sdk/name).write_bytes(('inert '+name).encode())
+        result=retention.collect(args)
+        self.assertEqual(set(result['files']),{'providers/sdk/target/lib/libSceSysmodule.so',
+                                             'providers/sdk/target/lib/libSceNet.so'})
+        for leaf in ('libSceSysmodule.so','libSceNet.so'):
+            self.assertEqual((args.out/'providers/sdk/target/lib'/leaf).read_bytes(),(sdk/leaf).read_bytes())
+        self.assertFalse(result['accepted']);self.assertFalse(result['raw_prefix_or_registry_retained'])
+
     def test_inspection_log_selection_links_and_bounds(self):
         build=self.root/'title';build.mkdir()
         sibling=self.root/'title-wine-child-title-inspection';inspection=sibling/'inspection'

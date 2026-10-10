@@ -23,8 +23,10 @@ int test_lstat(const char*,struct stat*);
 static ssize_t test_read(int,void*,size_t);
 static int test_poll(struct pollfd*,nfds_t,int),test_sleep(const struct timespec*,struct timespec*);
 static pid_t test_pid(void);static uid_t test_uid(void);static int test_setuid(uid_t);
-static int32_t test_module(const char*,size_t,const void*,uint32_t,const void*,int*);
+int32_t test_module(const char*,size_t,const void*,uint32_t,const void*,int*);
 static int test_symbol(int32_t,const char*,void**);
+int net_load(unsigned,...);
+int net_handle(uint32_t,int32_t*);
 #define open test_open
 #define fstat test_fstat
 #define close test_close
@@ -38,6 +40,8 @@ static int test_symbol(int32_t,const char*,void**);
 #define seteuid test_setuid
 #define sceKernelLoadStartModule test_module
 #define sceKernelDlsym test_symbol
+#define sceSysmoduleLoadModuleInternal net_load
+#define sceSysmoduleGetModuleHandleInternal net_handle
 #include "../native/pw_wine_child_data.c"
 #undef open
 #undef fstat
@@ -52,6 +56,8 @@ static int test_symbol(int32_t,const char*,void**);
 #undef seteuid
 #undef sceKernelLoadStartModule
 #undef sceKernelDlsym
+#undef sceSysmoduleLoadModuleInternal
+#undef sceSysmoduleGetModuleHandleInternal
 
 enum { F_STAT=1,F_OPEN,F_FSTAT,F_READ,F_CLOSE,F_MODULE,F_SYMBOL,F_NET_LOAD,F_NET_HANDLE,F_NET_INIT,F_SOCKET,F_OPTION,F_CONNECT,F_SEND,F_RECEIVE,F_SETUID,F_SLEEP,F_NET_CLOSE,F_LSTAT };
 static struct {
@@ -79,7 +85,7 @@ static int boundary(int operation)
 static int now(void *unused,uint64_t *out){(void)unused;*out=m.now;errno=ERANGE;return m.clock_fail;}
 static int stop(void *unused){(void)unused;return m.cancel;}
 static int test_poll(struct pollfd*p,nfds_t n,int timeout)
-{CHECK(n==1&&p->fd==3&&p->events==POLLIN&&timeout==0);p->revents=(short)((m.poll_at&&m.calls>=(unsigned)m.poll_at)||(m.hup_after_symbol&&m.symbols>=3)||(m.hup_after_request&&m.tx_size>8)?POLLHUP:m.poll_flags);if(m.poll_error){errno=EIO;return -1;}return p->revents?1:0;}
+{CHECK(n==1&&p->fd==3&&p->events==POLLIN&&timeout==0);p->revents=(short)((m.poll_at&&m.calls>=(unsigned)m.poll_at)||(m.hup_after_symbol&&m.symbols>=1)||(m.hup_after_request&&m.tx_size>8)?POLLHUP:m.poll_flags);if(m.poll_error){errno=EIO;return -1;}return p->revents?1:0;}
 static int test_stat(const char *path,struct stat *st)
 {CHECK(!strcmp(path,"/data"));m.stats++;int fail=boundary(F_STAT);memset(st,0,sizeof(*st));if(fail)return m.fail_result;if(m.stat_error){errno=m.stat_error;return -1;}
  if(m.missing_pair_always||m.stats<=(unsigned)m.missing_pair_count){errno=ENOENT;return -1;}
@@ -103,9 +109,9 @@ static int test_sleep(const struct timespec *duration,struct timespec *rest)
 {CHECK(duration&&!rest&&duration->tv_sec==0&&duration->tv_nsec>0&&duration->tv_nsec<=100000000);m.sleeps++;if(boundary(F_SLEEP))return m.fail_result;
  if(m.sleep_interrupts){m.sleep_interrupts--;errno=EINTR;return -1;}
  uint64_t elapsed=(uint64_t)duration->tv_nsec/1000000;if(m.short_sleep&&elapsed>1)elapsed/=2;m.now+=elapsed;if(shared_clock)*shared_clock=m.now;return 0;}
-static int net_load(unsigned id){CHECK(id==UINT32_C(0x8000001c));m.loads++;return boundary(F_NET_LOAD)?m.fail_result:0;}
-static int net_handle(uint32_t id,int32_t *handle){CHECK(id==UINT32_C(0x8000001c)&&handle&&*handle==-1);m.handles++;int fail=boundary(F_NET_HANDLE);*handle=m.net_module_value;return fail?m.fail_result:0;}
-static int net_init(void){m.inits++;return boundary(F_NET_INIT)?m.fail_result:0;}
+int net_load(unsigned id,...){CHECK(id==UINT32_C(0x8000001c)&&!m.modules&&!m.loads&&!m.handles&&!m.symbols);m.loads++;return boundary(F_NET_LOAD)?m.fail_result:0;}
+int net_handle(uint32_t id,int32_t *handle){CHECK(id==UINT32_C(0x8000001c)&&handle&&*handle==-1&&m.loads==1&&!m.modules&&!m.handles&&!m.symbols);m.handles++;int fail=boundary(F_NET_HANDLE);*handle=m.net_module_value;return fail?m.fail_result:0;}
+static int net_init(void){CHECK(m.loads==1&&m.handles==1&&m.symbols==8&&!m.modules);m.inits++;return boundary(F_NET_INIT)?m.fail_result:0;}
 static int net_socket(const char *name,int family,int type,int protocol)
 {CHECK(name&&family==2&&type==1&&protocol==6);m.sockets++;if(boundary(F_SOCKET))return m.fail_result;return m.socket_value;}
 static int net_connect(int fd,const struct sockaddr *address,socklen_t size)
@@ -121,13 +127,12 @@ static int net_receive(int fd,void *bytes,size_t n,int flags)
  size_t left=m.rx_size-m.rx_at;if(n>left)n=left;if(m.partial&&n>5)n=5;memcpy(bytes,m.incoming+m.rx_at,n);m.rx_at+=(unsigned)n;return (int)n;}
 static int net_close(int fd){CHECK(fd==m.socket_value&&!m.net_closes);m.net_closes++;int fail=boundary(F_NET_CLOSE);m.net_errno=EBADF;return fail?m.fail_result:m.net_close_error;}
 static int *net_errno(void){return &m.net_errno;}
-static int32_t test_module(const char *path,size_t n,const void*a,uint32_t flags,const void*b,int *started)
+int32_t test_module(const char *path,size_t n,const void*a,uint32_t flags,const void*b,int *started)
 {CHECK(!strcmp(path,"/system/common/lib/libSceSysmodule.sprx")&&!n&&!a&&!flags&&!b&&started);m.modules++;int fail=boundary(F_MODULE);*started=m.module_started;return fail?m.fail_result:m.module_value;}
 #define RESOLVE(name,fn) if(!strcmp(symbol,name)){__typeof__(&fn) pointer=&fn;memcpy(address,&pointer,sizeof(pointer));return 0;}
 static int test_symbol(int32_t module,const char *symbol,void **address)
-{CHECK(symbol&&address&&!*address&&(module==21||module==m.net_module_value));m.symbols++;if(boundary(F_SYMBOL))return m.fail_result;
+{CHECK(symbol&&address&&!*address&&module==m.net_module_value&&m.loads==1&&m.handles==1&&!m.modules);m.symbols++;if(boundary(F_SYMBOL))return m.fail_result;
  if(m.null_symbol==(int)m.symbols)return 0;
- RESOLVE("sceSysmoduleLoadModuleInternal",net_load) RESOLVE("sceSysmoduleGetModuleHandleInternal",net_handle)
  RESOLVE("sceNetInit",net_init) RESOLVE("sceNetSocket",net_socket) RESOLVE("sceNetConnect",net_connect)
  RESOLVE("sceNetSend",net_send) RESOLVE("sceNetRecv",net_receive) RESOLVE("sceNetSetsockopt",net_option)
  RESOLVE("sceNetSocketClose",net_close) RESOLVE("sceNetErrnoLoc",net_errno)
@@ -136,18 +141,23 @@ static int test_symbol(int32_t module,const char *symbol,void **address)
 static void message(unsigned kind,unsigned status)
 {struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),kind,LAPY_ELEVATION_FILESYSTEM,600,status};CHECK(m.rx_size+sizeof(f)<=sizeof(m.incoming));memcpy(m.incoming+m.rx_size,&f,sizeof(f));m.rx_size+=sizeof(f);}
 static void reset(void)
-{shared_clock=NULL;memset(&m,0,sizeof(m));memset(&result,0,sizeof(result));m.now=1000;m.module_value=21;m.net_module_value=33;m.socket_value=42;m.native_errno=EACCES;m.net_errno=EIO;m.fail_result=-1;memcpy(m.helper,original_helper,8);
+{shared_clock=NULL;memset(&m,0,sizeof(m));memset(&result,0,sizeof(result));m.now=1000;m.module_value=(int32_t)UINT32_C(0x80020002);m.net_module_value=33;m.socket_value=42;m.native_errno=EACCES;m.net_errno=EIO;m.fail_result=-1;memcpy(m.helper,original_helper,8);
  io=(PwNativeChildIo){.clock_ms=now,.cancelled=stop,.ready=1,.last_clock=1000,.stage_end=31000,.total_end=61000};
  PwWineChildHash h;pw_wine_child_hash_init(&h);CHECK(!pw_wine_child_hash_update(&h,m.helper,8));pw_wine_child_hash_final(&h,helper_hash);}
 static void success_responses(void){message(LAPY_ELEVATION_PREPARE,0);message(LAPY_ELEVATION_RESPONSE,0);}
 void data_adapter_fixture_reset(uint64_t *clock,unsigned mode)
-{reset();shared_clock=clock;m.now=*clock;m.data_before=mode==0;m.partial=1;if(mode==1)success_responses();else if(mode==2)message(LAPY_ELEVATION_PREPARE,0);else if(mode==3)message(LAPY_ELEVATION_RESPONSE,LAPY_ELEVATION_TARGET_MISMATCH);else if(mode==4)m.poll_flags=POLLHUP;else if(mode==5)m.null_symbol=3;else if(mode==6){m.null_symbol=3;m.hup_after_symbol=1;}else if(mode==7){success_responses();m.hup_after_request=1;}else if(mode==8){success_responses();m.data_before=1;m.lstat_error=EPERM;}else if(mode==9){success_responses();m.missing_pair_count=3;}}
+{reset();shared_clock=clock;m.now=*clock;m.data_before=mode==0;m.partial=1;if(mode==1)success_responses();else if(mode==2)message(LAPY_ELEVATION_PREPARE,0);else if(mode==3)message(LAPY_ELEVATION_RESPONSE,LAPY_ELEVATION_TARGET_MISMATCH);else if(mode==4)m.poll_flags=POLLHUP;else if(mode==5)m.null_symbol=1;else if(mode==6){m.null_symbol=1;m.hup_after_symbol=1;}else if(mode==7){success_responses();m.hup_after_request=1;}else if(mode==8){success_responses();m.data_before=1;m.lstat_error=EPERM;}else if(mode==9){success_responses();m.missing_pair_count=3;}}
 void data_adapter_fixture_counts(unsigned *calls,unsigned *clones,unsigned *sends)
 {*calls=m.calls;*clones=m.clones;*sends=m.sends;}
 #ifndef PW_WINE_DATA_COMPOSED
 static int run(void){return pw_wine_child_data_prepare(&result,&io,helper_hash);}
 int main(void)
 {
+#ifdef PW_DATA_MODULE_ROUTE_RED
+ reset();success_responses();int module_rc=run();
+ printf("Sysmodule route: rc=%d api=%u raw=%d absolute_loads=%u static_loads=%u static_handles=%u Net_symbols=%u ready=%u\n",module_rc,result.api,result.raw,m.modules,m.loads,m.handles,m.symbols,result.ready);fflush(stdout);
+ CHECK(!module_rc&&result.ready&&!m.modules&&m.loads==1&&m.handles==1&&m.symbols==8);return 0;
+#endif
 #ifdef PW_DATA_ABSENT_RED
  reset();m.lstat_error=ENOENT;success_responses();int missing=run();
  printf("paired absence: rc=%d ready=%u stat_error=%d lstat_error=%d helper_opens=%u local_preparations=%u\n",missing,result.ready,result.stat_before_error,result.lstat_before_error,m.opens,m.clones);fflush(stdout);
@@ -158,8 +168,9 @@ int main(void)
  printf("stat visible/lstat EPERM: rc=%d ready=%u lstats=%u helper_opens=%u local_preparations=%u\n",red,result.ready,m.lstats,m.opens,m.clones);fflush(stdout);
  CHECK(m.lstats>=1&&m.opens==1&&m.clones==1);return 0;
 #endif
- reset();m.data_before=1;CHECK(!run()&&result.ready&&result.data_before&&result.data_after&&!result.possible_apply&&!m.opens&&!m.modules&&!m.clones&&!m.sleeps);
+ reset();m.data_before=1;CHECK(!run()&&result.ready&&result.data_before&&result.data_after&&!result.possible_apply&&!m.opens&&!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.clones&&!m.sleeps);
  reset();success_responses();CHECK(!run());CHECK(result.ready&&result.possible_apply&&result.terminal&&result.data_after&&result.settled_ms>=1000&&m.clones==1&&m.closes==1&&m.net_closes==1);
+ CHECK(!m.modules&&m.loads==1&&m.handles==1&&m.symbols==8);
  CHECK(m.tx_size==56&&!memcmp(m.upload,original_helper,8));CHECK(io.stage_end==31000&&io.total_end==61000);
  reset();m.partial=1;m.mutate_after_close=1;success_responses();CHECK(!run()&&!memcmp(m.upload,original_helper,8));
  for(unsigned status=0;status<=11;status++){
@@ -223,15 +234,36 @@ int main(void)
   CHECK(result.api==(which?PW_WCD_PREPARED:PW_WCD_REQUEST)&&m.net_closes==1&&m.closes==1);
  }
 
- const unsigned symbols[]={PW_WCD_SYSMODULE_LOAD,PW_WCD_SYSMODULE_HANDLE,PW_WCD_NET_INIT_SYMBOL,PW_WCD_NET_SOCKET_SYMBOL,PW_WCD_NET_CONNECT_SYMBOL,PW_WCD_NET_SEND_SYMBOL,PW_WCD_NET_RECV_SYMBOL,PW_WCD_NET_OPTION_SYMBOL,PW_WCD_NET_CLOSE_SYMBOL,PW_WCD_NET_ERRNO_SYMBOL};
- for(unsigned i=0;i<10;i++){
+ const unsigned symbols[]={PW_WCD_NET_INIT_SYMBOL,PW_WCD_NET_SOCKET_SYMBOL,PW_WCD_NET_CONNECT_SYMBOL,PW_WCD_NET_SEND_SYMBOL,PW_WCD_NET_RECV_SYMBOL,PW_WCD_NET_OPTION_SYMBOL,PW_WCD_NET_CLOSE_SYMBOL,PW_WCD_NET_ERRNO_SYMBOL};
+ for(unsigned i=0;i<8;i++){
   reset();m.null_symbol=(int)i+1;CHECK(run()&&result.api==PW_WCD_RESOLVE&&result.raw==0&&!result.errno_valid&&result.resolution_index==symbols[i]&&!result.possible_apply&&!m.sends);
  }
- reset();m.module_value=0;CHECK(run()&&result.api==PW_WCD_MODULE_LOAD&&result.raw==0&&!result.errno_valid&&!m.symbols);
- reset();m.module_started=7;CHECK(run()&&result.api==PW_WCD_MODULE_START&&result.raw==7&&!m.symbols);
+ /* The old path-load failures are historical controls. No absolute Sysmodule
+  * loader call is allowed on the new static-import route. */
+ reset();m.module_value=0;m.module_started=7;success_responses();CHECK(!run()&&result.ready&&!m.modules&&m.loads==1&&m.handles==1);
  reset();success_responses();CHECK(!run());calls=m.calls;memcpy(operations,m.ops,calls*sizeof(int));
  for(unsigned i=0;i<calls;i++)if(operations[i]==F_SYMBOL||operations[i]==F_NET_LOAD||operations[i]==F_NET_HANDLE||operations[i]==F_NET_INIT||operations[i]==F_OPTION||operations[i]==F_CONNECT){
   reset();success_responses();m.fail_at=(int)i+1;m.fail_result=7;CHECK(run()&&!result.ready&&result.raw==7&&!result.errno_valid);
+ }
+ /* Static Sysmodule failures retain their native return, not stale errno. */
+ reset();success_responses();CHECK(!run());unsigned load_position=0,handle_position=0;
+ for(unsigned i=0;i<m.calls;i++){
+  if(m.ops[i]==F_NET_LOAD)load_position=i+1;
+  if(m.ops[i]==F_NET_HANDLE)handle_position=i+1;
+ }
+ CHECK(load_position&&handle_position&&load_position<handle_position);
+ const int native_failures[]={(int32_t)UINT32_C(0x80020002),-1,7};
+ for(unsigned which=0;which<2;which++)for(unsigned code=0;code<3;code++){
+  reset();m.fail_at=(int)(which?handle_position:load_position);m.fail_result=native_failures[code];
+  CHECK(run()&&!result.ready&&!result.possible_apply);
+  CHECK(result.api==(which?PW_WCD_NET_HANDLE:PW_WCD_NET_LOAD)&&result.raw==native_failures[code]&&!result.errno_valid&&!result.native_error);
+  CHECK(!m.modules&&m.loads==1&&m.handles==which&&!m.symbols&&!m.sockets&&!m.sends&&m.closes==1&&!m.net_closes);
+ }
+ /* A zero return with an untouched/negative module handle is still refusal. */
+ for(unsigned which=0;which<2;which++){
+  reset();m.net_module_value=which?-7:-1;
+  CHECK(run()&&!result.ready&&result.api==PW_WCD_NET_HANDLE&&result.raw==0&&!result.errno_valid);
+  CHECK(m.loads==1&&m.handles==1&&!m.symbols&&!m.sockets&&!result.possible_apply&&m.closes==1);
  }
  /* stat-visible does not establish child access without the lstat probe. */
  reset();m.data_before=1;m.lstat_error=EPERM;success_responses();CHECK(!run()&&result.ready&&m.opens==1&&m.clones==1&&result.data_before&&!result.lstat_before&&result.lstat_after);
@@ -260,12 +292,12 @@ int main(void)
  /* Native sleep duration is not elapsed-clock evidence. */
  reset();m.sleep_interrupts=3;success_responses();CHECK(!run()&&result.ready&&result.settled_ms==1000&&m.sleeps==13&&m.now==2000);
  reset();m.short_sleep=1;success_responses();CHECK(!run()&&result.ready&&result.settled_ms==1000&&m.sleeps>10&&m.now==2000);
- /* This output handle may be zero even though LoadStartModule must be positive. */
- reset();m.net_module_value=0;success_responses();CHECK(!run()&&result.ready&&m.symbols==10&&m.handles==1);
+ /* A successful static GetModuleHandle output0 remains a valid Net handle. */
+ reset();m.net_module_value=0;success_responses();CHECK(!run()&&result.ready&&m.symbols==8&&m.handles==1&&!m.modules);
  reset();m.clock_fail=1;CHECK(run()&&result.api==PW_WCD_BUDGET&&!m.calls&&io.last_clock==1000);
  reset();m.now=999;CHECK(run()&&result.api==PW_WCD_BUDGET&&!m.calls&&io.last_clock==1000);
  reset();success_responses();CHECK(!run());unsigned module_position=0;
- for(unsigned i=0;i<m.calls;i++)if(m.ops[i]==F_MODULE)module_position=i+1;
+ for(unsigned i=0;i<m.calls;i++)if(m.ops[i]==F_NET_LOAD)module_position=i+1;
  CHECK(module_position);reset();m.now=2000;m.backward_at=(int)module_position;success_responses();
  CHECK(run()&&result.api==PW_WCD_BUDGET&&io.last_clock==2000&&!m.symbols&&!m.sockets&&!result.ready);
  printf("Actual child-data adapter with mocked native boundaries: %u checks passed\n",checks);return 0;
