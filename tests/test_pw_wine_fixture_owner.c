@@ -76,6 +76,9 @@ static struct {
     int extra_right,wire_uncertain,auto_present,prepare_cancel,prepare_expire;
     int record_action,step_result,root_during_send,wire_cancelled;
     int add_cancel,add_partial_failure;
+    int helper_open_error[2],helper_mismatch[2],fd_helper[128];
+    unsigned helper_matches,launch_paths;
+    int64_t launch_read_index,launch_service_index;
     const char *record_event;
     PwWineChildFrame sent;
 } m;
@@ -111,6 +114,8 @@ static void record_cb(void *c,const char *event,uint64_t generation,int64_t a,in
         m.first_failures++;m.first_index=m.records;m.first_api=a;m.first_raw=b;m.first_errno=d;
         if(m.reenter_failure){PwWineFixtureSocketResult again={.api=999,.errno_valid=1,.native_error=ERANGE};m.reenter_failure=0;pw_wine_fixture_owner_socket_failure(&owner,&again);}
     }
+    if(!strcmp(event,"helper_match"))m.helper_matches++;
+    if(!strcmp(event,"launch_path")){m.launch_paths++;m.launch_read_index=a;m.launch_service_index=b;}
     if(!strcmp(event,"startup_result_missing"))m.missing_result++;
     if(!strcmp(event,"root_release_safe")){CHECK(!pw_wine_fixture_owner_release_ready(&owner));m.publication_samples++;m.release_index=m.records;}
     if(m.record_event&&!strcmp(event,m.record_event)){
@@ -129,7 +134,10 @@ static int mock_open(const char *path,int flags,...)
 {
     CHECK(path&&(flags&O_NOFOLLOW)&&(flags&O_NONBLOCK));m.opens++;
     if(m.open_error){errno=EACCES;return -1;}
-    int fd=(int)m.next_fd++;CHECK(fd>=10&&fd<128);m.opened[fd]=1;return fd;
+    int alias=-1;
+    for(unsigned i=0;i<2;i++)if(!strcmp(path,helpers[i]))alias=(int)i;
+    if(alias>=0&&m.helper_open_error[alias]){errno=m.helper_open_error[alias];return -1;}
+    int fd=(int)m.next_fd++;CHECK(fd>=10&&fd<128);m.opened[fd]=1;m.fd_helper[fd]=alias+1;return fd;
 }
 static int mock_fstat(int fd,struct stat *st)
 {CHECK(fd>=10&&fd<128&&m.opened[fd]);if(m.stat_error){errno=EIO;return -1;}memset(st,0,sizeof(*st));st->st_mode=S_IFREG;st->st_size=4;return 0;}
@@ -138,7 +146,9 @@ static ssize_t mock_read(int fd,void *out,size_t bytes)
     CHECK(fd>=10&&fd<128&&m.opened[fd]&&out&&bytes);m.reads++;
     if(m.read_error){errno=EIO;return -1;}
     size_t left=4-m.positions[fd];if(bytes>left)bytes=left;
-    memcpy(out,helper_bytes+m.positions[fd],bytes);m.positions[fd]+=(unsigned)bytes;return (ssize_t)bytes;
+    memcpy(out,helper_bytes+m.positions[fd],bytes);
+    if(bytes&&m.fd_helper[fd]&&m.helper_mismatch[m.fd_helper[fd]-1])((unsigned char*)out)[0]^=1;
+    m.positions[fd]+=(unsigned)bytes;return (ssize_t)bytes;
 }
 static int mock_close(int fd)
 {CHECK(fd>=0&&fd<128);CHECK(!m.closes[fd]);m.closes[fd]++;errno=EBADF;return m.close_error;}
@@ -623,8 +633,81 @@ static void launch_cancel_publication_tests(void)
     }
 }
 
+
+static Generation *bound_read_alias(unsigned profile,unsigned absent_mask)
+{
+    reset(profile);
+    for(unsigned i=0;i<2;i++)if(absent_mask&(1u<<i))m.helper_open_error[i]=ENOENT;
+    CHECK(!pw_wine_fixture_owner_pump(&owner));
+    CHECK(atomic_load(&owner.initialized)&&owner.helper_index==((absent_mask&1)?1:0));
+    CHECK(m.helper_matches==(absent_mask?1u:2u));
+    for(unsigned fd=10;fd<m.next_fd;fd++)CHECK(m.closes[fd]==1);
+    uint64_t id=0;
+    const char *path=profile==1?owner.config.child_unix_path:"/data/prospero-win/prefixes/battlenet-experimental-v1/drive_c/Agent.exe";
+    CHECK(!provider.admit(&owner,44,45,PW_WINE_FIXTURE_AMD64,path,&id));
+    CHECK(!provider.bind_process(&owner,44,45,46,&id));
+    Generation *g=find(&owner,id);CHECK(g);return g;
+}
+static void helper_alias_tests(void)
+{
+    /* The mock gives parent reads and service dispatch distinct contracts.
+     * This asserts the proposed fixed /app0 dispatch, not its firmware support. */
+    for(unsigned profile=1;profile<=2;profile++)for(unsigned index=0;index<3;index++)for(unsigned rejected=0;rejected<=1;rejected++){
+        const unsigned missing_order[]={1,0,2};unsigned missing=missing_order[index];
+        Generation *g=bound_read_alias(profile,missing);m.sleep_action=1;
+        if(rejected)m.add_result=-2147352574;
+        uint32_t status=provider.spawn(&owner,g->generation,70,46,47);
+        CHECK(status==(rejected?WF_BAD:WF_OK));
+        CHECK(m.adds==1&&m.launch_paths==1);
+        CHECK(m.launch_read_index==owner.helper_index&&m.launch_service_index==0);
+        CHECK(g->arguments[0]==helpers[0]&&!strcmp(g->arguments[0],"/app0/native-wine-child.self"));
+        if(rejected){
+            for(unsigned n=0;n<3;n++)pw_wine_fixture_owner_pump(&owner);
+            CHECK(provider.spawn(&owner,g->generation,70,46,47)==WF_BAD);
+            CHECK(m.adds==1&&!m.kills&&!m.sends&&!m.receives);
+            CHECK(atomic_load(&owner.uncertain)&&owner.failure_api==API_ADD);
+            CHECK(m.closes[71]==1&&m.closes[80]==1&&m.closes[81]==1&&!m.closes[70]);
+        }else CHECK(m.sends==1&&m.receives==2&&atomic_load(&g->state)==G_RUNNING);
+    }
+}
+static void helper_identity_tests(void)
+{
+    for(unsigned bad=0;bad<4;bad++){
+        reset(1);
+        if(bad==0)m.helper_open_error[0]=m.helper_open_error[1]=ENOENT;
+        if(bad==1){m.helper_open_error[0]=ENOENT;m.helper_mismatch[1]=1;}
+        if(bad==2)m.helper_mismatch[0]=1; /* Other alias being valid is no escape. */
+        if(bad==3)m.helper_mismatch[1]=1; /* Earlier valid alias does not excuse mismatch. */
+        CHECK(pw_wine_fixture_owner_pump(&owner)!=0);
+        CHECK(atomic_load(&owner.blocked)&&owner.failure_api==API_IMAGE);
+        CHECK(!m.adds&&!m.pairs&&!m.dups&&!m.sends&&!m.receives&&!m.launch_paths);
+        for(unsigned fd=10;fd<m.next_fd;fd++)CHECK(m.closes[fd]==1);
+        uint64_t out=UINT64_MAX;
+        CHECK(provider.admit(&owner,44,45,PW_WINE_FIXTURE_AMD64,owner.config.child_unix_path,&out)!=WF_OK);
+        CHECK(out==UINT64_MAX&&!atomic_load(&owner.count));
+    }
+}
+static void launch_path_callback_tests(void)
+{
+    for(unsigned action=1;action<=2;action++){
+        Generation *g=bound_read_alias(1,1);m.sleep_action=1;
+        m.record_event="launch_path";m.record_action=(int)action;
+        uint32_t status=provider.spawn(&owner,g->generation,70,46,47);
+        printf("launch_path callback: action=%u status=%08x adds=%u launch_possible=%u\n",
+               action,status,m.adds,g->launch_possible);fflush(stdout);
+        CHECK(m.launch_paths==1&&!m.adds&&!g->launch_possible&&!g->service_id);
+        CHECK(status==(action==1?WF_CANCELLED:WF_TIMEOUT));
+        CHECK(!m.sends&&!m.receives&&!m.kills&&!atomic_load(&owner.uncertain));
+        CHECK(m.closes[71]==1&&m.closes[80]==1&&m.closes[81]==1&&!m.closes[70]);
+        CHECK(atomic_load(&g->state)==G_RETIRED);
+    }
+}
+
 int main(int argc,char **argv)
 {
+    if(argc==2&&!strcmp(argv[1],"helper-alias")){helper_alias_tests();return 0;}
+    if(argc==2&&!strcmp(argv[1],"helper-identity")){helper_identity_tests();return 0;}
+    if(argc==2&&!strcmp(argv[1],"launch-path-stop")){launch_path_callback_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"launch-failure")){launch_failure_tests(0);return 0;}
     if(argc==2&&!strcmp(argv[1],"launch-close-failure")){launch_failure_tests(1);return 0;}
     if(argc==2&&!strcmp(argv[1],"launch-wait-status")){launch_wait_status_tests();return 0;}
@@ -633,6 +716,6 @@ int main(int argc,char **argv)
     if(argc==2&&!strcmp(argv[1],"retired-missing")){retired_missing_result();return 0;}
     if(argc==2&&!strcmp(argv[1],"wire-root-closure")){wire_root_closure();return 0;}
     if(argc==2&&!strcmp(argv[1],"seal-race")){seal_race_test();return 0;}
-    init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();
+    init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();helper_alias_tests();helper_identity_tests();launch_path_callback_tests();
     printf("Actual Wine owner with mocked native/transport boundaries: %u checks passed\n",checks);return 0;
 }

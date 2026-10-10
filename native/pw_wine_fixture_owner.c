@@ -556,14 +556,17 @@ static void start_generation(PwWineFixtureOwner *o,Generation *g)
     memset(&g->options,0,sizeof(g->options));g->options.size=sizeof(g->options);
     g->options.fd=g->passed_fd;g->options.other[0]=UINT32_MAX;
     uint64_t preload=UINT64_C(0x8000000000000002);memcpy(&g->options.other[3],&preload,sizeof(preload));
-    g->arguments[0]=helpers[o->helper_index];g->arguments[1]=NULL;
+    /* The parent read alias may change after elevation. Keep the service call
+     * on the demonstrated app-relative path instead of passing that read alias. */
+    g->arguments[0]=helpers[0];g->arguments[1]=NULL;
     if(budget(o,g,1)){retire(o,g);return;}
     /* Persist intent before dispatch. The call's synchronous duration is not
      * established by the protocol deadline; a late return is still owned. */
     g->launch_possible=1;atomic_store_explicit(&g->state,G_STARTING,memory_order_release);
     record(o,"launch_possible",g,o->app_id,o->helper_index,0);
+    record(o,"launch_path",g,o->helper_index,0,0);
     if(budget(o,g,1)){g->launch_possible=0;retire(o,g);return;}
-    rc=sceSystemServiceAddLocalProcess(o->app_id,helpers[o->helper_index],g->arguments,&g->options);
+    rc=sceSystemServiceAddLocalProcess(o->app_id,helpers[0],g->arguments,&g->options);
     record(o,"launch_return",g,rc,o->app_id,0);
     if(rc<=0){
         atomic_store_explicit(&g->launch_failed,1,memory_order_release);
