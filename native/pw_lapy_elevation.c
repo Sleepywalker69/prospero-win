@@ -93,9 +93,23 @@ static int status_errno(uint32_t status)
     }
 }
 
-static int exchange(int socket, struct lapy_elevation_message *request)
+static int terminal_status(uint32_t status, int prepared)
+{
+    if (!prepared)
+        return status >= LAPY_ELEVATION_INVALID_REQUEST && status <= LAPY_ELEVATION_TARGET_MISMATCH;
+    return status == LAPY_ELEVATION_OK || status == LAPY_ELEVATION_TARGET_MISMATCH ||
+           status == LAPY_ELEVATION_UNAVAILABLE || status == LAPY_ELEVATION_PREPARE_FAILED ||
+           status == LAPY_ELEVATION_APPLY_FAILED || status == LAPY_ELEVATION_TRANSPORT_ERROR ||
+           status == LAPY_ELEVATION_PROTOCOL_ERROR;
+}
+
+static int exchange(int socket, struct lapy_elevation_message *request,
+                    PwLapyElevationResult *detail)
 {
     struct lapy_elevation_message message;
+    /* Mark before the first possibly delivered REQUEST byte. A failed send
+     * cannot recall bytes; uploading the ELF alone does not target this PID. */
+    detail->possible_apply = 1;
     if (send_all(socket, request, sizeof(*request)) ||
         receive_all(socket, &message, sizeof(message))) {
         errno = errno ? errno : EIO;
@@ -104,10 +118,12 @@ static int exchange(int socket, struct lapy_elevation_message *request)
     if (message_matches(&message, request, LAPY_ELEVATION_RESPONSE)) {
         /* A successful response is only valid after PREPARE/PREPARED. Without
          * that handshake the target credential was never cloned natively. */
-        if (message.status == LAPY_ELEVATION_OK) {
+        if (!terminal_status(message.status, 0)) {
             errno = EPROTO;
             return -1;
         }
+        detail->terminal = 1;
+        detail->helper_status = message.status;
         errno = status_errno(message.status);
         return -1;
     }
@@ -124,22 +140,30 @@ static int exchange(int socket, struct lapy_elevation_message *request)
      * after the helper has validated the requested PID and title. */
     struct lapy_elevation_message prepared = *request;
     prepared.kind = LAPY_ELEVATION_PREPARED;
-    if (seteuid(geteuid()) != 0) prepared.status = LAPY_ELEVATION_PREPARE_FAILED;
+    int prepare_failed = seteuid(geteuid()) != 0;
+    if (prepare_failed) prepared.status = LAPY_ELEVATION_PREPARE_FAILED;
     if (send_all(socket, &prepared, sizeof(prepared)) ||
         receive_all(socket, &message, sizeof(message))) {
         errno = errno ? errno : EIO;
         return -1;
     }
-    if (!message_matches(&message, request, LAPY_ELEVATION_RESPONSE)) {
+    if (!message_matches(&message, request, LAPY_ELEVATION_RESPONSE) ||
+        !terminal_status(message.status, 1) ||
+        (prepare_failed && message.status == LAPY_ELEVATION_OK)) {
         errno = EPROTO;
         return -1;
     }
+    detail->terminal = 1;
+    detail->helper_status = message.status;
     errno = status_errno(message.status);
     return message.status == LAPY_ELEVATION_OK ? 0 : -1;
 }
 
-int pw_lapy_elevation_request(int32_t pid)
+int pw_lapy_elevation_request_result(int32_t pid, PwLapyElevationResult *detail)
 {
+    PwLapyElevationResult local;
+    if (!detail) detail = &local;
+    memset(detail, 0, sizeof(*detail));
     struct stat st;
     struct pw_lapy_sockaddr_in address;
     struct lapy_elevation_message request = {
@@ -196,7 +220,7 @@ int pw_lapy_elevation_request(int32_t pid)
             goto done;
         }
     }
-    if (exchange(socket, &request) == 0) result = 0;
+    if (exchange(socket, &request, detail) == 0) result = 0;
     else saved_errno = errno ? errno : EIO;
 
 done:
@@ -204,4 +228,9 @@ done:
     if (helper >= 0) (void)close(helper);
     if (result) errno = saved_errno;
     return result;
+}
+
+int pw_lapy_elevation_request(int32_t pid)
+{
+    return pw_lapy_elevation_request_result(pid, NULL);
 }

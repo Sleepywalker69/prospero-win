@@ -1011,3 +1011,11 @@ tools/check_wine_network_profile.py
 tests/test_wine_network_title_build.py
 tests/test_network_workflow.py
 tests/test_windows_child_network_package.py
+
+# Root helper terminal-outcome regression controls.
+tests/test_pw_lapy_elevation_outcome.c
+
+# In-process server fatal diagnostics independent of stderr descriptors.
+wine/patches/0920-server-fatal-output-sink.patch
+tests/test_wine_server_fatal.py
+docs/WINE_SERVER_FATAL_DIAGNOSTICS.md

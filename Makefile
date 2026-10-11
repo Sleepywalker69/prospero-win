@@ -173,6 +173,8 @@ $(eval $(call test_rule,test_pw_data_mount,tests/test_pw_data_mount.c native/pw_
 PW_DATA_MOUNT_TEST_FLAGS := -DPW_DATA_MOUNT_HOST_TEST -DPW_DATA_MOUNT_PATH='"/tmp/pw_dm_data"' -DPW_DATA_MOUNT_WAIT_MS=200 -DPW_DATA_MOUNT_POLL_MS=50
 $(eval $(call test_rule,test_pw_data_mount_native,tests/test_pw_data_mount_native.c native/pw_data_mount.c,$(PW_DATA_MOUNT_TEST_FLAGS)))
 PW_LAPY_ELEVATION_TEST_FLAGS := -DPW_LAPY_HELPER_PATH='"/tmp/pw_lapy_test_helper"'
+$(eval $(call test_rule,test_pw_lapy_elevation_outcome,tests/test_pw_lapy_elevation_outcome.c,-I.))
+$(BUILD)/test_pw_lapy_elevation_outcome: native/pw_lapy_elevation.c
 $(eval $(call test_rule,test_pw_native_child_protocol,tests/test_pw_native_child_protocol.c native/pw_native_child_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_protocol,tests/test_pw_native_peer_protocol.c native/pw_native_peer_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_worker,tests/test_pw_native_peer_worker.c,))
@@ -318,7 +320,7 @@ TESTS := test_wine_net_title test_wine_net_disabled test_wine_net_installer test
 	test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top test_pw_x86_engine \
 	test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle test_pw_videoout_layout \
-	test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount test_d3d9_getter_wire test_pw_data_mount_native test_pw_lapy_elevation test_d3d9_device_wire \
+	test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount test_d3d9_getter_wire test_pw_data_mount_native test_pw_lapy_elevation test_pw_lapy_elevation_outcome test_d3d9_device_wire \
 	test_d3d9_command_wire test_vk_present_interval test_pw_ws2_32_console test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe test_native_fd_mock \
 	test_pw_native_fd_report test_pw_native_child_capabilities test_pw_native_fd_worker test_pw_native_fd_controller test_pw_native_peer_protocol test_pw_native_peer_controller test_pw_native_peer_worker \
 	test_pw_native_peer_probe test_pw_native_socket_diagnostic test_pw_native_service_packet test_pw_native_service_packet_worker test_pw_native_service_worker test_pw_native_service_child test_pw_native_suite
@@ -356,6 +358,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 		echo "ps5 extended keys: configured Wine source is missing or invalid: $(WINE_COMPOSED_SOURCE)" >&2; exit 2; \
 	fi
 	python3 tests/test_wine_child_integration.py
+	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_server_fatal.py
 	python3 tests/test_wine_build_performance.py
 	python3 tests/test_wine_compile_cache.py
 	python3 tests/test_wine_cache_incremental.py

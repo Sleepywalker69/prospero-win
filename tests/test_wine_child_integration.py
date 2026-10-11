@@ -450,6 +450,71 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
             subprocess.run([str(path / 'test')], check=True)
 
 
+    def test_actual_root_helper_hold(self):
+        source = (ROOT / 'native/wine64_main.c').read_text()
+        code = r'''
+        #define _DEFAULT_SOURCE
+        #include <assert.h>
+        #include <setjmp.h>
+        #include <stdarg.h>
+        #include <stdio.h>
+        #include <string.h>
+        #include "pw_data_mount.h"
+        #define PW_WINE64_ROOT_DATA "/data/prospero-win"
+        static PwDataMountResult result;
+        static int status, requests, sleeps, logs;
+        static char messages[4096];
+        static jmp_buf held;
+        static void log_mock(const char *format,...) {
+            va_list args; va_start(args,format);
+            size_t offset=strlen(messages);
+            vsnprintf(messages+offset,sizeof(messages)-offset,format,args);
+            va_end(args);logs++;
+        }
+        #define PS5LOG_LOG log_mock
+        static int fake_usleep(unsigned usec) {
+            assert(usec==100000);
+            if(++sleeps==4)longjmp(held,1);
+            return -1; /* An interrupted/failed sleep must never release this PID. */
+        }
+        #define usleep fake_usleep
+        int pw_data_mount_request(PwDataMountResult *out) {requests++;*out=result;return status;}
+        ''' + function(source, 'static void root_hold_for_helper(') + '\n' + function(source, 'static int prepare_root_data(') + r'''
+        int main(void) {
+            for(status=-1;status<=0;status++)for(unsigned possible=0;possible<2;possible++)
+            for(unsigned terminal=0;terminal<2;terminal++) {
+                memset(&result,0,sizeof(result));messages[0]=0;requests=sleeps=logs=0;
+                result.helper.possible_apply=possible;result.helper.terminal=terminal;
+                result.before.observed=3;result.before.lstat_raw=-1;result.before.lstat_errno=1;
+                if(!setjmp(held)) {
+                    int rc=prepare_root_data();
+                    assert(!(possible&&!terminal));assert(rc==status&&!sleeps&&logs==2);
+                } else {
+                    assert(possible&&!terminal&&sleeps==4&&logs==3);
+                    assert(strstr(messages,"root_helper_held reason=nonterminal-helper-result"));
+                }
+                assert(requests==1);
+                assert(strstr(messages,"stat_before_raw=0 stat_before_errno=0"));
+                assert(strstr(messages,"lstat_before_raw=-1 lstat_before_errno=1"));
+            }
+            puts("root title hold: uncertain helper cannot return or retry");
+            return 0;
+        }
+        '''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'test.c').write_text(code)
+            command = [os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
+                       '-I' + str(ROOT / 'native'), str(path / 'test.c'), '-o', str(path / 'test')]
+            subprocess.run(command, check=True)
+            subprocess.run([str(path / 'test')], check=True, timeout=10)
+        library = function(source, 'static int open_library(')
+        self.assertLess(library.index('prepare_root_data('), library.index('pw_wine_library_load('))
+        main = function(source, 'int main(')
+        self.assertLess(main.index('open_library('), main.index('pw_diagnostics_open('))
+        self.assertLess(main.index('open_library('), main.index('atexit('))
+        self.assertLess(main.index('open_library('), main.index('pw_wine_child_title_prepare('))
+
     def test_actual_restart_and_completion_holds(self):
         repo = ROOT
         s=(repo/'native/wine64_main.c').read_text()

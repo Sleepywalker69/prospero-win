@@ -706,20 +706,46 @@ static void on_exit_report(void)
 
 /* ---- library ------------------------------------------------------------ */
 
-/* Complete the one-shot helper exchange before loading profiles or starting
- * Wine. A failed or incomplete request closes this process to Home. */
-static int open_library(void)
+/* A lost helper response cannot prove the helper stopped targeting this PID.
+ * This runs before profiles, Wine, native child ownership or exit hooks exist.
+ * Keep the original PID alive; do not retry, restart or infer release from time. */
+static void root_hold_for_helper(void)
+{
+    PS5LOG_LOG("PW_WINE64 root_helper_held reason=nonterminal-helper-result");
+    for (;;) usleep(100000);
+}
+
+static int prepare_root_data(void)
 {
     PwDataMountResult mount;
-    int status;
-
-    status = pw_data_mount_request(&mount);
-    if (status == 0) library_root = PW_WINE64_ROOT_DATA;
+    int status = pw_data_mount_request(&mount);
     PS5LOG_LOG("PW_WINE64 data_mount data_before=%d helper_completed=%d helper_errno=%d data_after=%d "
-               "waited_ms=%d settled_ms=%d root=%s", mount.data_before,
-               mount.helper_completed, mount.helper_errno, mount.data_after, mount.waited_ms,
-               mount.settled_ms, status == 0 ? library_root : "unavailable");
+               "waited_ms=%d settled_ms=%d ready=%d helper_possible=%u helper_terminal=%u helper_status=%u "
+               "sleep_stage=%d sleep_raw=%d sleep_errno=%d root=%s", mount.data_before, mount.helper_completed, mount.helper_errno,
+               mount.data_after, mount.waited_ms, mount.settled_ms, mount.ready,
+               mount.helper.possible_apply, mount.helper.terminal, mount.helper.helper_status,
+               mount.sleep_stage, mount.sleep_raw, mount.sleep_errno,
+               status == 0 ? PW_WINE64_ROOT_DATA : "unavailable");
+    PS5LOG_LOG("PW_WINE64 data_access before_observed=%u stat_before_raw=%d stat_before_errno=%d "
+               "stat_before_dir=%d lstat_before_raw=%d lstat_before_errno=%d lstat_before_dir=%d "
+               "after_observed=%u stat_after_raw=%d stat_after_errno=%d stat_after_dir=%d "
+               "lstat_after_raw=%d lstat_after_errno=%d lstat_after_dir=%d",
+               mount.before.observed, mount.before.stat_raw, mount.before.stat_errno,
+               mount.before.stat_directory, mount.before.lstat_raw, mount.before.lstat_errno,
+               mount.before.lstat_directory, mount.after.observed, mount.after.stat_raw,
+               mount.after.stat_errno, mount.after.stat_directory, mount.after.lstat_raw,
+               mount.after.lstat_errno, mount.after.lstat_directory);
+    if (mount.helper.possible_apply && !mount.helper.terminal) root_hold_for_helper();
+    return status;
+}
+
+/* Complete a terminal one-shot helper exchange or reuse a verified directory
+ * pair before loading profiles or starting Wine. Unknown outcomes hold above. */
+static int open_library(void)
+{
+    int status = prepare_root_data();
     if (status != 0) return -1;
+    library_root = PW_WINE64_ROOT_DATA;
     status = pw_wine_library_load(&library, library_root);
     catalog_count = 0;
     for (uint32_t i = 0; i < library.count; i++) {
