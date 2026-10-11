@@ -52,7 +52,7 @@ static void reset(Pair first, Pair second)
     memset(observations,0,sizeof(observations)); observations[0]=first; observations[1]=second;
     count=2; at=stat_calls=lstat_calls=request_calls=sleeps=0;
     total_sleep=sleep_failure=request_result=request_error=0; requested_pid=0;
-    outcome=(PwLapyElevationResult){1,1,LAPY_ELEVATION_OK}; errno=EIO;
+    outcome=(PwLapyElevationResult){.possible_apply=1,.terminal=1,.helper_status=LAPY_ELEVATION_OK}; errno=EIO;
 }
 static int run(PwDataMountResult *r,int wait)
 {return pw_data_mount_request_with(&ops,2595,wait,r);}
@@ -99,12 +99,13 @@ int main(void)
     CHECK(!run(&r,INT_MAX)); CHECK(r.waited_ms==PW_DATA_MOUNT_POLL_MS);
     for(unsigned i=0;i<3;i++) {
         reset(denied,ready); request_result=-1; request_error=i?ETIMEDOUT:0;
-        outcome=(PwLapyElevationResult){i!=0,i==2,LAPY_ELEVATION_APPLY_FAILED};
+        outcome=(PwLapyElevationResult){.possible_apply=i!=0,.terminal=i==2,.helper_status=LAPY_ELEVATION_APPLY_FAILED};
         CHECK(run(&r,5000)==-1); CHECK(!r.ready && !r.helper_completed && request_calls==1);
         CHECK(r.helper_errno==(i?ETIMEDOUT:EIO) && stat_calls==1 && !sleeps);
         CHECK(r.helper.possible_apply==(i!=0) && r.helper.terminal==(i==2));
     }
-    const PwLapyElevationResult bad[]={{0,0,0},{1,0,0},{0,1,0},{1,1,LAPY_ELEVATION_APPLY_FAILED}};
+    const PwLapyElevationResult bad[]={{0},{.possible_apply=1},{.terminal=1},
+        {.possible_apply=1,.terminal=1,.helper_status=LAPY_ELEVATION_APPLY_FAILED}};
     for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++) {
         reset(denied,ready); outcome=bad[i]; CHECK(run(&r,100)==-1);
         CHECK(!r.ready && !r.helper_completed && r.helper_errno==EPROTO && !sleeps);

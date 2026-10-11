@@ -44,10 +44,6 @@ CRT_IMPORTS = {'_init_env': 'libSceLibcInternal.sprx', 'atexit': 'libSceLibcInte
                'exit': 'libSceLibcInternal.sprx', 'pthread_create': 'libkernel.sprx',
                'sceKernelLoadStartModule': 'libkernel.sprx',
                **{name: 'libSceNet.sprx' for name in NET_FUNCTIONS}}
-HELPER_SHA = '43fab6d8045b525403f025a7b15e313aeaeac174bba6bff19a32b0000293c647'
-HELPER_RELEASE = 'v0.3.2-experimental'
-HELPER_SOURCE = 'b48b7d7236eca25c7b9dfd6c040c763ae05dde80'
-HELPER_FILES = ('lapy.elf', 'lapy-manifest.json', 'lapy-release.json')
 TITLE_MARKER = 'pw-wine-child-fixture/1'
 TITLE_FUNCTIONS = ('pw_wine_fixture_owner_init', 'pw_wine_fixture_owner_pump')
 
@@ -67,7 +63,7 @@ def source_identity(root, commands):
                'tree': commands.run('git', '-C', root, 'rev-parse', 'HEAD^{tree}').strip()}
     sources = {name: sha(root / name) for name in (*UNITS, *HEADERS, 'tools/build_wine_service_child.py',
                'tools/native_service_converter.py', 'tools/native_probe_elf.py', 'tools/check_native_suite.py',
-               'tools/fetch_lapy_helper.py', 'tools/build_native.sh', 'tools/wine_creation_abi.py')}
+               'tools/build_owned_helper.py', 'tools/build_native.sh', 'tools/wine_creation_abi.py')}
     return project, sources
 
 
@@ -112,35 +108,34 @@ def ordinary_graph(linked, converted, providers):
     return graph
 
 
-def helper_inputs(args, root):
-    from fetch_lapy_helper import validate_helper_manifest, verify_pinned_elf
-    script = (root / 'tools/build_native.sh').read_text()
-    for key, expected in (('lapy_release', HELPER_RELEASE), ('lapy_elf_sha256', HELPER_SHA)):
-        require(re.findall(r'^' + key + r'=([^\n]+)$', script, re.M) == [expected],
-                'child helper contract differs from title pin: ' + key)
+def helper_inputs(args, root, project, sdk):
+    """Admit actual producer output, including source, object and SDK evidence."""
+    from build_owned_helper import validate_owned_helper
     work = getattr(args, 'service_work', None)
-    if work:
-        elf, manifest_path, release_path = (work / name for name in HELPER_FILES)
-    else:
-        elf, manifest_path, release_path = (getattr(args, name, None) for name in ('helper', 'helper_manifest', 'helper_release'))
-        require(all((elf, manifest_path, release_path)), 'child build needs exact title helper inputs')
-    for path in (elf, manifest_path, release_path):
-        require(path.is_file() and not path.is_symlink(), 'helper input must be a regular non-symlink file')
-    require(4 <= elf.stat().st_size <= 4 * 1024 * 1024 and elf.read_bytes()[:4] == b'\x7fELF', 'helper ELF size/type differs')
-    verify_pinned_elf(elf, HELPER_SHA)
-    manifest = json.loads(manifest_path.read_text()); release = json.loads(release_path.read_text())
-    validate_helper_manifest(manifest, elf, root / 'native/lapy_elevation_protocol.h', 'PPSA99995')
-    require(manifest.get('schema') == 'lapy-owned-build/1' and manifest.get('max_requests') == 1 and
-            manifest.get('service') is False and manifest.get('require_client_result') is False,
-            'helper one-shot lifecycle declaration differs')
-    require(release.get('repository') == 'mpereiraesaa/PS5-Lapy-JB-Daemon' and
-            release.get('tag_name') == HELPER_RELEASE and release.get('release_url') ==
-            'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/' + HELPER_RELEASE,
-            'helper release identity differs')
-    return {'elf': record(elf), 'manifest': record(manifest_path), 'release': record(release_path),
-            'protocol_sha256': sha(root / 'native/lapy_elevation_protocol.h'),
-            'source_contract_commit': HELPER_SOURCE, 'source_to_binary_reproducibility_verified': False,
-            'release_tag': HELPER_RELEASE, 'runtime_validated': False}
+    directory = work / 'owned-helper' if work else getattr(args, 'helper_directory', None)
+    require(directory is not None, 'child build needs source-bound helper directory')
+    return validate_owned_helper(directory, root, project, sdk)
+
+
+def retain_helper(source, destination):
+    from build_owned_helper import OUTPUTS, UNITS
+    destination.mkdir()
+    (destination / 'obj').mkdir()
+    for name in (*OUTPUTS, 'owned_identity.h', 'lapy.map',
+                 *('obj/' + unit + '.o' for unit in UNITS)):
+        original = source / name
+        require(original.is_file() and not original.is_symlink(), 'linked/missing helper evidence')
+        shutil.copyfile(original, destination / name)
+
+
+def helper_digest(bound):
+    helper = bound.get('helper', {})
+    digest = helper.get('elf', {}).get('sha256', '')
+    require(re.fullmatch('[0-9a-f]{64}', digest) and
+            helper.get('project') == bound.get('project') and bool(bound.get('project')) and
+            helper.get('toolchain_reverified') is True and helper.get('runtime_validated') is False,
+            'helper actual digest/source/toolchain binding differs')
+    return digest
 
 
 def net_inputs(sdk, bindir, commands):
@@ -208,7 +203,7 @@ def inputs(args, commands):
                             'abi': 1, 'runtime_validated': False}, 'Wine service consumers were not explicitly built')
     require(abi.get('creation', {}).get('abi') == 1 and abi['creation'].get('protocol') == 962,
             'child requires actual matched creation protocol and broker')
-    helper = helper_inputs(args, root)
+    helper = helper_inputs(args, root, project, sdk)
     net = net_inputs(sdk, bindir, commands)
     result = {'helper': helper, 'net_transport': net, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
               'creation_abi': 1, 'creation_protocol': 962, 'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
@@ -237,7 +232,7 @@ def child_header(bound, build_id):
             'child header cannot assert an absent ABI capability')
     require(re.fullmatch('[0-9a-f]{40}', build_id) and
             re.fullmatch('[0-9a-f]{64}', bound['runtime']['ntdll_sha256']) and
-            bound.get('helper', {}).get('elf', {}).get('sha256') == HELPER_SHA, 'invalid child header identity')
+            helper_digest(bound), 'invalid child header identity')
     return ('#define PW_WINE_CHILD_BUILD_ID "' + build_id + '"\n' +
             '#define PW_WINE_CHILD_NTDLL_SHA256 "' + bound['runtime']['ntdll_sha256'] + '"\n' +
             '#define PW_WINE_CHILD_PRIVATE_DISPATCH_ABI 1\n' +
@@ -248,8 +243,8 @@ def child_header(bound, build_id):
 
 
 def build(args):
-    require(all((args.helper, args.helper_manifest, args.helper_release)), 'child build needs helper inputs')
-    out = output_directory(args.out, (args.sdk, args.foundation, args.runtime, args.helper, args.helper_manifest, args.helper_release))
+    require(args.helper_directory is not None, 'child build needs source-bound helper directory')
+    out = output_directory(args.out, (args.sdk, args.foundation, args.runtime, args.helper_directory))
     commands = Commands(out / 'inspection')
     bound, paths = inputs(args, commands)
     root, sdk, foundation, runtime, bindir, title = paths
@@ -307,10 +302,10 @@ def build(args):
     require(extract_self(final.read_bytes()) == recovered.read_bytes(), 'independent SELF recovery differs')
     after = inspect_service_preload(recovered.read_bytes()); compare_service_preload(preload, after)
     compiled_identity(Elf(recovered.read_bytes()), build_id)
-    compiled_identity(Elf(recovered.read_bytes()), HELPER_SHA)
+    compiled_identity(Elf(recovered.read_bytes()), helper_digest(bound))
     final.chmod(0o755)
     require(inputs(args, commands)[0] == bound, 'service build inputs changed')
-    manifest = {'schema': 'pw-wine-service-child/1', **bound,
+    manifest = {'schema': 'pw-wine-service-child/2', **bound,
                 'worker': {**record(final), 'build_id': build_id},
                 'linked': record(linked), 'converted': record(converted), 'reconstructed': record(recovered),
                 'linkage': graph, 'code': code, 'reconstruction': reconstruction, 'framing': framing,
@@ -331,8 +326,9 @@ def build(args):
         for start in range(0, len(value), 16):
             stream.write(','.join(str(v) for v in value[start:start + 16]) + ',\n')
         stream.write('};\nconst size_t pw_wine_child_image_size = sizeof(pw_wine_child_image);\n')
-    for original, name in zip((args.helper, args.helper_manifest, args.helper_release), HELPER_FILES):
-        shutil.copyfile(original, out / name)
+    retain_helper(args.helper_directory, out / 'owned-helper')
+    require(helper_inputs(argparse.Namespace(service_work=out), root, bound['project'], sdk) == bound['helper'],
+            'retained helper cohort differs')
     for name, leaf in PROVIDERS.items():
         shutil.copyfile(sdk / 'target/lib' / leaf, out / leaf)
     return manifest
@@ -353,7 +349,7 @@ def verify_child(args, commands):
     root, sdk, foundation, runtime, bindir, title = paths
     work = args.service_work.resolve(strict=True)
     manifest = json.loads((work / 'native-wine-child-build.json').read_text())
-    require(manifest.get('schema') == 'pw-wine-service-child/1' and
+    require(manifest.get('schema') == 'pw-wine-service-child/2' and
             all(manifest.get(k) == v for k, v in bound.items()), 'service child source/runtime inputs differ')
     require(manifest['worker']['build_id'] == identity(bound), 'service child build ID differs')
     for field, name in (('worker', 'native-wine-child.self'), ('linked', 'child.linked.elf'),
@@ -362,7 +358,7 @@ def verify_child(args, commands):
     value = extract_self((work / 'native-wine-child.self').read_bytes())
     require(value == (work / 'native-wine-child.after.elf').read_bytes(), 'child SELF recovery differs')
     compiled_identity(Elf(value), manifest['worker']['build_id'])
-    compiled_identity(Elf(value), HELPER_SHA)
+    compiled_identity(Elf(value), helper_digest(bound))
     require(inspect_service_preload((work / 'child.elf').read_bytes()) == manifest['preload_before_signing'] and
             inspect_service_preload(value) == manifest['preload_after_recovery'], 'child preload report differs')
     compare_service_preload(manifest['preload_before_signing'], manifest['preload_after_recovery'])
@@ -560,6 +556,11 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             'title network compile enable flags differ')
     require(not any(v.startswith(('-DPW_WINE_NET_CHILD_SHA256', '-UPW_WINE_NET_CHILD_SHA256')) for v in common),
             'network child hash must come only from the validated generated header')
+    from build_owned_helper import validate_owned_helper
+    admitted = validate_owned_helper(build / 'owned-helper', root, project, sdk)
+    require([v for v in common if v.startswith(('-DPW_LAPY_HELPER_SHA256', '-UPW_LAPY_HELPER_SHA256'))] ==
+            ['-DPW_LAPY_HELPER_SHA256="' + admitted['elf']['sha256'] + '"'],
+            'title helper hash differs from admitted actual ELF')
     units = actual.get('sources', {})
     require(isinstance(units, dict) and all(n in units for n in TITLE_USER_SOURCES if n.endswith('.c')),
             'title compile source cohort incomplete')
@@ -592,9 +593,10 @@ def check_title(args):
         shutil.copyfile(original, out / name)
     for name in ('native-wine-child.self', 'native-wine-child-build.json'):
         require((app / name).read_bytes() == (args.service_work / name).read_bytes(), 'packaged child differs: ' + name)
+    from build_owned_helper import validate_owned_helper
     require(record(app / 'lapy.elf') == manifest['helper']['elf'] and
-            record(build / 'lapy-helper-manifest.json') == manifest['helper']['manifest'] and
-            record(build / 'lapy-helper-release.json') == manifest['helper']['release'], 'packaged/title helper differs from child binding')
+            validate_owned_helper(build / 'owned-helper', root, manifest['project'], sdk) == manifest['helper'],
+            'packaged/title helper differs from child binding')
     require(record(app / 'sce_module/libc.prx') == manifest['libc_companion'], 'title/child libc companions differ')
     linked, converted = Elf((build / 'llvm-pie.elf').read_bytes()), Elf((build / 'eboot.elf').read_bytes())
     index = index_sdk_providers(sdk, out, bindir, commands)
@@ -612,6 +614,7 @@ def check_title(args):
     reconstruction = verify_reconstruction(build / 'eboot.elf', recovered_path)
     image = Elf(recovered)
     compiled = compiled_identity(image, manifest['project']['commit'])
+    helper_identity = compiled_identity(image, helper_digest(manifest))
     fixture_identity = fixture_title_identity(image, title_inputs, pair)
     user_identity = user_title_identity(image, title_inputs, user_pair) if user_pair is not None else None
     network_identity = network_title_identity(image, title_inputs, network_pair) if network_pair is not None else None
@@ -633,16 +636,20 @@ def check_title(args):
             name = path.relative_to(app).as_posix()
             require(name != 'dev.conf', 'private dev.conf must never be packaged')
             files[name] = {**record(path), 'mode': path.stat().st_mode & 0o777}
+    require(helper_inputs(args, root, manifest['project'], sdk) == manifest['helper'] and
+            validate_owned_helper(build / 'owned-helper', root, manifest['project'], sdk) == manifest['helper'] and
+            record(app / 'lapy.elf') == manifest['helper']['elf'], 'helper changed during title inspection')
     require(source_identity(root, commands)[0] == manifest['project'], 'project changed during title inspection')
     require(title_profiles_input_contract(root, args.service_work, args.fixture, user_fixture,
         getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture) ==
         (expected_inputs, header, pair, user_pair, network_pair), 'original/USER/network fixture changed during title inspection')
     require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None) == compile_inputs,
             'title compile inputs changed during inspection')
-    report = {'schema': 'pw-windows-child-title/1', 'project': manifest['project'],
+    report = {'schema': 'pw-windows-child-title/2', 'project': manifest['project'],
               'build_id': manifest['project']['commit'], 'compiler': manifest['host_llvm'],
               'sdk_headers': manifest['sdk_headers'], 'sdk_wrappers': manifest['sdk_wrappers'], 'sdk_source': sdk_source,
-              'files': files, 'title_compiled_identity': compiled, 'embedded_child': embedded,
+              'files': files, 'title_compiled_identity': compiled, 'helper': manifest['helper'],
+              'helper_compiled_identity': helper_identity, 'embedded_child': embedded,
               'fixture_route': route, 'build_inputs': title_inputs,
               'fixture_child_sha256': fixture_sha, 'fixture_child_identity': fixture_identity,
               'user_enabled': user_pair is not None, 'user_child_sha256': title_inputs.get('user_child_sha256'),
@@ -666,7 +673,7 @@ def main():
     parser.add_argument('--check-title', action='store_true')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper', 'helper-manifest', 'helper-release'):
+    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper-directory'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--run-id')
     parser.add_argument('--run-attempt')

@@ -23,18 +23,13 @@
 #                          instead of a game-launching UI (default 0)
 #   PW_NATIVE_CHILD_MODE hello (default), fd, peer-exit, or multi-test suite
 #   PW_NATIVE_CHILD_FOUNDATION prepared pinned PRX foundation for that worker
-#   Lapy helper             fetched from the GitHub release pinned below
-#                          (lapy_release, lapy_elf_sha256)
+#   Lapy helper             built from this committed source using LLVM18;
+#                          independently admitted before title/child compile
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 pin=9c0b994a048521af6fb84c73ded364504fe250e9
 url=https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
-# The one-shot /data helper bundled with the title: a published release of
-# mpereiraesaa/PS5-Lapy-JB-Daemon and the SHA-256 of its lapy.elf. Bump both
-# together, after the new helper has run on a console.
-lapy_release=v0.3.2-experimental
-lapy_elf_sha256=43fab6d8045b525403f025a7b15e313aeaeac174bba6bff19a32b0000293c647
 foundation=${PS5_NATIVE_FOUNDATION:-$root/.deps/ps5-native-app-boilerplate}
 dev_conf=${PS5LOG_DEV_CONF:-$root/dev.conf}
 native_mode=${PW_NATIVE_MODE:-wine64}
@@ -86,30 +81,6 @@ fi
     echo "PW_OUTPUT_SUFFIX must contain only letters, digits, '_' or '-'" >&2
     exit 2
 }
-helper_download=$(mktemp -d "${TMPDIR:-/tmp}/prospero-lapy-helper.XXXXXX")
-trap 'rm -rf -- "$helper_download"' EXIT
-python3 "$root/tools/fetch_lapy_helper.py" \
-    --repo mpereiraesaa/PS5-Lapy-JB-Daemon --tag "$lapy_release" \
-    --sha256 "$lapy_elf_sha256" --out "$helper_download"
-lapy_helper_elf="$helper_download/lapy.elf"
-helper_magic=$(od -An -tx1 -N4 "$lapy_helper_elf" | tr -d ' \n')
-[[ $helper_magic == 7f454c46 ]] || {
-    echo "Lapy release $lapy_release helper is not an ELF file" >&2
-    exit 2
-}
-python3 - "$root" "$lapy_helper_elf" "$helper_download/lapy-manifest.json" \
-    "$title_id" "$root/native/lapy_elevation_protocol.h" <<'PY'
-import json, pathlib, sys
-sys.path.insert(0, sys.argv[1])
-from tools.fetch_lapy_helper import validate_helper_manifest
-elf = pathlib.Path(sys.argv[2])
-manifest = json.loads(pathlib.Path(sys.argv[3]).read_text())
-protocol = pathlib.Path(sys.argv[5])
-try:
-    validate_helper_manifest(manifest, elf, protocol, sys.argv[4])
-except ValueError as error:
-    raise SystemExit(str(error))
-PY
 
 if [[ ! -e $foundation/.git ]]; then
     mkdir -p -- "$(dirname -- "$foundation")"
@@ -172,8 +143,26 @@ if [[ $wine_child_fixture == 1 ]]; then
     rm -rf -- "$build-wine-child-title-inspection"
 fi
 mkdir -p "$build/obj" "$build/import-stubs" "$dist/sce_sys" "$dist/sce_module"
-cp "$helper_download/release.json" "$build/lapy-helper-release.json"
-cp "$helper_download/lapy-manifest.json" "$build/lapy-helper-manifest.json"
+# Producer output must be fresh and outside the source/SDK tree. Retain its
+# complete verification evidence before deleting temporary build scratch.
+helper_scratch=$(mktemp -d "${TMPDIR:-/tmp}/prospero-owned-helper.XXXXXX")
+trap 'rm -rf -- "$helper_scratch"' EXIT
+python3 "$root/tools/build_owned_helper.py" build --repo "$root" --sdk "$sdk" --out "$helper_scratch/helper"
+python3 - "$root" "$helper_scratch/helper" "$build/owned-helper" <<'PYRETAIN'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / 'tools'))
+from build_wine_service_child import retain_helper
+retain_helper(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
+PYRETAIN
+lapy_helper_elf="$build/owned-helper/lapy.elf"
+lapy_elf_sha256=$(python3 - "$root" "$sdk" "$build/owned-helper" <<'PYHELPER'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / 'tools'))
+from build_owned_helper import validate_owned_helper
+record = validate_owned_helper(pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[1]), sdk=pathlib.Path(sys.argv[2]))
+print(record['elf']['sha256'])
+PYHELPER
+)
 
 cc=(env PS5_PAYLOAD_SDK="$sdk" sh "$foundation/tooling/prospero-clang18")
 # A source archive has no Git metadata; its builds report "unknown".
@@ -182,7 +171,7 @@ if build_id=$(git -C "$root" rev-parse HEAD 2>/dev/null); then
 else
     build_id=unknown
 fi
-common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
+common=(-DPW_LAPY_HELPER_SHA256=\""$lapy_elf_sha256"\" -DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
         -I"$root/include" -I"$root/src" -I"$root/native"
         -I"$root/native/ps5log"
         -DPW_WINE64_SCRIPT="$wine64_script" -DPW_WINE64_SECONDS="$wine64_seconds"
@@ -223,8 +212,7 @@ if [[ $wine_child_fixture == 1 ]]; then
     python3 "$root/tools/build_wine_service_child.py" --work "$root" --sdk "$sdk" \
         --foundation "${PW_WINE_CHILD_FOUNDATION:?Wine child needs the pinned PRX foundation}" \
         --runtime "${PW_WINE_CHILD_RUNTIME:?Wine child needs the matched runtime work directory}" \
-        --helper "$lapy_helper_elf" --helper-manifest "$helper_download/lapy-manifest.json" \
-        --helper-release "$helper_download/release.json" \
+        --helper-directory "$build/owned-helper" \
         --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
     python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" \
         "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" "$wine_child_network" <<'PYWINEINPUT'

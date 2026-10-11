@@ -22,7 +22,7 @@ from check_wine_prx_build import Commands, provider_index
 from native_service_converter import inspect_service_preload, WRITER_SHA256
 from native_probe_elf import Elf, extract_self, nid, decode_id, require, sha
 from tls_manifest import tree_files
-from fetch_lapy_helper import validate_helper_manifest
+import build_owned_helper as owned_helper
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_COMMIT = "4eb701204fc3f8d31e84cf8ca272974e2be9c867"
@@ -37,7 +37,6 @@ ROLES = {"title": "eboot.bin", "peer_worker": "native-child.self",
 ROLE_MODES = {name: "0755" if name in {"title", "peer_worker", "service_worker", "libc"}
               else "0644" for name in ROLES}
 TITLE_FOUNDATION = "9c0b994a048521af6fb84c73ded364504fe250e9"
-LAPY_SHA256 = "43fab6d8045b525403f025a7b15e313aeaeac174bba6bff19a32b0000293c647"
 
 
 def read(path, limit=32 * 1024 * 1024):
@@ -271,6 +270,15 @@ def check_worker(app, directory, mode, sdk, bindir, commands, output):
     return report, image
 
 
+def helper_input(build, app, repo, project, sdk):
+    require(not any((build / name).exists() for name in
+            ('lapy-helper-release.json', 'lapy-helper-manifest.json')), 'legacy suite helper metadata refused')
+    result = owned_helper.validate_owned_helper(build / 'owned-helper', repo, project, sdk)
+    require(owned_helper.record(app / 'lapy.elf') == result['elf'],
+            'suite packaged helper differs from source-bound actual ELF')
+    return result
+
+
 def validate(args):
     build, app, sdk, output = (Path(x).resolve() for x in (args.build, args.app, args.sdk, args.out))
     bindir = Path(args.llvm_bindir).resolve()
@@ -301,9 +309,8 @@ def validate(args):
             "wrong title foundation identity")
     require(read(app / "sce_module/libc.prx") == read(foundation / "runtime/libc.prx"),
             "packaged libc differs from the title foundation output")
-    require(roles["lapy"]["sha256"] == LAPY_SHA256, "packaged Lapy identity differs from the pinned existing helper")
-    validate_helper_manifest(json_file(build / "lapy-helper-manifest.json"), app / "lapy.elf",
-                             ROOT / "native/lapy_elevation_protocol.h", "PPSA99995")
+    project = {"commit": commit, "tree": tree}
+    helper = helper_input(build, app, ROOT, project, sdk)
     sdk_source = source_archive(Path(args.sdk_source_archive))
     index = index_sdk_providers(sdk, output, bindir, commands)
     for path in sorted((build / "import-stubs").glob("*.so")):
@@ -320,6 +327,7 @@ def validate(args):
     worker_builder.verify_reconstruction(build / "eboot.elf", recovered_path)
     recovered_title = Elf(title_recovered)
     title_identity = compiled_identity(recovered_title, commit)
+    helper_identity = compiled_identity(recovered_title, helper["elf"]["sha256"])
     peer, peer_image = check_worker(app, build / "child", "peer-exit", sdk, bindir, commands, output)
     service, service_image = check_worker(app, build / "service", "service", sdk, bindir, commands, output)
     comparison = default_comparison(build)
@@ -330,8 +338,9 @@ def validate(args):
             "packaged roles changed during inspection")
     require(not commands.run("git", "-C", ROOT, "status", "--porcelain", "--untracked-files=normal").strip() and
             commands.run("git", "-C", ROOT, "rev-parse", "HEAD").strip() == commit, "project source changed during inspection")
-    report = {"schema": "pw-native-probe-suite/1", "project": {"commit": commit, "tree": tree},
-              "roles": roles, "workers": {"peer": peer, "service": service}, "embedded_images": embedded,
+    require(helper_input(build, app, ROOT, project, sdk) == helper, "suite helper changed during inspection")
+    report = {"schema": "pw-native-probe-suite/2", "project": {"commit": commit, "tree": tree},
+              "roles": roles, "helper": helper, "helper_compiled_identity": helper_identity, "workers": {"peer": peer, "service": service}, "embedded_images": embedded,
               "default_mode_comparison": comparison, "title_imports": imports,
               "title_compiled_identity": title_identity, "title_foundation_commit": TITLE_FOUNDATION,
               "system_service_calls": sorted(SERVICE_CALLS), "sdk_source": sdk_source,
