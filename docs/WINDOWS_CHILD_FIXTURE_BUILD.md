@@ -8,6 +8,11 @@ The console still has to establish full-CRT service startup, the inherited
 wineserver endpoint, the Windows child result and cleanup. A native fd3 echo
 probe or a Windows reference pass does not establish those boundaries.
 
+An explicitly enabled third profile provides a separate original AMD64
+worker-first-USER control. It has its own source, MSVC recipe, fresh Windows
+reference, prefix and child hash. The original headless pair remains mandatory;
+the third control does not establish vendor GUI or input compatibility.
+
 The ordinary release packager continues to refuse private-dispatch runtimes.
 This separate producer checks the actual private-ABI ntdll/win32u PE thunks and
 native ntdll exports, then carries those exact files into its runtime and prefixes.
@@ -572,3 +577,52 @@ and desktop controls on the fully composed source. Its real target object and
 compile command are retained by the existing four-object USER evidence record.
 This adds no profile or child input transport; physical right-modifier/keypad
 information already collapsed by the HID producer remains unavailable.
+
+## Optional original worker-first-USER control
+
+The separate source is `tests/fixtures/windows_child_user.c`, built by
+`tools/build_windows_child_user.ps1`. The parent starts one original child and
+observes Windows exit 37 before completing with exit 0. The child keeps a hidden
+top-level window alive on its main thread. A fresh worker's first USER call is
+GetAncestor with GA_ROOT; it then checks geometry, creates STATIC and a custom
+class/window, exercises an owned DIB/DC and verifies their cleanup. DIB pixels
+are an in-process GDI observation, not a displayed child frame.
+
+The reference validator reads the actual AMD64 PE files, required named imports,
+NX/ASLR and DIR64 relocations, source/recipe/validator hashes, compiler dependency
+and tool identities, log ordering and the real parent/child result relationship.
+It does not execute PE bytes. The producer must bind that separate current-run
+reference to the same project commit/tree as the title, worker and prefixes.
+A missing or mismatched required reference cannot become an enabled capability.
+The original `build_windows_child_fixture.ps1` source, recipe and headless result
+remain independently required.
+
+Native mode 3 is default-off. An enabled title receives its exact child digest
+from the checked new reference, never from the headless pair or a fallback.
+Admission requires `windows-child-user-v1`, AMD64/default CPU, auto graphics,
+800x600 desktop, no FPS overlay, exact parent/CWD paths under
+`C:\windows-child-user`, and the dedicated prefix. The canonical child image is
+hash-checked. The one-generation limit includes retired generations and is
+never replenished. Descendant creation remains restricted to the existing Battle profile.
+The original native child and owner endpoints remain 120 and 180 seconds,
+respectively, with their existing startup and cleanup limits. The original
+program separately bounds its parent, child and worker at 90, 45 and 20 seconds.
+
+When enabled, the archive adds the USER profile, dedicated prefix, separate
+reference/source copies and explicit capability roles. The existing 24 patched
+PE DLLs, 14 native modules, private/creation ABI checks and exact seven-call Net
+provider graph remain mandatory. USER32/GDI32 use the matched ordinary prefix
+and existing win32u path; no extra backend is inferred from the new imports.
+The package must replay all source, reference, overlay and title/worker bindings
+from the archive itself. Default-off archives cannot contain an unbound USER
+profile or capability.
+
+Seven native host suites cover enabled/default-off title admission, exact wire
+identity, installer roles, one-generation ownership, bootstrap and child main.
+They use the actual native sources with inert platform boundaries. They are
+registered in the normal and sanitizer aggregates; the standalone
+`tools/check_wine_user_profile.py` also records compiler/dependency identities.
+The original worker-first-USER reference, actual target compilation/imports,
+service startup, guest behavior and native retirement still require their own
+results. Child presentation, physical input, focus transfer, arbitrary vendor
+GUI behavior and descendant acceptance are not established by this control.

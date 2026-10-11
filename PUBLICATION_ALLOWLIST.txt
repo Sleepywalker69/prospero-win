@@ -974,3 +974,21 @@ tests/fixtures/wine_user_fixes/desktop.c
 wine/patches/0919-win32u-ps5-send-extended-keys-as-extended.patch
 tests/test_ps5_extended_keys.py
 tests/fixtures/ps5_extended_keys.c
+
+# Separate original worker-first-USER profile and source-bound controls.
+tests/fixtures/windows_child_user.c
+tools/build_windows_child_user.ps1
+tests/test_wine_user_title.c
+tests/test_wine_user_disabled.c
+tests/test_wine_user_installer.c
+tests/test_wine_user_owner.c
+tests/test_wine_user_wire.c
+tests/test_wine_user_bootstrap.c
+tests/test_wine_user_main.c
+tools/windows_child_user_contract.py
+tests/test_windows_child_user_contract.py
+tools/check_wine_user_profile.py
+tests/test_wine_user_title_build.py
+tests/test_windows_child_user_package.py
+tools/windows_child_user_package.py
+tests/test_user_workflow_join.py

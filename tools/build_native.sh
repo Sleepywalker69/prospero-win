@@ -45,6 +45,9 @@ wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
 wine_child_fixture=${PW_WINE_CHILD_FIXTURE_MODE:-0}
+wine_child_user=${PW_WINDOWS_CHILD_USER_DIR:-}
+wine_user_enabled=0
+[[ -z $wine_child_user ]] || wine_user_enabled=1
 native_child_mode=${PW_NATIVE_CHILD_MODE:-hello}
 title_id=PPSA99995
 
@@ -52,6 +55,13 @@ title_id=PPSA99995
     echo "PW_WINE_CHILD_FIXTURE_MODE must be 0 or 1" >&2; exit 2; }
 [[ $wine_child_fixture == 0 || ( $native_child_probe == 0 && $output_suffix == -windows-child-fixture ) ]] || {
     echo "Wine child experiment needs its isolated output and cannot combine native probe mode" >&2; exit 2; }
+
+[[ $wine_user_enabled == 0 || $wine_child_fixture == 1 ]] || {
+    echo "USER child reference requires the isolated Wine child title" >&2; exit 2; }
+if [[ $wine_user_enabled == 1 ]]; then
+    [[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]*$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]*$ ]] || {
+        echo "USER child title requires explicit current GitHub run/attempt" >&2; exit 2; }
+fi
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
@@ -211,26 +221,19 @@ if [[ $wine_child_fixture == 1 ]]; then
         --helper "$lapy_helper_elf" --helper-manifest "$helper_download/lapy-manifest.json" \
         --helper-release "$helper_download/release.json" \
         --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
-    python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" <<'PYWINEINPUT'
-import hashlib, json, pathlib, sys
-root, build, fixture = map(pathlib.Path, sys.argv[1:])
+    python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" \
+        "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" <<'PYWINEINPUT'
+import json, pathlib, sys
+root, build, fixture = map(pathlib.Path, sys.argv[1:4])
 sys.path.insert(0, str(root / 'tools'))
-from prepare_windows_child_prefix import validate_pair
-manifest_path = build / 'wine-child/native-wine-child-build.json'
-manifest = json.loads(manifest_path.read_text())
-pair = validate_pair(fixture.resolve(strict=True), manifest['project'])
-sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-if pair['source_sha256'] != sha(root / 'tests/fixtures/windows_child_process.c') or pair['recipe_sha256'] != sha(root / 'tools/build_windows_child_fixture.ps1'):
-    raise SystemExit('original fixture source or recipe differs')
-child_sha = pair['files']['child.exe']['sha256']
-record = {'schema':'pw-windows-child-title-inputs/1','project':manifest['project'],
-          'mode':1,'define':'PW_WINE_CHILD_FIXTURE_MODE=1','fixture_child_sha256':child_sha,
-          'build_script_sha256':sha(root / 'tools/build_native.sh'),
-          'service_manifest_sha256':sha(manifest_path)}
+from build_wine_service_child import title_input_contract
+user = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
+record, header, _, _ = title_input_contract(root, build / 'wine-child', fixture, user,
+                                           sys.argv[5] or None, sys.argv[6] or None)
 (build / 'wine-child-title-inputs.json').write_text(json.dumps(record, indent=2) + '\n')
-(build / 'wine-child-title-config.h').write_text('#define PW_WINE_FIXTURE_CHILD_SHA256 "' + child_sha + '"\n')
+(build / 'wine-child-title-config.h').write_text(header)
 PYWINEINPUT
-    common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -I"$build" -I"$build/wine-child")
+    common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled" -I"$build" -I"$build/wine-child")
 fi
 
 sources=(
@@ -266,6 +269,21 @@ for source in "${sources[@]}"; do
     "${cc[@]}" -std=c11 "${common[@]}" -c "$root/$source" -o "$object"
     objects+=("$object")
 done
+if [[ $wine_child_fixture == 1 ]]; then
+    # These are the same launcher/flags/source arrays just compiled above.
+    python3 - "$root" "$build" "${#cc[@]}" "${#common[@]}" "${cc[@]}" "${common[@]}" "${sources[@]}" <<'PYTITLECOMPILE'
+import json, pathlib, sys
+root, build = map(pathlib.Path, sys.argv[1:3])
+sys.path.insert(0, str(root / 'tools'))
+from build_wine_service_child import title_compile_record
+nc, nf = map(int, sys.argv[3:5]); at = 5
+compiler = sys.argv[at:at + nc]; at += nc
+common = sys.argv[at:at + nf]; at += nf
+project = json.loads((build / 'wine-child/native-wine-child-build.json').read_text())['project']
+record = title_compile_record(root, build, project, compiler, common, sys.argv[at:])
+(build / 'wine-child-title-compile.json').write_text(json.dumps(record, indent=2) + '\n')
+PYTITLECOMPILE
+fi
 if [[ $native_child_probe == 1 ]]; then
     "${cc[@]}" -std=c11 "${common[@]}" -c "$build/child/native-child-image.c" -o "$build/obj/native-child-image.o"
     objects+=("$build/obj/native-child-image.o")
@@ -359,10 +377,14 @@ if [[ $native_child_mode == suite ]]; then
 fi
 
 if [[ $wine_child_fixture == 1 ]]; then
+    user_title_args=()
+    if [[ ${wine_user_enabled:-0} == 1 ]]; then
+        user_title_args=(--user-fixture "$wine_child_user" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+    fi
     python3 "$root/tools/build_wine_service_child.py" --check-title --work "$root" --sdk "$sdk" \
         --foundation "$PW_WINE_CHILD_FOUNDATION" --runtime "$PW_WINE_CHILD_RUNTIME" \
         --build "$build" --app "$dist" --service-work "$build/wine-child" \
-        --fixture "$PW_WINDOWS_CHILD_FIXTURE_DIR" --llvm-bindir "$llvm_bindir" \
+        --fixture "$PW_WINDOWS_CHILD_FIXTURE_DIR" "${user_title_args[@]}" --llvm-bindir "$llvm_bindir" \
         --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?Wine child needs the pinned SDK source archive}" \
         --out "$build-wine-child-title-inspection"
 fi

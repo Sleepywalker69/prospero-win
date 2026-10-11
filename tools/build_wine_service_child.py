@@ -216,7 +216,9 @@ def inputs(args, commands):
                   {'mode': 1, 'prefix': 'windows-child-fixture-v1', 'guest_machine': 'AMD64',
                    'backend': 'native-amd64', 'runtime_validated': False},
                   {'mode': 2, 'prefix': 'battlenet-experimental-v1', 'guest_machine': 'I386',
-                   'backend': 'wowprospero', 'runtime_validated': False}],
+                   'backend': 'wowprospero', 'runtime_validated': False},
+                  {'mode': 3, 'prefix': 'windows-child-user-v1', 'guest_machine': 'AMD64',
+                   'backend': 'native-amd64', 'runtime_validated': False}],
               'title_foundation': TITLE_FOUNDATION, 'converter_foundation': TITLE_FOUNDATION,
               'prx_foundation': FOUNDATION,
               'app_crt_sha256': CRT_SHA, 'layout_sha256': LAYOUT_SHA, 'wrapper_sha256': WRAPPER_SHA,
@@ -383,10 +385,10 @@ def verify_child(args, commands):
     return manifest, paths
 
 
-def check_route(linked, recovered, symbols):
+def check_route(linked, recovered, symbols, functions_to_check=TITLE_FUNCTIONS):
     marker = compiled_identity(recovered, TITLE_MARKER)
     functions = {}
-    for name in TITLE_FUNCTIONS:
+    for name in functions_to_check:
         rows = [line.split() for line in symbols.splitlines() if len(line.split()) >= 8 and line.split()[7] == name]
         require(len(rows) == 1 and rows[0][3] == 'FUNC' and rows[0][6] != 'UND', 'missing defined fixture route: ' + name)
         address, size = int(rows[0][1], 16), int(rows[0][2])
@@ -412,22 +414,120 @@ def fixture_title_identity(image, title_inputs, pair):
     return result
 
 
+TITLE_USER_FUNCTIONS = ('pw_wine_child_title_profile', 'pw_wine_child_title_prepare')
+TITLE_USER_SOURCES = ('native/wine64_main.c', 'native/pw_wine_child_title.c', 'native/pw_wine_child_title.h',
+                      'native/pw_wine_fixture_owner.c', 'native/pw_wine_fixture_owner.h')
+
+
+def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=None, run_attempt=None):
+    """Validate original bytes before admitting optional mode3; no reference-derived run authority."""
+    from prepare_windows_child_prefix import validate_pair
+    manifest_path = service_work / 'native-wine-child-build.json'
+    manifest = json.loads(manifest_path.read_text())
+    pair = validate_pair(fixture.resolve(strict=True), manifest['project'])
+    require(pair['source_sha256'] == sha(root / 'tests/fixtures/windows_child_process.c') and
+            pair['recipe_sha256'] == sha(root / 'tools/build_windows_child_fixture.ps1'), 'title fixture source/recipe differs')
+    child_sha = pair['files']['child.exe']['sha256']
+    result = {'schema': 'pw-windows-child-title-inputs/1', 'project': manifest['project'],
+              'mode': 1, 'define': 'PW_WINE_CHILD_FIXTURE_MODE=1', 'fixture_child_sha256': child_sha,
+              'build_script_sha256': sha(root / 'tools/build_native.sh'), 'service_manifest_sha256': sha(manifest_path)}
+    user_pair = None
+    if user_fixture is not None:
+        require(isinstance(run_id, str) and re.fullmatch('[1-9][0-9]*', run_id) and
+                isinstance(run_attempt, str) and re.fullmatch('[1-9][0-9]*', run_attempt),
+                'enabled USER title requires explicit expected run/attempt')
+        require(pair.get('run_id') == run_id and pair.get('run_attempt') == run_attempt,
+                'original fixture is not the expected USER title run/attempt')
+        import windows_child_user_contract as user_contract
+        require(Path(user_contract.__file__).resolve() == (root / 'tools/windows_child_user_contract.py').resolve(),
+                'USER validator loaded from another project')
+        details = {}
+        user_pair = user_contract.validate_pair(user_fixture.resolve(strict=True), manifest['project'], root,
+                                               run_id, run_attempt, details=details)
+        require(user_pair.get('project') == manifest['project'] and user_pair.get('run_id') == run_id and
+                user_pair.get('run_attempt') == run_attempt, 'USER validator identity differs')
+        result.update({'user_enabled': True, 'user_child_sha256': user_pair['files']['user-child.exe']['sha256'],
+                       'user_reference_sha256': sha(user_fixture / 'user-source.json'),
+                       'user_validator_sha256': sha(root / 'tools/windows_child_user_contract.py'),
+                       'run_id': run_id, 'run_attempt': run_attempt})
+    enabled = int(user_pair is not None)
+    header = '#define PW_WINE_FIXTURE_CHILD_SHA256 "' + child_sha + '"\n'
+    header += '#define PW_WINE_USER_PROFILE_ENABLED ' + str(enabled) + '\n'
+    if enabled:
+        header += '#define PW_WINE_USER_CHILD_SHA256 "' + result['user_child_sha256'] + '"\n'
+    return result, header, pair, user_pair
+
+
+def user_title_identity(image, title_inputs, pair):
+    digest = pair['files']['user-child.exe']['sha256']
+    require(title_inputs.get('user_enabled') is True and title_inputs.get('user_child_sha256') == digest,
+            'USER title hash differs from validated actual child')
+    result = compiled_identity(image, digest)
+    for address in result['addresses']:
+        offset = image.offset(address, 65, 4)
+        require(any(p[0] == 1 and p[3] == address for p in image.programs) or
+                (offset > 0 and image.data[offset - 1] == 0), 'USER child hash is not a standalone title literal')
+    return result
+
+
+def title_compile_record(root, build, project, compiler, common, units):
+    """Called after successful actual compile commands using their same shell arrays."""
+    require(len(compiler) == 4 and compiler[0] == 'env' and compiler[1].startswith('PS5_PAYLOAD_SDK=') and
+            compiler[2] == 'sh' and common and len(units) == len(set(units)), 'empty/unsupported title compile inputs')
+    sources = {}
+    for name in units:
+        require(re.fullmatch(r'(native|src|wine/ps5)/[A-Za-z0-9_./-]+\.c', name) and '..' not in Path(name).parts,
+                'unsupported title source path')
+        obj = 'obj/' + name.replace('/', '_') + '.o'
+        sources[name] = {'source': record(root / name), 'object_path': obj, 'object': record(build / obj),
+                         'argv': [*compiler, '-std=c11', *common, '-c', str(root / name), '-o', str(build / obj)]}
+    return {'schema': 'pw-windows-child-title-compile/1', 'project': project,
+            'compiler_argv': compiler, 'compiler_wrapper': record(Path(compiler[3])), 'common_flags': common, 'sources': sources,
+            'native_source_inputs': {name: record(root / name) for name in TITLE_USER_SOURCES}}
+
+
+def verify_title_compile_record(root, build, project, enabled, sdk, title):
+    path = build / 'wine-child-title-compile.json'
+    actual = json.loads(path.read_text())
+    require(actual.get('schema') == 'pw-windows-child-title-compile/1' and actual.get('project') == project,
+            'title compile project/schema differs')
+    compiler, common = actual.get('compiler_argv'), actual.get('common_flags')
+    require(isinstance(compiler, list) and all(isinstance(v, str) for v in compiler) and
+            isinstance(common, list) and all(isinstance(v, str) for v in common), 'malformed title compiler argv')
+    require(len(compiler) == 4 and compiler[:1] == ['env'] and compiler[2] == 'sh' and
+            compiler[1].startswith('PS5_PAYLOAD_SDK=') and Path(compiler[1].split('=', 1)[1]).resolve() == sdk.resolve() and
+            Path(compiler[3]).resolve() == (title / 'tooling/prospero-clang18').resolve() and
+            sha(Path(compiler[3])) == WRAPPER_SHA, 'title compiler launcher/wrapper differs')
+    require(not any(v in ('-D', '-U', '-include', '-imacros', '-undef') or
+                    v.startswith('-UPW_WINE_USER_PROFILE_ENABLED') for v in common), 'ambiguous title preprocessor flags')
+    require([v for v in common if v.startswith('-DPW_WINE_USER_PROFILE_ENABLED')] ==
+            ['-DPW_WINE_USER_PROFILE_ENABLED=' + str(int(enabled))] and
+            [v for v in common if v.startswith('-DPW_WINE_CHILD_FIXTURE_MODE')] == ['-DPW_WINE_CHILD_FIXTURE_MODE=1'],
+            'title compile enable flags differ')
+    units = actual.get('sources', {})
+    require(isinstance(units, dict) and all(n in units for n in TITLE_USER_SOURCES if n.endswith('.c')),
+            'title compile source cohort incomplete')
+    require(actual == title_compile_record(root, build, project, compiler, common, list(units)),
+            'title actual source/object/command record differs')
+    return {**record(path), 'user_enabled': bool(enabled), 'record': actual,
+            'source_to_binary_reproducibility_verified': False}
+
+
 def check_title(args):
-    out = output_directory(args.out, (args.app, args.build, args.service_work, args.sdk, args.runtime, args.fixture))
+    user_fixture = getattr(args, 'user_fixture', None)
+    inputs = (args.app, args.build, args.service_work, args.sdk, args.runtime, args.fixture)
+    out = output_directory(args.out, inputs + ((user_fixture,) if user_fixture is not None else ()))
     commands = Commands(out / 'inspection')
     manifest, paths = verify_child(args, commands)
     root, sdk, foundation, runtime, bindir, title = paths
     app, build = args.app.resolve(strict=True), args.build.resolve(strict=True)
     title_inputs = json.loads((build / 'wine-child-title-inputs.json').read_text())
-    from prepare_windows_child_prefix import validate_pair
-    pair = validate_pair(args.fixture.resolve(strict=True), manifest['project'])
-    require(pair['source_sha256'] == sha(root / 'tests/fixtures/windows_child_process.c') and
-            pair['recipe_sha256'] == sha(root / 'tools/build_windows_child_fixture.ps1'), 'title fixture source/recipe differs')
+    expected_inputs, header, pair, user_pair = title_input_contract(root, args.service_work, args.fixture,
+        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None))
     fixture_sha = pair['files']['child.exe']['sha256']
-    require(title_inputs == {'schema': 'pw-windows-child-title-inputs/1', 'project': manifest['project'],
-            'mode': 1, 'define': 'PW_WINE_CHILD_FIXTURE_MODE=1', 'fixture_child_sha256': fixture_sha, 'build_script_sha256': sha(root / 'tools/build_native.sh'),
-            'service_manifest_sha256': sha(args.service_work / 'native-wine-child-build.json')},
-            'title fixture macro/source input record differs')
+    require(title_inputs == expected_inputs and (build / 'wine-child-title-config.h').read_text() == header,
+            'title fixture/USER macro/source input record differs')
+    compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title)
     # Retain actual bytes before parser/analyzer refusal for independent review.
     for name, original in (('title.linked.elf', build / 'llvm-pie.elf'), ('title.converted.elf', build / 'eboot.elf'),
                             ('title.self', app / 'eboot.bin')):
@@ -455,8 +555,11 @@ def check_title(args):
     image = Elf(recovered)
     compiled = compiled_identity(image, manifest['project']['commit'])
     fixture_identity = fixture_title_identity(image, title_inputs, pair)
+    user_identity = user_title_identity(image, title_inputs, user_pair) if user_pair is not None else None
     embedded = embedded_image(image, (app / 'native-wine-child.self').read_bytes())
     route = check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'))
+    user_route = {**check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'), TITLE_USER_FUNCTIONS),
+                  'mode': 3, 'enabled': user_pair is not None}
     sdk_source = source_archive(args.sdk_source_archive)
     for name in linked.needed:
         destination = out / 'providers' / (name + '.elf')
@@ -470,13 +573,21 @@ def check_title(args):
             require(name != 'dev.conf', 'private dev.conf must never be packaged')
             files[name] = {**record(path), 'mode': path.stat().st_mode & 0o777}
     require(source_identity(root, commands)[0] == manifest['project'], 'project changed during title inspection')
-    require(validate_pair(args.fixture.resolve(strict=True), manifest['project']) == pair, 'original fixture changed during title inspection')
+    require(title_input_contract(root, args.service_work, args.fixture, user_fixture,
+        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None)) == (expected_inputs, header, pair, user_pair),
+        'original/USER fixture changed during title inspection')
+    require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title) == compile_inputs,
+            'title compile inputs changed during inspection')
     report = {'schema': 'pw-windows-child-title/1', 'project': manifest['project'],
               'build_id': manifest['project']['commit'], 'compiler': manifest['host_llvm'],
               'sdk_headers': manifest['sdk_headers'], 'sdk_wrappers': manifest['sdk_wrappers'], 'sdk_source': sdk_source,
               'files': files, 'title_compiled_identity': compiled, 'embedded_child': embedded,
               'fixture_route': route, 'build_inputs': title_inputs,
               'fixture_child_sha256': fixture_sha, 'fixture_child_identity': fixture_identity,
+              'user_enabled': user_pair is not None, 'user_child_sha256': title_inputs.get('user_child_sha256'),
+              'user_reference_sha256': title_inputs.get('user_reference_sha256'), 'user_child_identity': user_identity,
+              'user_route': user_route, 'title_compile_inputs': compile_inputs,
+              'title_compile_receipt': record(build / 'wine-child-title-compile.json'),
               'service_manifest_sha256': sha(args.service_work / 'native-wine-child-build.json'),
               'runtime': manifest['runtime'], 'imports': graph, 'reconstruction': reconstruction,
               'console_execution_verified': False, 'scope': 'matched source/build/static import and image identity only'}
@@ -490,8 +601,10 @@ def main():
     parser.add_argument('--check-title', action='store_true')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'helper', 'helper-manifest', 'helper-release'):
+    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'helper', 'helper-manifest', 'helper-release'):
         parser.add_argument('--' + name, type=Path)
+    parser.add_argument('--run-id')
+    parser.add_argument('--run-attempt')
     args = parser.parse_args()
     if args.check_title:
         require(all((args.build, args.app, args.service_work, args.sdk_source_archive, args.fixture)), 'title check requires title/child/SDK source inputs')

@@ -1113,8 +1113,12 @@ int main(int argc, char **argv)
         restart_title(NULL, launch.cycle + 1u, "profile-refused");
         return 1;
     }
-    pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_gui=unsupported",
-                             pw_wine_child_title_marker, child_profile, game->app.id);
+    if (child_profile == 3)
+        pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_user=experimental child_presentation=unverified child_input=unverified",
+                                 pw_wine_child_title_marker, child_profile, game->app.id);
+    else
+        pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_gui=unsupported",
+                                 pw_wine_child_title_marker, child_profile, game->app.id);
 #endif
     if (game && strcmp(game->app.prefix, "default"))
         snprintf(prefix, sizeof(prefix), "%s/prefixes/%s", library_root, game->app.prefix);
@@ -1368,8 +1372,11 @@ int main(int argc, char **argv)
         }
 #if PW_WINE_CHILD_FIXTURE_MODE
         if (status == PW_OK) {
-            status = pw_wine_child_title_prepare(child_profile,
-                child_profile == 1 ? PW_WINE_FIXTURE_CHILD_SHA256 : NULL);
+            const char *child_hash = child_profile == 1 ? PW_WINE_FIXTURE_CHILD_SHA256 : NULL;
+#if PW_WINE_USER_PROFILE_ENABLED
+            if (child_profile == 3) child_hash = PW_WINE_USER_CHILD_SHA256;
+#endif
+            status = pw_wine_child_title_prepare(child_profile, child_hash);
             pw_diagnostics_log_local("PW_WINE_CHILD owner_prepare status=%d", status);
             if (status != PW_OK) child_hold_reason = "pre-guest-owner-prepare-failed";
         }

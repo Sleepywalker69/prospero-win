@@ -11,13 +11,15 @@ import urllib.request
 
 
 def wait_for_reference(repository, run_id, attempt, output, *, request_json,
-                       monotonic=time.monotonic, sleep=time.sleep, timeout=900):
+                       monotonic=time.monotonic, sleep=time.sleep, timeout=900, job_name='original-x64-reference'):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('invalid repository')
     if not all(re.fullmatch(r'[1-9][0-9]*', str(x)) for x in (run_id, attempt)):
         raise ValueError('invalid run identity')
     if not 0 < timeout <= 900:
         raise ValueError('invalid join timeout')
+    if job_name not in ('original-x64-reference', 'original-user-x64-reference'):
+        raise ValueError('unreviewed original reference job')
     endpoint = f'https://api.github.com/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100'
     started = last = monotonic()
     def sample():
@@ -29,7 +31,7 @@ def wait_for_reference(repository, run_id, attempt, output, *, request_json,
         return now
     record = {'schema': 'pw-windows-reference-join/1', 'repository': repository,
               'run_id': str(run_id), 'run_attempt': str(attempt), 'endpoint': endpoint,
-              'job_name': 'original-x64-reference', 'observations': [], 'success': False}
+              'job_name': job_name, 'observations': [], 'success': False}
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -76,6 +78,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--job', choices=('original-x64-reference', 'original-user-x64-reference'),
+                        default='original-x64-reference')
     args = parser.parse_args()
     token = os.environ['GH_TOKEN']
     opener = urllib.request.build_opener(NoRedirect)
@@ -88,7 +92,7 @@ def main():
             raise ValueError('oversized jobs response')
         return json.loads(raw)
     result = wait_for_reference(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_RUN_ID'],
-                                os.environ['GITHUB_RUN_ATTEMPT'], args.output, request_json=request_json)
+                                os.environ['GITHUB_RUN_ATTEMPT'], args.output, request_json=request_json, job_name=args.job)
     print(json.dumps(result))
 
 

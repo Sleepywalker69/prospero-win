@@ -1,3 +1,7 @@
 # Keep cross-platform fixture provenance bound to the exact Git input bytes.
 tests/fixtures/windows_child_process.c text eol=lf
 tools/build_windows_child_fixture.ps1 text eol=lf
+# The separate original USER reference is byte-bound across Windows/Linux.
+tests/fixtures/windows_child_user.c text eol=lf
+tools/build_windows_child_user.ps1 text eol=lf
+tools/windows_child_user_contract.py text eol=lf

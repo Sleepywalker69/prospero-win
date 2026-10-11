@@ -11,14 +11,15 @@
  * enumerator or killer under the server lock. Fixed records survive the run. */
 enum { PW_WFO_MAX_GENERATIONS=16, PW_WFO_ATTEMPT_MS=180000,
        PW_WFO_VENDOR_MS=600000, PW_WFO_VENDOR_CHILD_MS=300000, PW_WFO_CLEANUP_MS=5000,
-       PW_WFO_STARTUP_MS=30000, PW_WFO_CHILD_MS=60000, PW_WFO_LIST_CAP=16 };
+       PW_WFO_STARTUP_MS=30000, PW_WFO_CHILD_MS=60000,
+       PW_WFO_USER_MS=180000, PW_WFO_USER_CHILD_MS=120000, PW_WFO_LIST_CAP=16 };
 enum { PW_WFO_IDLE, PW_WFO_ADMITTED, PW_WFO_BOUND, PW_WFO_LAUNCH_POSSIBLE,
        PW_WFO_BOOTSTRAP, PW_WFO_RUNNING, PW_WFO_RETIRED, PW_WFO_UNCERTAIN };
 typedef struct PwWineFixtureOwnerConfig {
     uint64_t session;
-    unsigned profile; /* 1 original fixture; 2 explicit Battle.net experiment */
-    const char *child_unix_path; /* exact original fixture image; NULL for vendor */
-    const char *child_sha256;    /* exact fixture hash; NULL for vendor */
+    unsigned profile; /* 1 original fixture; 2 Battle.net experiment; 3 original USER control */
+    const char *child_unix_path; /* exact original mode1/3 image; NULL for vendor */
+    const char *child_sha256;    /* exact original mode1/3 hash; NULL for vendor */
     const unsigned char *helper_image;
     uint32_t helper_bytes;
     const char *build_id;        /* exact full-CRT helper build identity */

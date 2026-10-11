@@ -23,6 +23,7 @@ import tarfile
 
 sys.dont_write_bytecode = True
 import prepare_windows_child_prefix as prefix
+import windows_child_user_package as user_package
 
 SLUG = 'windows-child-fixture-v1'
 APP = 'PPSA99995'
@@ -268,14 +269,15 @@ def validate_battle(manifest, values, read, prepared, abi, build):
     require(type(enabled) is bool, 'Battle capability selection must be boolean')
     optional = {BATTLE_REPORT, BATTLE_CAPABILITY, BATTLE_CPU, BATTLE_PROFILE}
     if not enabled:
-        require(not any(n in values for n in optional) and not manifest.get('optional_roles'),
+        require(not any(n in values for n in optional) and
+                not any(k.startswith('battlenet_') for k in manifest.get('optional_roles', {})),
                 'disabled package contains Battle capability/profile')
-        copied_inventory(values, 'console', prepared['inventory'])
-        return
+        return prepared['inventory']
     require(all(values.get(n, {}).get('type') == 'file' for n in optional),
             'Battle capability/prefix/profile/CPU report missing')
     roles = {'battlenet_profile': BATTLE_PROFILE, 'battlenet_capability': BATTLE_CAPABILITY}
-    require(manifest.get('optional_roles') == roles, 'Battle consumer roles differ')
+    require({k: v for k, v in manifest.get('optional_roles', {}).items() if k.startswith('battlenet_')} == roles,
+            'Battle consumer roles differ')
     capability = decode_json(read(BATTLE_CAPABILITY))
     battle_bytes = read(BATTLE_REPORT)
     battle = decode_json(battle_bytes)
@@ -288,7 +290,6 @@ def validate_battle(manifest, values, read, prepared, abi, build):
             battle.get('installer_included') is False and battle.get('console_execution_verified') is False,
             'Battle prefix source/ABI/scope differs')
     combined = merge_console_inventories(prepared['inventory'], battle['inventory'])
-    copied_inventory(values, 'console', combined)
     require(BATTLE_INSTALLER not in values, 'user installer must not be distributed')
     require(check.get('private_dispatcher') == abi and check.get('runtime_validated') is False and
             check.get('cpu') == battle.get('cpu') == prepared.get('cpu'), 'Battle runtime/CPU cohort differs')
@@ -330,6 +331,103 @@ def validate_battle(manifest, values, read, prepared, abi, build):
                 hashlib.sha256(wow_checker.mapped_pe(data)).hexdigest(), 'Battle I386 module report differs')
     require(wow.get('backend') == wow_checker.check_backend(read(LIB + '/x86_64-windows/wow64.dll')),
             'Battle private CPU selection differs')
+    return combined
+
+
+def validate_user(manifest, values, read, prepared, abi, build, worker, combined):
+    enabled = manifest.get('user_enabled', False)
+    require(type(enabled) is bool, 'USER capability selection must be boolean')
+    roles = dict(user_package.ROLES) if enabled else {}
+    if manifest.get('battlenet_enabled'):
+        roles.update(battlenet_profile=BATTLE_PROFILE, battlenet_capability=BATTLE_CAPABILITY)
+    require(manifest.get('optional_roles', {}) == roles, 'unreviewed optional consumer roles')
+    if not enabled:
+        require(not any(name == user_package.PROFILE or name == user_package.PREFIX or
+                name.startswith(user_package.PREFIX + '/') or
+                name.startswith('provenance/windows-child-user') for name in values),
+                'disabled USER package contains USER payload')
+        return combined
+    require(worker.get('candidate_capabilities') == [
+        {'mode': 1, 'prefix': SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False},
+        {'mode': 2, 'prefix': BATTLE_SLUG, 'guest_machine': 'I386', 'backend': 'wowprospero', 'runtime_validated': False},
+        {'mode': 3, 'prefix': user_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False}],
+        'USER worker capability cohort differs')
+    required = (user_package.PROFILE, user_package.REPORT, user_package.REFERENCE, user_package.CAPABILITY)
+    require(all(values.get(name, {}).get('type') == 'file' for name in required),
+            'USER package inputs missing')
+    source_hashes = {}
+    for field, relative in user_package.SOURCE_FILES.items():
+        name = user_package.SOURCE_ROOT + '/' + relative
+        require(values.get(name, {}).get('type') == 'file', 'USER source copy absent')
+        source_hashes[field] = hashlib.sha256(read(name)).hexdigest()
+    sources = decode_json(read('provenance/retained-sources.json'))
+    project_source = sources.get('roles', {}).get('project', {})
+    require(project_source.get('revision') == manifest['project']['commit'], 'USER retained source revision differs')
+    require(project_source.get('path') == 'project.tar.gz', 'USER project source archive path differs')
+    project_path = 'sources/' + safe_name(project_source.get('path'))
+    require(source_hashes == user_package.source_copies(read(project_path),
+        {relative: read(user_package.SOURCE_ROOT + '/' + relative)
+         for relative in user_package.SOURCE_FILES.values()}), 'USER copied source bindings differ')
+    reference_inventory = manifest.get('user_reference_inventory')
+    require(isinstance(reference_inventory, dict), 'USER reference inventory absent')
+    copied_inventory(values, user_package.REFERENCE_ROOT, reference_inventory)
+    from windows_child_user_contract import validate_contents
+    receipt = decode_json(read(user_package.REFERENCE))
+    pair = validate_contents(lambda name: read(user_package.REFERENCE_ROOT + '/' + name),
+        {name for name, entry in reference_inventory.items() if entry.get('type') == 'file'},
+        manifest['project'], manifest['run_url'].rsplit('/', 1)[-1], manifest.get('run_attempt'), source_hashes)
+    prepared_user = decode_json(read(user_package.REPORT))
+    require(prepared_user.get('schema') == 'pw-windows-child-user-prefix/1' and
+            prepared_user.get('project') == manifest['project'] and
+            prepared_user.get('wine_commit') == prefix.WINE and
+            prepared_user.get('patches') == manifest['patches'] and
+            prepared_user.get('private_dispatcher') == abi and
+            prepared_user.get('cpu') == prepared.get('cpu') and
+            prepared_user.get('fixture') == pair and prepared_user.get('fixture_executed') is False and
+            prepared_user.get('console_execution_verified') is False and
+            prepared_user.get('child_presentation') is False and prepared_user.get('child_input') is False,
+            'USER prefix/source/ABI/reference differs')
+    combined = user_package.merge_inventory(combined, prepared_user['inventory'])
+    for name in user_package.IMAGES:
+        require({k: values.get(user_package.APP + '/' + name, {}).get(k) for k in ('bytes', 'sha256')} ==
+                {k: pair['files'][name][k] for k in ('bytes', 'sha256')}, 'USER packaged role image differs')
+    for name, digest in build['pe'].items():
+        arch, leaf = name.split('/')
+        relative = 'drive_c/windows/' + ('system32' if arch == 'x86_64-windows' else 'syswow64') + '/' + leaf
+        require(values.get(user_package.PREFIX + '/' + relative, {}).get('sha256') == digest and
+                prepared_user.get('patched_pe_delta', {}).get(relative, {}).get('after', {}).get('sha256') == digest,
+                'USER matched PE overlay differs')
+    require(len(prepared_user.get('patched_pe_delta', {})) == 24, 'USER complete PE overlay absent')
+    cpu = prepared['cpu']['outputs']['x86_64-windows/wowprospero.dll']
+    require(cpu == {k: values.get(user_package.PREFIX + '/drive_c/windows/system32/wowprospero.dll', {}).get(k)
+                   for k in ('bytes', 'sha256')}, 'USER CPU PE differs')
+    require(decode_json(read(user_package.CAPABILITY)) == user_package.capability(
+        manifest['project'], read(user_package.PROFILE), read(user_package.REPORT), read(user_package.REFERENCE),
+        worker['worker']['build_id'], pair['files']['user-child.exe']['sha256']), 'USER capability differs')
+    return combined
+
+
+def check_user_inputs(paths, project, fixture, abi, host_stamp):
+    from windows_child_user_contract import validate_pair
+    pair = validate_pair(paths['user_fixture'], project, paths['repo'],
+                         os.environ.get('GITHUB_RUN_ID'), os.environ.get('GITHUB_RUN_ATTEMPT'))
+    prepared = read_json(paths['user_prefix_report'])
+    require(prepared.get('schema') == 'pw-windows-child-user-prefix/1' and prepared.get('project') == project and
+            prepared.get('wine_commit') == prefix.WINE and prepared.get('patches') == fixture['patches'] and
+            prepared.get('host_stamp') == host_stamp and prepared.get('private_dispatcher') == abi and
+            prepared.get('cpu') == fixture.get('cpu') and prepared.get('fixture') == pair and
+            prepared.get('fixture_executed') is False and prepared.get('console_execution_verified') is False and
+            prepared.get('child_presentation') is False and prepared.get('child_input') is False,
+            'USER prepared prefix source/reference differs')
+    require(prefix.inventory(paths['user_prefix']) == prepared.get('inventory'), 'USER prefix bytes changed')
+    user_package.merge_inventory(fixture['inventory'], prepared['inventory'])
+    actual = (paths['user_prefix'] / user_package.PROFILE.removeprefix('console/')).read_bytes()
+    user_package.profile_fields(actual)
+    for name in user_package.IMAGES:
+        require(record(paths['user_prefix'] / user_package.APP.removeprefix('console/') / name) ==
+                {k: pair['files'][name][k] for k in ('bytes', 'sha256')}, 'USER prefix image differs')
+    return {'pair': pair, 'prefix': prepared, 'profile': actual,
+            'reference_inventory': prefix.inventory(paths['user_fixture'])}
 
 
 def validate_manifest(manifest, values, read):
@@ -420,7 +518,9 @@ def validate_manifest(manifest, values, read):
     require(isinstance(cpu, dict) and cpu == {k: values.get(LIB + '/' + cpu_name, {}).get(k) for k in ('bytes', 'sha256')} and
             cpu == {k: values.get(CONSOLE_PREFIX + '/drive_c/windows/system32/wowprospero.dll', {}).get(k)
                     for k in ('bytes', 'sha256')}, 'source-built CPU DLL binding differs')
-    validate_battle(manifest, values, read, prepared, abi, build)
+    combined = validate_battle(manifest, values, read, prepared, abi, build)
+    combined = validate_user(manifest, values, read, prepared, abi, build, worker, combined)
+    copied_inventory(values, 'console', combined)
     pair = decode_json(read('provenance/fixture-source.json'))
     require(pair.get('project') == project and pair == prepared['fixture'] and pair.get('architecture') == 'x64',
             'packaged fixture producer differs')
@@ -440,6 +540,17 @@ def validate_manifest(manifest, values, read):
     require(title.get('schema') == 'pw-windows-child-title/1' and title.get('project') == project and
             title.get('fixture_child_sha256') == pair['files']['child.exe']['sha256'],
             'packaged title provenance differs')
+    require(title.get('user_enabled', False) == manifest.get('user_enabled', False),
+            'title USER admission selection differs')
+    if manifest.get('user_enabled', False):
+        require(title.get('title_compile_receipt') ==
+                {k: values.get('provenance/title-compile.json', {}).get(k) for k in ('bytes', 'sha256')} and
+                values.get('provenance/title-compile.json', {}).get('type') == 'file',
+                'USER raw title compiler receipt differs')
+        user = decode_json(read(user_package.REFERENCE))
+        require(title.get('user_child_sha256') == user['files']['user-child.exe']['sha256'] and
+                title.get('user_reference_sha256') == values[user_package.REFERENCE]['sha256'],
+                'title original USER child/reference differs')
     copied_inventory(values, APP, title_inventory(title['files']), exact=False)
     return manifest
 
@@ -473,6 +584,7 @@ def write_archive(root, target):
 def verify_archive(path):
     prefix.ordinary(path)
     values, contents, folded, total = {}, {}, set(), 0
+    retained_total = 0
     # Do not extract any member. Every file is streamed and checked, including sources.
     with tarfile.open(path, 'r:gz') as archive:
         for item in archive:
@@ -495,8 +607,12 @@ def verify_archive(path):
                              LIB + '/x86_64-windows/wow64.dll', LIB + '/i386-windows/ntdll.dll',
                              LIB + '/i386-windows/win32u.dll', LIB + '/x86_64-unix/ntdll.prx',
                              LIB + '/x86_64-unix/wineserver.prx')
+                retain = retain or name == user_package.PROFILE or name == 'sources/project.tar.gz' or \
+                    name.startswith(user_package.SOURCE_ROOT + '/') or name.startswith(user_package.REFERENCE_ROOT + '/')
                 if retain:
                     require(item.size <= MAX_JSON, 'oversized inspection input')
+                    retained_total += item.size
+                    require(retained_total <= 256 << 20, 'inspection memory budget exceeded')
                 stream = archive.extractfile(item)
                 for block in iter(lambda: stream.read(1 << 20), b''):
                     h.update(block); size += len(block)
@@ -573,12 +689,14 @@ def retained_sources(root, source_root, manifest_path, project, wine_archive, se
     return value
 
 
-def validate_title(paths, expected, inspection):
+def validate_title(paths, expected, inspection, run_id=None, run_attempt=None):
     builder = prefix.load_tool(paths['repo'], 'build_wine_service_child')
     args = argparse.Namespace(work=paths['repo'], sdk=paths['sdk'], foundation=paths['foundation'],
                               runtime=paths['wine_work'], llvm_bindir=paths['llvm_bindir'],
                               service_work=paths['service_work'], app=paths['title'], build=paths['title_build'],
                               sdk_source_archive=paths['sdk_source_archive'], fixture=paths['fixture'], out=inspection)
+    args.user_fixture = paths.get('user_fixture')
+    args.run_id, args.run_attempt = run_id, run_attempt
     actual = builder.check_title(args)
     require(actual == expected, 'replayed title import/compiled/embedded identity differs')
     return actual
@@ -737,15 +855,25 @@ def assemble(config, output):
                          config.get('run_url', '')), 'actual producer run URL required')
     enabled = config.get('battlenet_enabled', False)
     require(type(enabled) is bool, 'Battle capability selection must be boolean')
+    user_enabled = config.get('user_enabled', False)
+    require(type(user_enabled) is bool, 'USER capability selection must be boolean')
+    run_id = config['run_url'].rsplit('/', 1)[-1]
+    run_attempt = config.get('run_attempt')
+    if user_enabled:
+        require(isinstance(run_attempt, str) and re.fullmatch('[1-9][0-9]*', run_attempt) and
+                os.environ.get('GITHUB_RUN_ID') == run_id and
+                os.environ.get('GITHUB_RUN_ATTEMPT') == run_attempt,
+                'USER requires externally supplied matching run and attempt')
     names = {'repo', 'host_work', 'wine_work', 'cohort', 'prefix', 'prefix_report', 'fixture', 'service_work',
              'title', 'title_build', 'title_report', 'sources_root', 'sources_manifest', 'wine_archive',
              'sdk_source_archive', 'sdk', 'foundation', 'llvm_bindir'}
     if enabled: names |= {'battlenet_prefix', 'battlenet_prefix_report', 'cpu_output'}
+    if user_enabled: names |= {'user_prefix', 'user_prefix_report', 'user_fixture'}
     require(set(config.get('paths', {})) == names, 'incomplete/unexpected assembler paths')
     p = {name: Path(config['paths'][name]).absolute() for name in names}
     for name, path in p.items():
         prefix.ordinary(path, name not in {'cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive',
-                                         'sdk_source_archive', 'battlenet_prefix_report'})
+                                         'sdk_source_archive', 'battlenet_prefix_report', 'user_prefix_report'})
     repo, wine, host = p['repo'], p['wine_work'], p['host_work']
     project = prefix.project(repo)
     out = prefix.absent(output, tuple(p.values())); out.mkdir(mode=0o755)
@@ -771,6 +899,7 @@ def assemble(config, output):
     abi = abi_checker.check_build(wine, 1, p['llvm_bindir'] / 'llvm-readelf')
     require(prepared['private_dispatcher'] == abi, 'prefix/runtime private ABI cohort differs')
     battle = check_battle_inputs(p, project, prepared, abi, host_identity['stamp']) if enabled else None
+    user = check_user_inputs(p, project, prepared, abi, host_identity['stamp']) if user_enabled else None
     service = validate_service(repo, p['service_work'], project, wine, abi, p['sdk'], p['foundation'],
                                p['llvm_bindir'], inspection / 'service-before')
     require(read_json(wine / 'report.json')['tls']['build']['inputs']['host_llvm'] == service['host_llvm'],
@@ -781,13 +910,19 @@ def assemble(config, output):
             title.get('service_manifest_sha256') == digest_file(p['service_work'] / 'native-wine-child-build.json') and
             title.get('runtime') == service['runtime'] and title.get('compiler') == service['host_llvm'] and
             title.get('console_execution_verified') is False, 'title/child/compiler cohort differs')
+    require(title.get('user_enabled', False) == user_enabled, 'title USER admission selection differs')
+    if user_enabled:
+        require(title.get('user_child_sha256') == user['pair']['files']['user-child.exe']['sha256'] and
+                title.get('user_reference_sha256') == record(p['user_fixture'] / 'user-source.json')['sha256'],
+                'title USER original image/receipt differs')
     title_tree = prefix.inventory(p['title'])
     require(title.get('files') == title_files(title_tree), 'title bytes changed after inspection')
-    validate_title(p, title, inspection / 'title-before')
+    validate_title(p, title, inspection / 'title-before', run_id if user_enabled else None, run_attempt)
     source_record = retained_sources(repo, p['sources_root'], p['sources_manifest'], project,
                                      p['wine_archive'], service, p['sdk'], p['foundation'], wine)
     before = {n: record(p[n]) for n in ('cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive', 'sdk_source_archive')}
     if enabled: before['battlenet_prefix_report'] = record(p['battlenet_prefix_report'])
+    if user_enabled: before['user_prefix_report'] = record(p['user_prefix_report'])
     checker = prefix.load_tool(repo, 'check_wine_prx_build')
     script = (repo / 'tools/build_wine_ps5.sh').read_text()
     pin = re.search(r'^MODULE_EXPORTS_COMMIT=([0-9a-f]{40})$', script, re.M)
@@ -847,6 +982,18 @@ def assemble(config, output):
         put_bytes(stage, BATTLE_CAPABILITY,
                   json_bytes(battle_capability(project, battle[2], json_bytes(battle[0]), battle[1])))
         put(stage, BATTLE_CPU, p['cpu_output'] / 'cpu-build.json')
+    if user_enabled:
+        put(stage, 'provenance/title-compile.json', p['title_build'] / 'wine-child-title-compile.json',
+            title['title_compile_receipt'])
+        copy_tree(stage, 'console', p['user_prefix'], expected=user['prefix']['inventory'])
+        copy_tree(stage, user_package.REFERENCE_ROOT, p['user_fixture'], expected=user['reference_inventory'])
+        put_bytes(stage, user_package.REPORT, json_bytes(user['prefix']))
+        for relative in user_package.SOURCE_FILES.values():
+            put(stage, user_package.SOURCE_ROOT + '/' + relative, repo / relative)
+        put_bytes(stage, user_package.CAPABILITY, json_bytes(user_package.capability(
+            project, user['profile'], json_bytes(user['prefix']),
+            (p['user_fixture'] / 'user-source.json').read_bytes(),
+            service['worker']['build_id'], user['pair']['files']['user-child.exe']['sha256'])))
     cpu = stage / CONSOLE_PREFIX / 'drive_c/windows/system32/wowprospero.dll'
     put(stage, LIB + '/x86_64-windows/wowprospero.dll', cpu,
         prepared['cpu']['outputs']['x86_64-windows/wowprospero.dll'])
@@ -882,10 +1029,13 @@ def assemble(config, output):
             abi_checker.check_build(wine, 1, p['llvm_bindir'] / 'llvm-readelf') == abi and
             validate_service(repo, p['service_work'], project, wine, abi, p['sdk'], p['foundation'],
                              p['llvm_bindir'], inspection / 'service-after') == service, 'runtime/worker inputs changed')
-    validate_title(p, title, inspection / 'title-after')
+    validate_title(p, title, inspection / 'title-after', run_id if user_enabled else None, run_attempt)
     if enabled:
         require(check_battle_inputs(p, project, prepared, abi, host_identity['stamp']) == battle,
                 'Battle source/runtime/profile changed during assembly')
+    if user_enabled:
+        require(check_user_inputs(p, project, prepared, abi, host_identity['stamp']) == user,
+                'USER reference/prefix/profile changed during assembly')
     normalize_directories(stage)
     values = inventory(stage)
     manifest = {'schema': 'pw-windows-child-fixture/1', 'project': project, 'wine_commit': prefix.WINE,
@@ -895,6 +1045,11 @@ def assemble(config, output):
                 'scope': 'source/build/static package checks only; no target execution or native reaping evidence'}
     if enabled:
         manifest['optional_roles'] = {'battlenet_profile': BATTLE_PROFILE, 'battlenet_capability': BATTLE_CAPABILITY}
+    if user_enabled:
+        manifest['user_enabled'] = True
+        manifest['run_attempt'] = run_attempt
+        manifest['user_reference_inventory'] = user['reference_inventory']
+        manifest['optional_roles'] = {**manifest.get('optional_roles', {}), **user_package.ROLES}
     put_bytes(stage, MANIFEST, json_bytes(manifest))
     put_bytes(stage, SUMS, checksums(inventory(stage)))
     verify_directory(stage)

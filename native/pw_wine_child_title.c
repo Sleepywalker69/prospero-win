@@ -64,6 +64,14 @@ unsigned pw_wine_child_title_profile(const PwGameProfile *p)
         EQUAL(p, app.working_directory, "C:\\installer") &&
         p->app.architecture == PW_APP_ARCH_PE32 && p->runtime.cpu == PW_GAME_CPU_TRANSLATOR)
         return 2;
+    if (PW_WINE_USER_PROFILE_ENABLED && EQUAL(p, app.id, "windows-child-user-v1") &&
+        EQUAL(p, app.prefix, "windows-child-user-v1") &&
+        EQUAL(p, app.executable, "C:\\windows-child-user\\user-parent.exe") &&
+        EQUAL(p, app.working_directory, "C:\\windows-child-user") &&
+        p->app.architecture == PW_APP_ARCH_PE64 && p->runtime.cpu == PW_GAME_CPU_DEFAULT &&
+        EQUAL(p, winedebug, "") && p->display.width == 800 && p->display.height == 600 &&
+        p->display.view == PW_GAME_VIEW_DESKTOP && !p->display.show_fps)
+        return 3;
     return 0;
 }
 #undef EQUAL
@@ -159,7 +167,9 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
     unsigned empty = TITLE_UNUSED;
     if (!atomic_compare_exchange_strong(&title.state, &empty, TITLE_PREPARING)) return -1;
     int status = -1;
-    if ((profile != 1 && profile != 2) || (profile == 1 && !hexadecimal(fixture_hash, 64)) ||
+    if ((profile != 1 && profile != 2 && profile != 3) ||
+        (profile == 3 && !PW_WINE_USER_PROFILE_ENABLED) ||
+        ((profile == 1 || profile == 3) && !hexadecimal(fixture_hash, 64)) ||
         (profile == 2 && fixture_hash) || !hexadecimal(PW_WINE_CHILD_BUILD_ID, 40) ||
         !hexadecimal(PW_WINE_CHILD_SELF_SHA256, 64) ||
         pw_wine_child_image_size != PW_WINE_CHILD_SELF_BYTES ||
@@ -171,15 +181,16 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
     /* Correlation only, not authentication or entropy. One title owner means
      * these generations are never recycled within this native process. */
     title.session = (uint64_t)(unsigned)pid << 32 | (uint32_t)now;
-    if (profile == 1) memcpy(title.child_hash, fixture_hash, sizeof(title.child_hash));
+    if (profile == 1 || profile == 3) memcpy(title.child_hash, fixture_hash, sizeof(title.child_hash));
     unsigned bytes = pw_wine_fixture_owner_bytes();
     if (!bytes || bytes > 1024u * 1024u) goto failure;
     title.owner = calloc(1, bytes);
     if (!title.owner) goto failure;
     PwWineFixtureOwnerConfig config = {
         .session = title.session, .profile = profile,
-        .child_unix_path = profile == 1 ? "/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe" : NULL,
-        .child_sha256 = profile == 1 ? title.child_hash : NULL,
+        .child_unix_path = profile == 1 ? "/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe" :
+                           profile == 3 ? "/data/prospero-win/prefixes/windows-child-user-v1/drive_c/windows-child-user/user-child.exe" : NULL,
+        .child_sha256 = profile == 1 || profile == 3 ? title.child_hash : NULL,
         .helper_image = pw_wine_child_image, .helper_bytes = (uint32_t)pw_wine_child_image_size,
         .build_id = PW_WINE_CHILD_BUILD_ID, .context = &title,
         .clock_ms = clock_ms, .cancelled = cancelled, .record = record

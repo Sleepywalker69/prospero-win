@@ -1541,3 +1541,19 @@ left Ctrl/Alt map to the generic virtual keys, and keypad Enter maps to Return.
 It does not provide child physical-input forwarding, focus ownership, IME or
 keyboard-layout compatibility. The original MSVC fixture and all process/ABI
 contracts remain unchanged. Host controls do not establish console key delivery.
+
+## Separate original USER process control
+
+The optional mode 3 control described in the
+[matched child build](WINDOWS_CHILD_FIXTURE_BUILD.md#optional-original-worker-first-user-control)
+uses an independently built original AMD64 parent/child pair. It exercises a
+fresh child worker's first USER call and later ordinary class/GDI setup, while
+keeping the original headless fixture and Battle profile distinct. It introduces
+no Wine patch, protocol version, public export or native module. The USER fixes
+above are still validated through their own source controls and all four real
+target objects, including the syscall allocator.
+
+The new capability is enabled only with a checked same-run reference and exact
+child hash. The additional USER32/GDI32 imports do not imply a presentation or
+input bridge. Host source controls and PE inspection remain separate from actual
+Windows reference execution and PS5 guest/native ownership evidence.
