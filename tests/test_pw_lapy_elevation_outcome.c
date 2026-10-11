@@ -44,7 +44,7 @@ static unsigned checks,cases;
 static int mock_open(const char *p,int flags,...){CHECK(!strcmp(p,PW_LAPY_HELPER_PATH)&&flags==O_RDONLY);m.opens++;if(m.fail_open){errno=ENOENT;return -1;}return 90;}
 static int mock_fstat(int fd,struct stat *st){CHECK(fd==90);if(m.fail_stat){errno=EIO;return -1;}memset(st,0,sizeof(*st));st->st_mode=m.nonregular?S_IFDIR:S_IFREG;st->st_size=7;return 0;}
 static int mock_close(int fd){CHECK(fd==90);m.closes++;if(m.fail_close){errno=EBADF;return -1;}return 0;}
-static ssize_t mock_read(int fd,void *p,size_t n){CHECK(fd==90);m.reads++;if(m.fail_read){errno=EIO;return -1;}size_t left=7-m.filei;if(n>left)n=left;memcpy(p,"ELFTEST"+m.filei,n);m.filei+=n;return (ssize_t)n;}
+static ssize_t mock_read(int fd,void *p,size_t n){CHECK(fd==90);m.reads++;if(m.fail_read){errno=EIO;return -1;}size_t left=7-m.filei;if(n>left)n=left;memcpy(p,&"ELFTEST"[m.filei],n);m.filei+=n;return (ssize_t)n;}
 static uid_t mock_geteuid(void){return 1000;}
 static int mock_seteuid(uid_t uid){CHECK(uid==1000);m.clones++;if(m.clone_fail){errno=EPERM;return -1;}return 0;}
 int ps5log_ps5_socket(int d,int t,int p){CHECK(d==AF_INET&&t==SOCK_STREAM&&p==IPPROTO_TCP);m.sockets++;if(m.fail_socket){errno=ENOBUFS;return -1;}return 42;}
