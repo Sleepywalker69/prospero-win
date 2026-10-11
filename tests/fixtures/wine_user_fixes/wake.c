@@ -6,25 +6,15 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/types.h>
-typedef unsigned DWORD;typedef unsigned UINT;typedef int INT;typedef int BOOL;typedef uintptr_t HWND;
-#define TRUE 1
-#define FALSE 0
-#define INPUT_KEYBOARD 1
-#define KEYEVENTF_KEYUP 2
-#define MAPVK_VK_TO_VSC 1
-#define MOUSEEVENTF_LEFTUP 1
-#define MOUSEEVENTF_LEFTDOWN 2
-#define MOUSEEVENTF_RIGHTUP 4
-#define MOUSEEVENTF_RIGHTDOWN 8
-#define MOUSEEVENTF_MIDDLEUP 16
-#define MOUSEEVENTF_MIDDLEDOWN 32
+#include "windef.h"
+#include "winbase.h"
+#include "winuser.h"
+/* Inert private queue bits; their branch selection is modeled. */
 #define QS_DRIVER 0x80000000u
 #define QS_HARDWARE 1
 static unsigned checks;
 #define CHECK(x) do { ++checks; if(!(x)){fprintf(stderr,"check %u line %d failed: %s\n",checks,__LINE__,#x);exit(1);} }while(0)
 /* INPUT_DECLARATIONS */
-typedef struct { int type;struct {unsigned wVk,wScan,dwFlags;}ki;} INPUT;
-typedef struct {int unused;} MSG;
 struct peek_message_filter {int internal;};
 static struct {uintptr_t current_token,global_token;int service,selected,fd;int read_count,read_positive,read_terminal,fd_calls,next_calls,events;unsigned event_type,event_code;int event_down;int sent,mouse,moved,focus,locks;unsigned bits;int queue_calls,poll,wake,changed,peek,signals;int masks;} m;
 static int screen_lock;
@@ -33,8 +23,8 @@ static int pthread_mutex_lock(int*x){(void)x;CHECK(!m.locks);m.locks++;return 0;
 static int pthread_mutex_unlock(int*x){(void)x;CHECK(m.locks==1);m.locks--;return 0;}
 static uintptr_t bridge_current_token(void){return m.current_token;}
 static int bridge_service_window(HWND h){(void)h;return m.service;}
-static HWND bridge_input_window(HWND h){(void)h;return m.selected;}
-static HWND NtUserGetForegroundWindow(void){return 12;}
+static HWND bridge_input_window(HWND h){(void)h;return (HWND)(uintptr_t)m.selected;}
+static HWND NtUserGetForegroundWindow(void){return (HWND)(uintptr_t)12;}
 static void NtUserSetForegroundWindow(HWND h){CHECK(h!=0);m.focus++;}
 static HWND last_shown_window(void){return 0;}
 static int fake_fd(void){m.fd_calls++;return m.fd;}
@@ -43,11 +33,11 @@ static ssize_t fake_read(int fd,void*buf,size_t size){CHECK(fd==m.fd&&size==64&&
 static int fake_next(struct ps5_input*event){m.next_calls++;if(!m.events)return 0;m.events--;*event=(struct ps5_input){.type=m.event_type,.code=m.event_code,.down=m.event_down,.x=3,.y=4};return 1;}
 static int (*input_fd)(void)=fake_fd;
 static int (*next_input)(struct ps5_input*)=fake_next;
-static unsigned NtUserMapVirtualKeyEx(unsigned c,unsigned t,uintptr_t layout){CHECK(t==MAPVK_VK_TO_VSC&&layout==22);return c+1;}
-static uintptr_t NtUserGetKeyboardLayout(int t){CHECK(t==0);return 22;}
-static void NtUserSendHardwareInput(HWND h,int a,INPUT*i,int b){CHECK(!m.locks&&h==12&&a==0&&b==0);CHECK(i->ki.wVk==m.event_code&&i->ki.wScan==m.event_code+1);CHECK(i->ki.dwFlags==(m.event_down?0:KEYEVENTF_KEYUP));m.sent++;}
-static void move_cursor(HWND h,int x,int y){CHECK(!m.locks&&h==12&&x==3&&y==4);m.moved++;}
-static void send_mouse(HWND h,DWORD flags,int x,int y){CHECK(!m.locks&&h==12&&flags&&x==0&&y==0);m.mouse++;}
+static unsigned NtUserMapVirtualKeyEx(unsigned c,unsigned t,HKL layout){CHECK(t==MAPVK_VK_TO_VSC&&layout==(HKL)(uintptr_t)22);return c+1;}
+static HKL NtUserGetKeyboardLayout(int t){CHECK(t==0);return (HKL)(uintptr_t)22;}
+static void NtUserSendHardwareInput(HWND h,int a,INPUT*i,int b){CHECK(!m.locks&&h==(HWND)(uintptr_t)12&&a==0&&b==0);CHECK(i->ki.wVk==m.event_code&&i->ki.wScan==m.event_code+1);CHECK(i->ki.dwFlags==(m.event_down?0:KEYEVENTF_KEYUP));m.sent++;}
+static void move_cursor(HWND h,int x,int y){CHECK(!m.locks&&h==(HWND)(uintptr_t)12&&x==3&&y==4);m.moved++;}
+static void send_mouse(HWND h,DWORD flags,int x,int y){CHECK(!m.locks&&h==(HWND)(uintptr_t)12&&flags&&x==0&&y==0);m.mouse++;}
 static BOOL ps5_ProcessEvents(DWORD mask);
 static struct {BOOL(*pProcessEvents)(DWORD);} driver={ps5_ProcessEvents},*user_driver=&driver;
 static BOOL check_internal_bits(UINT bit){return (m.bits&bit)!=0;}

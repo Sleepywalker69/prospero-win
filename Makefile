@@ -5,6 +5,8 @@ BUILD := build/host
 # Where the pinned Wine checkout lives for the release-evidence target: the
 # conventional ignored location, overridable with
 # `make wine-check WINE_SOURCE=<checkout>`.
+# Preserve an explicitly configured source path, including a missing one.
+WINE_SOURCE_EXPLICIT := $(if $(filter undefined,$(origin WINE_SOURCE)),0,1)
 WINE_SOURCE ?= .deps/wine/source
 HEADERS := $(wildcard include/*.h src/*.h native/*.h tests/*.h)
 
@@ -299,6 +301,17 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_creation_abi.py
 	python3 tests/test_private_dispatch_wow64_contract.py
 	python3 tests/test_wine_fixture_build.py
+	@if test -d "$(WINE_SOURCE)"; then \
+		key_out=$$(mktemp -d "$(BUILD)/ps5-extended-keys.XXXXXX") && \
+		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_SOURCE)" \
+			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/strict" && \
+		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_SOURCE)" \
+			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/ubsan" --ubsan; \
+	elif test "$(WINE_SOURCE_EXPLICIT)" = 0 && test ! -e "$(WINE_SOURCE)" && test ! -L "$(WINE_SOURCE)"; then \
+		echo "ps5 extended keys skipped: optional composed Wine source is unavailable at $(WINE_SOURCE)"; \
+	else \
+		echo "ps5 extended keys: configured Wine source is missing or invalid: $(WINE_SOURCE)" >&2; exit 2; \
+	fi
 	python3 tests/test_wine_child_integration.py
 	python3 tests/test_wine_build_performance.py
 	python3 tests/test_wine_compile_cache.py
