@@ -41,6 +41,7 @@ def main():
     receipt['compiler']={'requested':a.cc,'path':str(Path(compiler).resolve()),'sha256':h(Path(compiler).resolve()),'version':subprocess.check_output([compiler,'--version'],text=True).splitlines()[0]}
     code={k:p.read_text() for k,p in sources.items()};new='void cache_thread_desktop_windows(' in code['winstation.c']
     wake='\n'.join(function(code[f],s) for f,s in [('ps5drv.c','static BOOL ps5_ProcessEvents('),('message.c','static BOOL process_driver_events(')])
+    if 'static BOOL is_extended_key(' in code['ps5drv.c']:wake=function(code['ps5drv.c'],'static BOOL is_extended_key(')+wake
     desktop=[]
     if new:desktop.append(function(code['winstation.c'],'void cache_thread_desktop_windows('))
     desktop.append(function(code['winstation.c'],'HWND get_desktop_window(void)'))

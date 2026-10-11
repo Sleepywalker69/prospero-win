@@ -145,6 +145,14 @@ def main():
                             "--cc", args.cc, "--only", suite, "--case", case,
                             "--out", str(out / ("user-" + suite + "-" + case + "-" + suffix)),
                             *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
+    # Exact extended-key translation, with real Wine input types and inert
+    # boundaries. The earlier USER checks run on this same combined source.
+    keys = Path(__file__).resolve().parents[1] / "tests/test_ps5_extended_keys.py"
+    for suffix in ("strict", "ubsan"):
+        subprocess.run([sys.executable, str(keys), "--wine-source", str(args.wine_source),
+                        "--fixtures", str(keys.parent / "fixtures"), "--cc", args.cc,
+                        "--out", str(out / ("extended-keys-" + suffix)),
+                        *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
     paths = ["dlls/ntdll/unix/process.c", "dlls/ntdll/unix/server.c", "server/process.c", "server/ptrace.c", "dlls/ntdll/unix/thread.c", "include/wine/pw_wine_fixture_provider.h"]
     source = {n: (args.wine_source/n).read_text() for n in paths}
     (out/"source-hashes.json").write_text(json.dumps({n: hashlib.sha256((args.wine_source/n).read_bytes()).hexdigest() for n in paths}, indent=2)+"\n")

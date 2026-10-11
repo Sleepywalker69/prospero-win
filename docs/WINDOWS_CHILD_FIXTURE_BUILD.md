@@ -565,3 +565,10 @@ interrupted by a platform content check and remain unperformed. Historical
 server-module results do not certify later source changes. A matched target
 build and a separately scoped nested reference/console proof are required before
 claiming descendant execution or clean whole-tree retirement.
+
+Patch 0919 adds the reviewed extended-key flags to the same PS5 driver body.
+The mandatory source gate runs its strict/UBSan key matrix alongside the wake
+and desktop controls on the fully composed source. Its real target object and
+compile command are retained by the existing four-object USER evidence record.
+This adds no profile or child input transport; physical right-modifier/keypad
+information already collapsed by the HID producer remains unavailable.

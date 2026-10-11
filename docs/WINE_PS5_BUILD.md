@@ -1524,3 +1524,20 @@ bound into the build report. Full win32u linking remains mandatory. This does
 not add a server request, process ABI, profile, child display/input transport or
 an observed console compatibility result. The existing MSVC fixture stays
 unchanged; a separate worker-first-USER fixture remains future validation.
+
+## Extended-key flags in existing PS5 input events
+
+Patch 0919 reuses the exact upstream [#426](https://github.com/mpereiraesaa/prospero-win/commit/df5778b62b4bb69af51ccbda486578a3c24ad873)
+patch body. It marks the existing extended virtual-key set with KEYEVENTF_EXTENDEDKEY
+while preserving key-up, scan-code/layout mapping, target-window routing, bridge
+domain suppression and the bounded input batch. The mandatory composed-source
+gate runs the exact driver/helper bodies and real Wine key definitions with
+inert boundaries, in strict and UBSan variants. The same gate runs the wake and
+desktop controls against all three patches together. The existing real target
+ps5drv.o evidence and final win32u link/conversion checks cover this new body.
+
+This does not restore distinctions already lost by the HID producer: right and
+left Ctrl/Alt map to the generic virtual keys, and keypad Enter maps to Return.
+It does not provide child physical-input forwarding, focus ownership, IME or
+keyboard-layout compatibility. The original MSVC fixture and all process/ABI
+contracts remain unchanged. Host controls do not establish console key delivery.

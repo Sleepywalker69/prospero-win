@@ -971,3 +971,6 @@ tools/check_wine_user_fixes.py
 tests/fixtures/wine_user_fixes/wake.c
 wine/patches/0918-win32u-ps5-worker-desktop-cache.patch
 tests/fixtures/wine_user_fixes/desktop.c
+wine/patches/0919-win32u-ps5-send-extended-keys-as-extended.patch
+tests/test_ps5_extended_keys.py
+tests/fixtures/ps5_extended_keys.c
