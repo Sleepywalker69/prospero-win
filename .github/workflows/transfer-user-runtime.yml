@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-name: Transfer exact existing network runtime
+name: Transfer exact existing startup runtime
 on:
   workflow_dispatch:
   pull_request:
@@ -13,7 +13,7 @@ jobs:
       ${{ github.repository == 'Sleepywalker69/prospero-win' &&
           (github.event_name == 'workflow_dispatch' ||
            (github.event.pull_request.head.repo.full_name == github.repository &&
-            github.event.label.name == 'transfer-existing-network-runtime')) }}
+            github.event.label.name == 'transfer-existing-startup-runtime')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -27,23 +27,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11698782540 > "$RUNNER_TEMP/source-artifact.json"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11708847047 > "$RUNNER_TEMP/source-artifact.json"
           python3 - "$RUNNER_TEMP/source-artifact.json" <<'PYCODE'
           import json,sys
           x=json.load(open(sys.argv[1]))
-          assert x['id']==11698782540 and x['workflow_run']['id']==38128144584
-          assert x['workflow_run']['head_sha']=='305bae8546ab52cca97b50fdf3eebe1a9f4f1627'
-          assert x['name']=='windows-child-fixture-259cfdbc6f6ff4ef1dcedd32a6a02c4b4c97332e-1'
-          assert not x['expired'] and x['size_in_bytes']==753755672
-          assert x['digest']=='sha256:1c359aea306d7c029e4532f5aeaa65abf076a22ad04530908a4090093c5fe921'
+          assert x['id']==11708847047 and x['workflow_run']['id']==38154132915
+          assert x['workflow_run']['head_sha']=='3144a113de87d003c6747c4530abd435d4c9781a'
+          assert x['name']=='windows-child-fixture-2d4854e06f904366be6a78cffd38b23deb9e8c2e-1'
+          assert not x['expired'] and x['size_in_bytes']==753752815
+          assert x['digest']=='sha256:f9329dceb8037d8aafbac782c6e525e4f2fbb013f0a9380a0522c51943e021b7'
           PYCODE
-          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11698782540/zip > "$RUNNER_TEMP/original-runtime.zip"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11708847047/zip > "$RUNNER_TEMP/original-runtime.zip"
       - name: Verify original identity and split bytes without extraction
         run: python3 tools/split_verified_artifact.py "$RUNNER_TEMP/original-runtime.zip" "$RUNNER_TEMP/byte-parts"
       - name: Retain exact byte part 1
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: network-runtime-byte-part01-${{ github.run_id }}
+          name: startup-runtime-byte-part01-${{ github.run_id }}
           path: ${{ runner.temp }}/byte-parts/runtime.zip.part01
           compression-level: 0
           retention-days: 7
@@ -51,7 +51,7 @@ jobs:
       - name: Retain exact byte part 2
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: network-runtime-byte-part02-${{ github.run_id }}
+          name: startup-runtime-byte-part02-${{ github.run_id }}
           path: ${{ runner.temp }}/byte-parts/runtime.zip.part02
           compression-level: 0
           retention-days: 7
@@ -59,7 +59,7 @@ jobs:
       - name: Retain exact byte part 3
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: network-runtime-byte-part03-${{ github.run_id }}
+          name: startup-runtime-byte-part03-${{ github.run_id }}
           path: ${{ runner.temp }}/byte-parts/runtime.zip.part03
           compression-level: 0
           retention-days: 7
@@ -67,7 +67,7 @@ jobs:
       - name: Retain exact byte part 4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: network-runtime-byte-part04-${{ github.run_id }}
+          name: startup-runtime-byte-part04-${{ github.run_id }}
           path: ${{ runner.temp }}/byte-parts/runtime.zip.part04
           compression-level: 0
           retention-days: 7
@@ -75,7 +75,7 @@ jobs:
       - name: Retain transport receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: network-runtime-byte-manifest-${{ github.run_id }}
+          name: startup-runtime-byte-manifest-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/byte-parts/MANIFEST.json
             ${{ runner.temp }}/source-artifact.json
