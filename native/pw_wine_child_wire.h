@@ -10,14 +10,27 @@ enum { PW_WC_WIRE_BYTES = 136, PW_WC_BUILD_CHARS = 40,
 enum { PW_WC_PROFILE_FIXTURE = 1, PW_WC_PROFILE_BATTLENET = 2, PW_WC_PROFILE_USER = 3, PW_WC_PROFILE_NET = 4,
        PW_WC_MACHINE_AMD64 = 0x8664, PW_WC_MACHINE_I386 = 0x014c };
 enum { PW_WC_HELLO = 1, PW_WC_BOOTSTRAP, PW_WC_BOOTSTRAP_ACK,
-       PW_WC_SIGNAL, PW_WC_SIGNAL_ACK, PW_WC_FAILURE };
+       PW_WC_SIGNAL, PW_WC_SIGNAL_ACK, PW_WC_FAILURE, PW_WC_PROGRESS, PW_WC_CANCEL };
+/* Diagnostic-only pre-ACK milestones, bounded and strictly increasing. They
+ * never certify readiness, helper settlement or Windows execution. */
+enum { PW_WCP_BOOTSTRAP_ACCEPTED=1, PW_WCP_DATA_OBSERVED,
+       PW_WCP_HELPER_READ_BEGIN, PW_WCP_HELPER_VERIFIED,
+       PW_WCP_NET_SOCKET_BEGIN, PW_WCP_NET_SOCKET_READY,
+       PW_WCP_NET_CONNECT_BEGIN, PW_WCP_NET_CONNECTED, PW_WCP_HELPER_UPLOADED,
+       PW_WCP_REQUEST_BEGIN, PW_WCP_PREPARE_RECEIVED, PW_WCP_LOCAL_PREPARE_BEGIN,
+       PW_WCP_LOCAL_PREPARE_RETURNED, PW_WCP_PREPARED_SENT, PW_WCP_RESULT_RECEIVED,
+       PW_WCP_DATA_VISIBLE, PW_WCP_DATA_SETTLED, PW_WCP_NET_CLOSED,
+       PW_WCP_DATA_READY, PW_WCP_LOG_BEGIN, PW_WCP_LOG_READY, PW_WCP_BOOTSTRAP_BEGIN,
+       PW_WC_PROGRESS_LAST=PW_WCP_BOOTSTRAP_BEGIN };
 #define PW_WC_KIND(kind) (1u << (kind))
 enum { PW_WC_ERROR = -1, PW_WC_IDLE = 0, PW_WC_RECORD = 1, PW_WC_CHANNEL_CLOSED = 2 };
 enum { PW_WC_OK, PW_WC_INVALID, PW_WC_BUDGET, PW_WC_OS, PW_WC_PROTOCOL };
 enum { PW_WC_API_NONE, PW_WC_API_CLOCK, PW_WC_API_TYPE, PW_WC_API_POLL,
        PW_WC_API_SEND, PW_WC_API_RECEIVE, PW_WC_API_CLOSE };
 
-/* FAILURE diagnostics only; the byte layout and protocol version are unchanged.
+/* FAILURE diagnostics, plus the fixed PROGRESS stage in failure_api.
+ * The byte layout and protocol version are unchanged; a matched rebuilt
+ * parent/child cohort is required for the additional record kind.
  * Values below 0x100 remain the existing socket-setup API namespace. Native
  * call failures retain their immediate return/errno; validation failures never
  * invent errno. Low16 length bits carry the operation auxiliary; high bits

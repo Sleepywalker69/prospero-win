@@ -57,6 +57,8 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #define pw_wine_child_wire_same_session owner_wire_same_session
 #define pw_wine_child_wire_receive owner_wire_receive
 #define pw_wine_child_wire_receive_step owner_wire_receive_step
+#define pw_wine_child_wire_receive_nowait owner_wire_receive_nowait
+#define pw_wine_child_wire_send_step owner_wire_send_step
 #include "../native/pw_wine_fixture_owner.c"
 #undef pw_wine_child_wire_validate
 #undef pw_wine_child_wire_send
@@ -64,6 +66,8 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #undef pw_wine_child_wire_same_session
 #undef pw_wine_child_wire_receive
 #undef pw_wine_child_wire_receive_step
+#undef pw_wine_child_wire_receive_nowait
+#undef pw_wine_child_wire_send_step
 #include "bootstrap_diagnostic_bridge.h"
 #include "../native/pw_wine_child_data.h"
 int pw_wine_child_wire_same_session(const PwWineChildFrame*,const PwWineChildFrame*);
@@ -233,7 +237,7 @@ int owner_wire_send(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int rig
     return m.send_error;
 }
 int owner_wire_try_send(int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
-{CHECK(fd==80&&right==-1&&f->kind==PW_WC_SIGNAL);m.sent=*f;m.sends++;(void)r;return m.send_error;}
+{CHECK(fd==80&&right==-1&&(f->kind==PW_WC_SIGNAL||f->kind==PW_WC_CANCEL));m.sent=*f;m.sends++;(void)r;return m.send_error;}
 int owner_wire_same_session(const PwWineChildFrame *a,const PwWineChildFrame *b)
 {return pw_wine_child_wire_same_session(a,b);}
 int owner_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
@@ -250,6 +254,15 @@ int owner_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFram
 }
 int owner_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
 {CHECK(io&&fd==80&&kinds&&out&&*right==-1&&r);if(m.step_result==PW_WC_RECORD){*out=m.sent;out->kind=PW_WC_SIGNAL_ACK;}return m.step_result;}
+/* The actual codec remains linked; owner-side transport is fully inert. */
+int owner_wire_receive_nowait(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
+{
+    if(kinds&(PW_WC_KIND(PW_WC_HELLO)|PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)))
+        return owner_wire_receive(io,fd,kinds,out,right,r);
+    return owner_wire_receive_step(io,fd,kinds,out,right,r);
+}
+int owner_wire_send_step(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
+{return owner_wire_send(io,fd,f,right,r)?PW_WC_ERROR:PW_WC_RECORD;}
 static PwWineFixtureOwnerConfig config(unsigned profile)
 {
     PwWineFixtureOwnerConfig c={.session=0x123400,.profile=profile,.child_unix_path="/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe",.child_sha256=hash64,.helper_image=helper_bytes,.helper_bytes=4,.build_id=build40,.context=&m,.clock_ms=clock_cb,.cancelled=cancel_cb,.record=record_cb};return c;
@@ -291,10 +304,10 @@ static void check_failure(unsigned profile,int which,unsigned api,int raw,int er
     CHECK(child_result.sends==2&&child_result.hello.kind==PW_WC_HELLO&&f->kind==PW_WC_FAILURE);
     CHECK(f->status==-1&&f->failure_api==api&&f->failure_raw==raw);
     CHECK(f->errno_valid==(unsigned)(error!=0)&&f->native_error==error);
-    CHECK(f->returned_length==(aux|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&f->returned_value==detail);
+    CHECK(f->returned_length==(aux|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE|PW_WCD_NO_DISPATCH)<<PW_WCD_STATE_SHIFT))&&f->returned_value==detail);
     CHECK(pw_wine_child_wire_same_session(f,&g->session)&&f->sequence==1);
     CHECK(m.boot_failures==1&&m.boot_values==1&&m.boot_api==api&&m.boot_raw==raw&&m.boot_errno==error);
-    CHECK(m.boot_aux1==(aux|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&m.boot_aux2==detail&&m.boot_valid==(error!=0));
+    CHECK(m.boot_aux1==(aux|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE|PW_WCD_NO_DISPATCH)<<PW_WCD_STATE_SHIFT))&&m.boot_aux2==detail&&m.boot_valid==(error!=0));
     CHECK(owner.failure_api==API_HANDOFF&&owner.failure_raw==-1&&owner.failure_errno==error);
     CHECK(child_result.stage==(which==CASE_LOG?PW_WCB_INITIAL:PW_WCB_PATHS));
     CHECK(child_result.probe_stats==(which==CASE_LOG));
@@ -333,8 +346,8 @@ int main(int argc,char **argv)
         CHECK(f->failure_api==PW_WC_DIAG_LOG_OPEN&&f->failure_raw==-1&&f->native_error==EACCES&&f->errno_valid==1);
         unsigned expected=probe==1?PW_WC_DATA_STAT_FAILED:probe==2?PW_WC_DATA_NOT_DIRECTORY:PW_WC_DATA_UNEXPECTED;
         int detail=probe==1?ENOTDIR:probe==3?7:0;
-        CHECK(f->returned_length==(expected|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&f->returned_value==detail&&child_result.probe_stats==1);
-        CHECK(m.boot_values==1&&m.boot_aux1==(expected|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE)<<PW_WCD_STATE_SHIFT))&&m.boot_aux2==detail&&m.boot_valid==1);
+        CHECK(f->returned_length==(expected|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE|PW_WCD_NO_DISPATCH)<<PW_WCD_STATE_SHIFT))&&f->returned_value==detail&&child_result.probe_stats==1);
+        CHECK(m.boot_values==1&&m.boot_aux1==(expected|((PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE|PW_WCD_NO_DISPATCH)<<PW_WCD_STATE_SHIFT))&&m.boot_aux2==detail&&m.boot_valid==1);
     }
     /* A valid wire failure from another generation is not attributed to ours. */
     corrupt_generation=1;run_case(1,CASE_LOG,0,0);corrupt_generation=0;
@@ -343,12 +356,16 @@ int main(int argc,char **argv)
     for(int action=1;action<=3;action++){
         scenario=(DiagnosticCase){.which=CASE_LOG,.expire_probe=action==1,.cancel_probe=action==2,.expire_open=action==3};
         Generation *g=bound(1);g->stream_fd=71;g->wine_tid=47;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);
-        CHECK(child_result.sends==1&&child_result.exit_code==14&&!g->ack);
+        /* Startup expiry alone allows the final no-dispatch certificate in
+         * the original recovery window. Lifetime expiry and an independent
+         * cancellation callback still suppress that final send. */
+        CHECK(child_result.sends==(action==3?2:1)&&child_result.exit_code==14&&!g->ack);
+        CHECK(g->helper_possible==(action!=3));
         CHECK(child_result.api==PW_WC_DIAG_LOG_OPEN&&child_result.raw==-1&&child_result.error==EACCES&&child_result.errno_valid==1);
         CHECK(child_result.probe_stats==(action!=3)&&child_result.stage_end==31000&&child_result.total_end==61000);
         CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.loads&&!child_result.threads);
     }
-    run_case(1,CASE_PATH_BUDGET,0,0);CHECK(child_result.sends==1&&child_result.stage==PW_WCB_PATHS);
+    run_case(1,CASE_PATH_BUDGET,0,0);CHECK(child_result.sends==2&&child_result.stage==PW_WCB_PATHS);
     CHECK(child_result.api==PW_WC_DIAG_BUDGET&&child_result.error==0&&!child_result.errno_valid);
     for(int fault=0;fault<=4;fault++){
         scenario=(DiagnosticCase){.which=CASE_PREFIX,.log_after_path=1,.transport_guard=fault};

@@ -3,6 +3,7 @@
 #include "pw_wine_fixture_owner.h"
 #include "pw_wine_child_bootstrap.h"
 #include "pw_wine_child_wire.h"
+#include "pw_wine_child_data.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -22,7 +23,7 @@ enum { WF_OK=0, WF_BAD=0xc0000001u, WF_UNSUPPORTED=0xc00000bbu,
        WF_TIMEOUT=0xc00000b5u, WF_CANCELLED=0xc0000120u };
 enum { API_CLOCK=1,API_IMAGE,API_CLOSE,API_APP,API_LIST,API_PAIR,API_ADD,
        API_DUP,API_HANDOFF,API_SIGNAL,API_KILL,API_WINE,API_SOCKET };
-enum { G_EMPTY,G_ADMITTED,G_BOUND,G_LAUNCH,G_STARTING,G_RUNNING,G_SETTLING,G_RETIRED,G_UNCERTAIN,G_REQUESTED,G_SUBMITTING };
+enum { G_EMPTY,G_ADMITTED,G_BOUND,G_LAUNCH,G_STARTING,G_RUNNING,G_SETTLING,G_RETIRED,G_UNCERTAIN,G_REQUESTED,G_SUBMITTING,G_HELPER_DRAIN,G_CLEANUP };
 #define CANARY UINT32_C(0x4a357bc1)
 typedef struct { int32_t id;char name[32]; } ServiceEntry;
 typedef struct { uint32_t size;int32_t fd,crash;uint32_t other[15]; } ServiceOptions;
@@ -35,17 +36,17 @@ typedef struct Generation {
     atomic_flag send_claim;
     atomic_uint origin_dead,remote_lease,abandoned,request_status;
     PwWineCreationRequest creation;
-    unsigned depth,start_phase;
-    uint64_t generation,started,startup_end,end,last_clock,next_list;
+    unsigned depth,start_phase,progress_stage,helper_cancel_attempted;
+    uint64_t generation,started,startup_end,end,last_clock,next_list,helper_recovery_end;
     uint32_t caller_pid,caller_tid,wine_pid,wine_tid,machine;
     int stream_fd,control_fd,passed_fd,service_id,baseline[PW_WFO_LIST_CAP];
     unsigned baseline_count,launch_possible,hello,ack,listed,absent,kill_called,closed,list_calls,close_pending,missing_reported;
-    unsigned helper_possible; /* supervisor-owned; ACK is the only clearing authority */
+    unsigned helper_possible; /* cleared only by an exact positive settlement certificate */
     int kill_result;
     PwWineChildFrame session,signal;
     PwNativeChildIo io;
     struct PwWineFixtureOwner *owner;
-    PwWineChildWireResult wire;
+    PwWineChildWireResult wire,helper_drain_wire;
     ServiceOptions options;
     const char *arguments[2];
 } Generation;
@@ -720,7 +721,32 @@ static void wire_failure(PwWineFixtureOwner *o,Generation *g)
     failure(o,API_HANDOFF,g->wire.raw_result,g->wire.errno_valid?g->wire.native_error:0,
             g->wire.ownership_uncertain||g->wire.cleanup_failed);
     record(o,"wire_failure",g,g->wire.api,g->wire.raw_result,g->wire.native_error);
+    record(o,"wire_phase",g,g->start_phase,g->progress_stage,g->wire.status);
+    record(o,"wire_receive",g,g->wire.received_bytes,g->wire.poll_revents,g->wire.message_flags);
+    record(o,"wire_channel",g,g->wire.channel_zero_observed,g->wire.hangup_observed,(int64_t)g->wire.control_bytes);
     atomic_store(&g->cleanup_requested,1);
+}
+/* A failure is not Windows success. Only an affirmative, identity-bound
+ * client certificate can narrow the conservative pre-BOOTSTRAP helper latch.
+ * Missing bits, EOF, stage absence and timeout are never such a certificate. */
+static int helper_failure_certificate(PwWineFixtureOwner *o,Generation *g,const PwWineChildFrame *f)
+{
+    if(!g->helper_possible||!g->hello||g->start_phase!=3||f->kind!=PW_WC_FAILURE||
+       f->sequence!=1||f->status>=0||!pw_wine_child_wire_same_session(&g->session,f))return 0;
+    unsigned flags=f->returned_length>>PW_WCD_STATE_SHIFT;
+    unsigned known=PW_WCD_POSSIBLE|PW_WCD_TERMINAL|PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|
+        PW_WCD_LSTAT_BEFORE|PW_WCD_LSTAT_AFTER|PW_WCD_NO_DISPATCH|PW_WCD_SETTLED_FAILURE;
+    if(flags&~known)return 0;
+    int unused=(flags&PW_WCD_NO_DISPATCH)&&!(flags&(PW_WCD_POSSIBLE|PW_WCD_TERMINAL|PW_WCD_SETTLED_FAILURE));
+    int settled=(flags&PW_WCD_SETTLED_FAILURE)&&!(flags&PW_WCD_NO_DISPATCH)&&
+        (flags&PW_WCD_TERMINAL);
+    if(!unused&&!settled)return 0;
+    g->helper_possible=0;
+    record(o,unused?"helper_not_dispatched":"helper_terminal_failure",g,
+           g->session.child_pid,g->service_id,flags);
+    atomic_store(&g->cleanup_requested,1);
+    atomic_store_explicit(&g->state,G_CLEANUP,memory_order_release);
+    return 1;
 }
 static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
 {
@@ -740,6 +766,8 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
         if(pair[0]==pair[1])g->passed_fd=-1;
         uncertain(o,g,API_PAIR,0,0);close_slot(o,&g->passed_fd);close_control(o,g);close_slot(o,&g->stream_fd);return;
     }
+    g->helper_recovery_end=g->end-g->startup_end<PW_WINE_CHILD_CLEANUP_MS?
+        g->end:g->startup_end+PW_WINE_CHILD_CLEANUP_MS;
     g->io=(PwNativeChildIo){.context=g,.clock_ms=io_clock,.cancelled=io_cancel,
         .total_end=g->end,.stage_end=g->startup_end,.last_clock=g->started,.ready=1};
     if(budget(o,g,1)||pw_wine_child_wire_validate(&g->io,g->control_fd,&g->wire)){
@@ -814,18 +842,43 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
     g->start_phase=3;
     if(async)return;
     }
+    /* Bounded diagnostics share the original startup budget and transport.
+     * Only a matching ACK below can settle helper ownership. */
+    for(;;){
+    /* The normal startup budget still gates work. Once a terminal record is
+     * queued, however, its post-recv budget check must not discard it merely
+     * because cancellation or the startup deadline raced the read. Use the
+     * precomputed cleanup-only observation window, without renewing either. */
+    if(budget(o,g,1)||io_cancel(g)){atomic_store(&g->cleanup_requested,1);return;}
+    PwNativeChildIo receive_io=g->io;
+    receive_io.cancelled=NULL;receive_io.stage_end=g->helper_recovery_end;
     PwWineChildFrame ack;
-    rc=async?pw_wine_child_wire_receive_nowait(&g->io,g->control_fd,PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE),&ack,&received,&g->wire):
-             pw_wine_child_wire_receive(&g->io,g->control_fd,PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE),&ack,&received,&g->wire);
+    rc=pw_wine_child_wire_receive_nowait(&receive_io,g->control_fd,
+        PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_FAILURE)|PW_WC_KIND(PW_WC_PROGRESS),
+        &ack,&received,&g->wire);
+    g->io.last_clock=receive_io.last_clock;
     if(rc==PW_WC_IDLE)return;
     if(rc!=PW_WC_RECORD||received>=0){close_slot(o,&received);wire_failure(o,g);return;}
     if(!pw_wine_child_wire_same_session(&g->session,&ack)||ack.sequence!=1){
         /* Do not attribute diagnostic payload from a different generation or
          * process to this child, even when the frame itself decoded. */
         record(o,"bootstrap_refused",g,ack.kind,ack.sequence,ack.status);
+        g->wire.status=PW_WC_PROTOCOL;g->wire.api=PW_WC_API_RECEIVE;
         failure(o,API_HANDOFF,ack.status,0,0);atomic_store(&g->cleanup_requested,1);return;
     }
+    if(ack.kind==PW_WC_PROGRESS){
+        if(ack.failure_api<=g->progress_stage||ack.failure_api>PW_WC_PROGRESS_LAST){
+            record(o,"progress_refused",g,ack.failure_api,g->progress_stage,0);
+            g->wire.status=PW_WC_PROTOCOL;g->wire.api=PW_WC_API_RECEIVE;
+            failure(o,API_HANDOFF,ack.failure_api,0,0);atomic_store(&g->cleanup_requested,1);return;
+        }
+        g->progress_stage=ack.failure_api;
+        record(o,"bootstrap_progress",g,ack.failure_api,0,0);
+        if(async)return;
+        continue;
+    }
     if(ack.kind!=PW_WC_BOOTSTRAP_ACK||ack.status){
+        (void)helper_failure_certificate(o,g,&ack);
         record(o,"bootstrap_failure",g,ack.failure_api,ack.failure_raw,ack.native_error);
         record(o,"bootstrap_failure_value",g,ack.returned_length,ack.returned_value,ack.errno_valid);
         failure(o,API_HANDOFF,ack.status,ack.errno_valid?ack.native_error:0,0);atomic_store(&g->cleanup_requested,1);return;
@@ -833,20 +886,87 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
     /* ACK also certifies terminal helper success (or preexisting data), the
      * full settle and actual bootstrap readiness in this exact child build. */
     g->helper_possible=0;
-    if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);return;}
+    if(budget(o,g,1)){atomic_store(&g->cleanup_requested,1);
+        atomic_store_explicit(&g->state,G_CLEANUP,memory_order_release);return;}
     g->ack=1;g->start_phase=4;g->io.stage_end=g->end;
     atomic_store_explicit(&g->state,G_RUNNING,memory_order_release);
     record(o,"bootstrap_ready",g,g->wine_pid,g->wine_tid,0);
+    return;
+    }
 }
 static void start_generation(PwWineFixtureOwner *o,Generation *g)
 {
     start_generation_attempt(o,g);
     if(g->helper_possible&&(g->wire.status||atomic_load(&g->cleanup_requested)||atomic_load(&o->blocked)||
                            atomic_load(&o->cancelled)||atomic_load(&g->state)==G_UNCERTAIN)){
-        /* A timeout/failure cannot recall a helper request or safely recycle
-         * its target PID. Even a possibly settled rejection stays conservative
-         * without the exact ACK. Existing uncertainty blocks Kill and release. */
-        helper_hold(o,g);
+        /* A cancellation or pure budget refusal leaves transport usable for
+         * one cleanup-only exchange. Actual wire/ownership ambiguity does not. */
+        int budget_only=g->wire.status==PW_WC_BUDGET&&g->wire.api==PW_WC_API_CLOCK;
+        if(g->start_phase==3&&(!g->wire.status||budget_only)&&
+           !g->wire.delivery_uncertain&&!g->wire.ownership_uncertain&&!g->wire.cleanup_failed&&
+           !g->wire.channel_zero_observed&&!g->wire.hangup_observed){
+            atomic_store(&o->blocked,1);atomic_store(&g->cleanup_requested,1);
+            atomic_store_explicit(&g->state,G_HELPER_DRAIN,memory_order_release);
+            record(o,"helper_cleanup_begin",g,g->session.child_pid,g->service_id,
+                   (int64_t)g->helper_recovery_end);
+        }else helper_hold(o,g);
+    }
+}
+static void drain_helper(PwWineFixtureOwner *o,Generation *g)
+{
+    uint64_t now;
+    if(!g->helper_possible||g->control_fd<0||sample_clock(o,&now)||now>=g->helper_recovery_end){
+        record(o,"helper_cleanup_unproved",g,g->session.child_pid,g->service_id,0);
+        helper_hold(o,g);return;
+    }
+    PwNativeChildIo io=g->io;
+    io.cancelled=NULL;io.stage_end=g->helper_recovery_end;
+    /* Observe an already queued certificate before attempting cancellation.
+     * The child may have sent its final receipt and closed: a redundant send
+     * failure must not hide stronger same-session settlement evidence. Valid
+     * progress is strictly increasing over a finite stage range, so draining
+     * it cannot renew the deadline or create an unbounded receive loop. */
+    for(;;){
+    PwWineChildFrame frame;int received=-1;
+    int rc=pw_wine_child_wire_receive_nowait(&io,g->control_fd,
+        PW_WC_KIND(PW_WC_FAILURE)|PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)|PW_WC_KIND(PW_WC_PROGRESS),
+        &frame,&received,&g->helper_drain_wire);
+    g->io.last_clock=io.last_clock;
+    if(rc==PW_WC_IDLE)goto request_cancel;
+    if(rc!=PW_WC_RECORD||received>=0||frame.sequence!=1||
+       !pw_wine_child_wire_same_session(&g->session,&frame)){
+        close_slot(o,&received);record(o,"helper_cleanup_unproved",g,rc,
+            g->helper_drain_wire.api,g->helper_drain_wire.raw_result);helper_hold(o,g);return;
+    }
+    if(frame.kind==PW_WC_PROGRESS){
+        if(frame.failure_api<=g->progress_stage||frame.failure_api>PW_WC_PROGRESS_LAST){helper_hold(o,g);return;}
+        g->progress_stage=frame.failure_api;record(o,"bootstrap_progress",g,frame.failure_api,0,0);
+        continue;
+    }
+    if(frame.kind==PW_WC_FAILURE){
+        record(o,"bootstrap_failure",g,frame.failure_api,frame.failure_raw,frame.native_error);
+        record(o,"bootstrap_failure_value",g,frame.returned_length,frame.returned_value,frame.errno_valid);
+        failure(o,API_HANDOFF,frame.status,frame.errno_valid?frame.native_error:0,0);
+        if(!helper_failure_certificate(o,g,&frame))helper_hold(o,g);
+        return;
+    }
+    /* A racing exact ACK still certifies helper settlement, but cancellation
+     * has already made this guest attempt fail. Never publish G_RUNNING/ack. */
+    g->helper_possible=0;atomic_store(&g->cleanup_requested,1);
+    atomic_store_explicit(&g->state,G_CLEANUP,memory_order_release);
+    record(o,"helper_ack_after_cancel",g,g->session.child_pid,g->service_id,0);
+    return;
+    }
+request_cancel:
+    if(!g->helper_cancel_attempted){
+        if(sample_clock(o,&now)||now>=g->helper_recovery_end){helper_hold(o,g);return;}
+        if(atomic_flag_test_and_set_explicit(&g->send_claim,memory_order_acquire))return;
+        g->helper_cancel_attempted=1;
+        PwWineChildFrame cancel=g->session;cancel.kind=PW_WC_CANCEL;
+        int sent=pw_wine_child_wire_try_send(g->control_fd,&cancel,-1,&g->helper_drain_wire);
+        atomic_flag_clear_explicit(&g->send_claim,memory_order_release);
+        record(o,"helper_cancel_sent",g,sent,g->service_id,0);
+        if(sent)helper_hold(o,g); /* Never retry uncertain cancellation delivery. */
     }
 }
 static void observe_control(PwWineFixtureOwner *o,Generation *g)
@@ -889,6 +1009,10 @@ static void supervise(PwWineFixtureOwner *o,Generation *g)
         failure(o,API_WINE,0,0,0);
     }
     if(state==G_RETIRED)return;
+    if(state==G_HELPER_DRAIN){
+        drain_helper(o,g);state=atomic_load_explicit(&g->state,memory_order_acquire);
+        if(state==G_HELPER_DRAIN||state==G_UNCERTAIN)return;
+    }
     if(state==G_UNCERTAIN){close_slot(o,&g->stream_fd);close_slot(o,&g->passed_fd);close_control(o,g);return;}
     if(state==G_SETTLING||g->absent){retire(o,g);return;}
     if(g->close_pending)close_control(o,g);
@@ -931,7 +1055,7 @@ static void supervise(PwWineFixtureOwner *o,Generation *g)
         return;
     }
     if(state==G_LAUNCH||state==G_STARTING){start_generation(o,g);state=atomic_load_explicit(&g->state,memory_order_acquire);}
-    if(state==G_RETIRED||state==G_UNCERTAIN)return;
+    if(state==G_RETIRED||state==G_UNCERTAIN||state==G_HELPER_DRAIN)return;
     uint64_t now;
     if(sample_clock(o,&now)){uncertain(o,g,API_CLOCK,-1,0);return;}
     if(!g->creation.lease&&atomic_load(&o->root_done)&&atomic_load_explicit(&g->startup_done,memory_order_acquire)!=2){

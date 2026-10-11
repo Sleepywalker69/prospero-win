@@ -31,6 +31,7 @@ static int fake_send(int,const PwWineChildFrame*,int,PwWineChildWireResult*);
 static int fake_same(const PwWineChildFrame*,const PwWineChildFrame*);
 static int fake_receive(PwNativeChildIo*,int,uint32_t,PwWineChildFrame*,int*,PwWineChildWireResult*);
 static int fake_step(PwNativeChildIo*,int,uint32_t,PwWineChildFrame*,int*,PwWineChildWireResult*);
+static int fake_cancel_receive(PwNativeChildIo*,int,uint32_t,PwWineChildFrame*,int*,PwWineChildWireResult*);
 static void fake_wire_close(int*,PwWineChildWireResult*);
 #define nanosleep fake_pause
 #define clock_gettime fake_clock
@@ -60,6 +61,7 @@ static void fake_wire_close(int*,PwWineChildWireResult*);
 #define pw_wine_child_wire_same_session fake_same
 #define pw_wine_child_wire_receive fake_receive
 #define pw_wine_child_wire_receive_step fake_step
+#define pw_wine_child_wire_receive_nowait fake_cancel_receive
 #define pw_wine_child_wire_close fake_wire_close
 #define main child_main
 #include "../native/pw_wine_child_main.c"
@@ -88,12 +90,14 @@ static DiagnosticCase scenario;
 static DiagnosticResult *result;
 static PwWineChildFrame input;
 static struct {
+    unsigned cancel_mode,cancel_reads,last_proof;PwWineChildFrame proof_frame;
     uint64_t ms;int battle;int prepare_rc,start_rc,start_owns,wrong_session,kill_rc,log_fail;
     int sends,steps,closes,closed[20],kills,prepares,starts,exit_code,query_failure,send_rc,idle_timeout,bad_sequence;
     int envs,loads,stats,probe_stats,fstats;
     char data_marker[512];unsigned data_marker_count;
     int writes,trylock_rc,unlock_rc,write_short;char last_write[512];
     int attr_init_rc,attr_stack_rc,attr_destroy_rc,thread_rc,thread_calls,reads,bad_hash;
+    unsigned progress, last_progress;
     PwWineChildFrame frames[8];
 }m;
 static jmp_buf done;
@@ -194,6 +198,12 @@ static int fake_send(int fd,const PwWineChildFrame*f,int right,PwWineChildWireRe
     assert(fd==3&&right==-1&&r&&m.sends<8);
     unsigned char bytes[PW_WC_WIRE_BYTES];PwWineChildFrame decoded;
     assert(!pw_wine_child_wire_encode(bytes,f));assert(!pw_wine_child_wire_decode(&decoded,bytes));
+    if(f->kind==PW_WC_PROGRESS){
+        assert(!bootstrap.started&&f->failure_api>m.last_progress&&f->failure_api<=PW_WC_PROGRESS_LAST);
+        assert(f->sequence==1&&!f->status&&!f->native_error&&!f->failure_raw&&!f->returned_length&&!f->returned_value&&!f->errno_valid);
+        assert(f->generation==active_session.generation&&f->child_pid==active_session.child_pid&&f->profile==active_session.profile);
+        m.last_progress=f->failure_api;m.progress++;return m.send_rc;
+    }
     m.frames[m.sends++]=decoded;
     if(f->kind==PW_WC_FAILURE||f->kind==PW_WC_BOOTSTRAP_ACK)memcpy(result->bytes,bytes,sizeof(bytes));
     errno=EINTR;return m.send_rc;
@@ -208,9 +218,25 @@ static int fake_step(PwNativeChildIo*i,int fd,uint32_t k,PwWineChildFrame*f,int*
  if(m.idle_timeout){unsigned left;m.ms+=10000;return pw_native_child_remaining(i,&left)?PW_WC_ERROR:PW_WC_IDLE;}
  if(m.steps++)return PW_WC_CHANNEL_CLOSED;
  *f=session();f->kind=PW_WC_SIGNAL;f->sequence=m.bad_sequence?3:2;f->signal=30;f->target_tid=123;return PW_WC_RECORD;}
+static int fake_cancel_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *f,int *right,PwWineChildWireResult *r)
+{
+ assert(io&&fd==3&&kinds==PW_WC_KIND(PW_WC_CANCEL)&&*right==-1&&r);
+ assert(!io->cancelled&&io->stage_end==child_cleanup_end&&io->stage_end<=io->total_end);
+ m.cancel_reads++;
+ if(data_adapter_fixture_control_refused()){
+     r->channel_zero_observed=r->hangup_observed=1;return PW_WC_CHANNEL_CLOSED;
+ }
+ if(!m.cancel_mode)return PW_WC_IDLE;
+ if(m.cancel_mode==3){r->channel_zero_observed=r->hangup_observed=1;return PW_WC_CHANNEL_CLOSED;}
+ if(m.cancel_mode==4){m.ms=child_cleanup_end;return PW_WC_ERROR;}
+ *f=active_session;f->kind=PW_WC_CANCEL;
+ if(m.cancel_mode==2)f->generation++;
+ if(m.cancel_mode==5)*right=19;
+ return PW_WC_RECORD;
+}
 static void fake_wire_close(int*fd,PwWineChildWireResult*r){(void)r;if(*fd>=0){fake_close(*fd);*fd=-1;}}
 static void reset(void)
-{memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&wire_result,0,sizeof(wire_result));
+{owner_cancel_received=0;child_cleanup_end=0;memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&wire_result,0,sizeof(wire_result));
  memset(&child_io,0,sizeof(child_io));memset(&active_session,0,sizeof(active_session));log_fd=-1;log_bytes=0;log_loss_marker=0;atomic_store(&log_dropped_records,0);atomic_store(&log_dropped_bytes,0);atomic_store(&log_counts_incomplete,0);atomic_store(&runtime_failure,0);atomic_store(&socket_failure_attempted,0);atomic_flag_clear(&send_claim);}
 static void run(void){if(!setjmp(done))child_main(0,NULL);}
 static unsigned closed(int fd){unsigned n=0;for(int i=0;i<m.closes;i++)n+=m.closed[i]==fd;return n;}

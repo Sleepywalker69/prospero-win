@@ -5,13 +5,14 @@
 #include <stdint.h>
 
 #define LAPY_ELEVATION_MAGIC UINT32_C(0x31564c45) /* ELV1 */
-#define LAPY_ELEVATION_VERSION UINT16_C(1)
+#define LAPY_ELEVATION_VERSION UINT16_C(2)
 
 enum lapy_elevation_kind {
     LAPY_ELEVATION_REQUEST = 1,
     LAPY_ELEVATION_PREPARE = 2,
     LAPY_ELEVATION_PREPARED = 3,
-    LAPY_ELEVATION_RESPONSE = 4
+    LAPY_ELEVATION_RESPONSE = 4,
+    LAPY_ELEVATION_CANCEL = 5
 };
 
 enum lapy_elevation_capability {
@@ -29,7 +30,9 @@ enum lapy_elevation_status {
     LAPY_ELEVATION_APPLY_FAILED = 7,
     LAPY_ELEVATION_ROLLBACK_FAILED = 8,
     LAPY_ELEVATION_TRANSPORT_ERROR = 9,
-    LAPY_ELEVATION_PROTOCOL_ERROR = 10
+    LAPY_ELEVATION_PROTOCOL_ERROR = 10,
+    /* Only after proved rollback or completed commit and owned cleanup. */
+    LAPY_ELEVATION_CANCELLED = 11
 };
 
 /* Fixed-width little-endian wire format shared with the Prospero Win client. */
@@ -41,9 +44,10 @@ struct lapy_elevation_message {
     uint32_t capability;
     uint32_t pid;
     uint32_t status;
+    uint64_t transaction_id;
 };
 
-_Static_assert(sizeof(struct lapy_elevation_message) == 24,
+_Static_assert(sizeof(struct lapy_elevation_message) == 32,
                "Lapy elevation wire ABI mismatch");
 
 #endif

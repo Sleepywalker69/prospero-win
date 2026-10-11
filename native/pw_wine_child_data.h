@@ -15,11 +15,17 @@ enum { PW_WCD_ARGUMENT=0x200, PW_WCD_BUDGET, PW_WCD_CONTROL, PW_WCD_DATA_STAT,
        PW_WCD_SOCKET, PW_WCD_OPTION, PW_WCD_CONNECT, PW_WCD_UPLOAD,
        PW_WCD_REQUEST, PW_WCD_PREPARE, PW_WCD_LOCAL_PREPARE, PW_WCD_PREPARED,
        PW_WCD_RESULT, PW_WCD_SETTLE, PW_WCD_NET_CLOSE,
-       PW_WCD_DATA_LSTAT, PW_WCD_DATA_LSTAT_TYPE };
+       PW_WCD_DATA_LSTAT, PW_WCD_DATA_LSTAT_TYPE, PW_WCD_PROGRESS, PW_WCD_CANCEL };
+enum { PW_WINE_CHILD_CLEANUP_MS=30000 };
+typedef struct PwWineChildDataConfig {
+    uint64_t transaction_id;
+    int (*cancel_probe)(void *); /* 0 idle, 1 authenticated cancel, -1 unsafe control */
+    void *cancel_context;
+} PwWineChildDataConfig;
 /* MODULE_LOAD/START, RESOLVE, NET_LOAD/HANDLE/INIT and all resolution indices
  * remain reserved for historical diagnostics. Net transport now uses the
  * native root helper's seven static imports, without an explicit NetInit. */
-/* Every bootstrap FAILURE reserves returned_length bits16..21 for the state
+/* Every bootstrap FAILURE reserves returned_length bits16..23 for the state
  * mask below; low16 bits preserve the operation auxiliary. For data APIs it
  * is zero. returned_value is
  * control_revents for CONTROL, resolution_index for RESOLVE, otherwise the
@@ -29,10 +35,15 @@ enum { PW_WCD_RESOLVE_NONE, PW_WCD_SYSMODULE_LOAD, PW_WCD_SYSMODULE_HANDLE,
        PW_WCD_NET_SEND_SYMBOL, PW_WCD_NET_RECV_SYMBOL, PW_WCD_NET_OPTION_SYMBOL,
        PW_WCD_NET_CLOSE_SYMBOL, PW_WCD_NET_ERRNO_SYMBOL };
 enum { PW_WCD_POSSIBLE=1u, PW_WCD_TERMINAL=2u, PW_WCD_DATA_BEFORE=4u, PW_WCD_DATA_AFTER=8u,
-       PW_WCD_LSTAT_BEFORE=16u, PW_WCD_LSTAT_AFTER=32u };
+       PW_WCD_LSTAT_BEFORE=16u, PW_WCD_LSTAT_AFTER=32u,
+       PW_WCD_NO_DISPATCH=64u, PW_WCD_SETTLED_FAILURE=128u };
 #define PW_WCD_STATE_SHIFT 16u
 typedef struct PwWineChildData {
+    int (*progress)(void *,unsigned);
+    void *progress_context;
     unsigned attempted, possible_apply, terminal, ready, control_refused;
+    unsigned no_dispatch, no_request, settled_failure, cancel_requested, cancel_attempted;
+    uint64_t transaction_id;
     unsigned data_before, data_after, settled_ms, lstat_before, lstat_after;
     unsigned before_observations, after_observations; /* values1 stat;2 lstat */
     int32_t stat_before_raw, stat_before_error, lstat_before_raw, lstat_before_error;
@@ -44,8 +55,8 @@ typedef struct PwWineChildData {
 /* Retains original absolute deadlines and clock history. A zero result means
  * preexisting data or terminal helper success plus the full measured settle.
  * Actual log/prefix/CWD/runtime checks still follow in the caller. On nonzero,
- * possible_apply&&!terminal requires keeping this native PID alive; timeout,
+ * !no_dispatch&&!terminal requires keeping this native PID alive; timeout,
  * channel loss and socket close are not remote-settlement evidence.
  * The state must begin zero and is used for exactly one attempt. */
-int pw_wine_child_data_prepare(PwWineChildData *, PwNativeChildIo *, const char *helper_sha256);
+int pw_wine_child_data_prepare(PwWineChildData *, PwNativeChildIo *, const char *helper_sha256, const PwWineChildDataConfig *);
 #endif

@@ -1019,3 +1019,39 @@ tests/test_pw_lapy_elevation_outcome.c
 wine/patches/0920-server-fatal-output-sink.patch
 tests/test_wine_server_fatal.py
 docs/WINE_SERVER_FATAL_DIAGNOSTICS.md
+
+# Preserve native root ownership on abnormal Wine client termination.
+wine/patches/0921-ntdll-fixture-root-abort-hold.patch
+tests/fixtures/wine_fixture_root_abort.c
+
+# Portable shared-client outcome and fail-closed controls.
+native/pw_lapy_client.h
+native/pw_sha256.h
+tests/test_pw_lapy_client.c
+tests/test_pw_lapy_client_fail_closed.c
+
+# Source-bound helper and isolated initial-CANCEL static-build controls.
+native/owned_helper/LICENSE
+native/owned_helper/README.md
+native/owned_helper/REVIEWED-COHORT.json
+native/owned_helper/UPSTREAM.json
+native/owned_helper/donor_transaction.c
+native/owned_helper/donor_transaction.h
+native/owned_helper/lapy_elevation_protocol.h
+native/owned_helper/owned_helper_control.c
+native/owned_helper/owned_helper_control.h
+native/owned_helper/owned_root_daemon.c
+native/owned_helper/vnode_ref_probe.c
+native/owned_helper/vnode_ref_probe.h
+native/pw_lapy_initial_cancel_fixture.h
+native/pw_lapy_initial_cancel_main.c
+tests/test_initial_cancel_adapter.c
+tests/test_initial_cancel_build.py
+tests/test_initial_cancel_main.c
+tests/test_owned_helper.py
+tools/build_initial_cancel.py
+tools/build_owned_helper.py
+
+.github/workflows/initial-cancel-static.yml
+tests/test_initial_cancel_workflow.py
+tests/test_owned_helper_control_nonprogress.c

@@ -32,6 +32,7 @@
 #include "../src/pw_script_input.h"
 #include "../src/pw_wine_launch.h"
 #include "pw_data_mount.h"
+#include "lapy_elevation_protocol.h"
 #include "pw_audio_ps5.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
@@ -706,12 +707,39 @@ static void on_exit_report(void)
 
 /* ---- library ------------------------------------------------------------ */
 
+/* These are local adapter results, never raw wire flags. terminal is trusted
+ * only under the matched adapter's identity/phase validation contract. An ELF
+ * upload may dispatch helper work before any target REQUEST, so absence of
+ * possible_apply is not release evidence. Reject inconsistent local evidence. */
+static int root_helper_release_proved(const PwLapyElevationResult *helper)
+{
+    if (!helper || helper->no_dispatch > 1 || helper->possible_apply > 1 ||
+        helper->terminal > 1 || helper->no_request > 1 ||
+        helper->settled_failure > 1 || helper->cancel_attempted > 1) return 0;
+    if (helper->no_dispatch)
+        return !helper->possible_apply && !helper->terminal &&
+               !helper->settled_failure && !helper->cancel_attempted &&
+               !helper->helper_status;
+    if (!helper->terminal || !helper->transaction_id) return 0;
+    /* Terminal validation remains the adapter's job. Impossible local status
+     * or failure tuples must nevertheless never become release authority. */
+    if (helper->helper_status > LAPY_ELEVATION_CANCELLED ||
+        helper->helper_status == LAPY_ELEVATION_ROLLBACK_FAILED ||
+        ((helper->helper_status || helper->cancel_attempted) && !helper->settled_failure)) return 0;
+    if (helper->possible_apply)
+        return !helper->no_request &&
+               (helper->helper_status != LAPY_ELEVATION_CANCELLED ||
+                (helper->cancel_attempted && helper->settled_failure));
+    return helper->no_request && helper->cancel_attempted &&
+           helper->settled_failure && helper->helper_status == LAPY_ELEVATION_CANCELLED;
+}
+
 /* A lost helper response cannot prove the helper stopped targeting this PID.
  * This runs before profiles, Wine, native child ownership or exit hooks exist.
  * Keep the original PID alive; do not retry, restart or infer release from time. */
 static void root_hold_for_helper(void)
 {
-    PS5LOG_LOG("PW_WINE64 root_helper_held reason=nonterminal-helper-result");
+    PS5LOG_LOG("PW_WINE64 root_helper_held reason=unproved-helper-release");
     for (;;) usleep(100000);
 }
 
@@ -735,7 +763,7 @@ static int prepare_root_data(void)
                mount.before.lstat_directory, mount.after.observed, mount.after.stat_raw,
                mount.after.stat_errno, mount.after.stat_directory, mount.after.lstat_raw,
                mount.after.lstat_errno, mount.after.lstat_directory);
-    if (mount.helper.possible_apply && !mount.helper.terminal) root_hold_for_helper();
+    if (!root_helper_release_proved(&mount.helper)) root_hold_for_helper();
     return status;
 }
 

@@ -372,6 +372,37 @@ The single final pre-Wine failure send can proceed when this child's logger
 failed. It retains the original deadline and clock history, respects external
 cancellation and earlier transport errors, and never retries uncertain delivery.
 
+Before log creation, the same control channel now carries diagnostic-only
+`PROGRESS` records. The codec requires a matching complete session, sequence 1,
+zero status and a stage in `PW_WCP_BOOTSTRAP_ACCEPTED` through
+`PW_WCP_BOOTSTRAP_BEGIN` (1–22). The parent accepts strictly increasing stages
+only while awaiting the bootstrap ACK. Thus at most 22 records can be accepted;
+no stage renews a deadline, establishes readiness, clears possible helper work,
+or authorizes cleanup. Post-ACK progress, duplicate/decreasing stages, extra
+rights and other malformed records are refused. The matched parent and child
+must be rebuilt together, retaining their exact build-ID binding.
+
+`bootstrap_progress` records bracket receipt of BOOTSTRAP, data observation,
+helper read/hash, socket creation, connect/upload, helper request and local
+PREPARE, terminal response, visibility/settle, socket close and log creation.
+`LOCAL_PREPARE_RETURNED` means the native call returned, including a failure;
+its name does not assert successful preparation.
+The final stage precedes ordinary Wine bootstrap; existing child-log stages
+cover the later runtime load. A milestone establishes only that the child
+reached that point. Missing later milestones cannot distinguish an unreturned
+native call from a process fault or transport failure. A failed progress send
+is never retried and prevents proceeding to a later helper operation.
+
+When transport fails, `wire_phase` retains the startup phase, last progress
+stage and wire status; `wire_receive` retains the most recent received byte
+count, poll events and message flags; `wire_channel` retains zero-read/HUP
+observations and ancillary byte count. A zero-valued legacy `wire_failure`
+record may mean a clean zero-read plus HUP, not a failed native operation with
+errno zero. Channel closure is neither native death nor helper settlement:
+an unresolved child can close the channel and remain parked. Silence before
+the first progress record still includes BOOTSTRAP receive/session refusal,
+which cannot safely attribute a diagnostic to an unvalidated session.
+
 After a failed log-file open, the child makes at most one read-only `stat` of
 `/data`, within its existing startup budget. The auxiliary fields distinguish
 a visible directory, a non-directory, a failed `stat` with its own errno, or

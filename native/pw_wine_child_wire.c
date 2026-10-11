@@ -19,13 +19,13 @@ static uint32_t get32(const unsigned char *p) { uint32_t n=0; for(unsigned i=0;i
 static uint64_t get64(const unsigned char *p) { uint64_t n=0; for(unsigned i=0;i<8;i++) n|=(uint64_t)p[i]<<(8*i); return n; }
 static int valid(const PwWineChildFrame *f)
 {
-    if (!f || f->kind<PW_WC_HELLO || f->kind>PW_WC_FAILURE ||
+    if (!f || f->kind<PW_WC_HELLO || f->kind>PW_WC_CANCEL ||
         !f->child_pid || f->child_pid>INT32_MAX || !f->child_ppid || f->child_ppid>INT32_MAX ||
         f->parent_pid>INT32_MAX || f->target_tid<0 || f->native_error<0 || f->build_id[40]) return 0;
     for(unsigned i=0;i<40;i++) if (!((f->build_id[i]>='0'&&f->build_id[i]<='9')||
                                     (f->build_id[i]>='a'&&f->build_id[i]<='f'))) return 0;
     if(f->errno_valid>1)return 0;
-    if(f->kind!=PW_WC_FAILURE&&(f->failure_api||f->failure_raw||f->returned_length||f->returned_value||f->errno_valid))return 0;
+    if(f->kind!=PW_WC_FAILURE&&f->kind!=PW_WC_PROGRESS&&(f->failure_api||f->failure_raw||f->returned_length||f->returned_value||f->errno_valid))return 0;
     if(f->kind==PW_WC_HELLO)
         return !f->generation&&!f->sequence&&!f->parent_pid&&!f->wine_pid&&!f->wine_tid&&
                !f->target_tid&&!f->signal&&!f->status&&!f->native_error&&!f->profile&&!f->machine;
@@ -33,8 +33,12 @@ static int valid(const PwWineChildFrame *f)
        (f->machine!=PW_WC_MACHINE_AMD64&&f->machine!=PW_WC_MACHINE_I386)||
        ((f->profile==PW_WC_PROFILE_FIXTURE||f->profile==PW_WC_PROFILE_USER||f->profile==PW_WC_PROFILE_NET)&&f->machine!=PW_WC_MACHINE_AMD64))return 0;
     if(!f->generation||!f->parent_pid||f->parent_pid==f->child_pid||!f->wine_pid||!f->wine_tid) return 0;
-    if(f->kind==PW_WC_BOOTSTRAP||f->kind==PW_WC_BOOTSTRAP_ACK)
+    if(f->kind==PW_WC_BOOTSTRAP||f->kind==PW_WC_BOOTSTRAP_ACK||f->kind==PW_WC_CANCEL)
         return f->sequence==1&&!f->target_tid&&!f->signal&&!f->status&&!f->native_error;
+    if(f->kind==PW_WC_PROGRESS)
+        return f->sequence==1&&!f->target_tid&&!f->signal&&!f->status&&!f->native_error&&
+               f->failure_api>=1&&f->failure_api<=PW_WC_PROGRESS_LAST&&
+               !f->failure_raw&&!f->returned_length&&!f->returned_value&&!f->errno_valid;
     if(f->kind==PW_WC_FAILURE)
         return f->sequence>=1&&!f->target_tid&&!f->signal&&f->status<0&&
                (f->errno_valid?f->native_error>0:!f->native_error);
@@ -182,7 +186,7 @@ static unsigned collect(int channel,const unsigned char *p,size_t cap,size_t rep
 static int receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,
                                    PwWineChildFrame *f,int *right,unsigned slice,PwWineChildWireResult *r)
 {
-    if(!r||!f||!right||*right!=-1||!kinds||kinds&~0x7eu) return fail(r,PW_WC_INVALID,PW_WC_API_RECEIVE,0,0);
+    if(!r||!f||!right||*right!=-1||!kinds||kinds&~0x1feu) return fail(r,PW_WC_INVALID,PW_WC_API_RECEIVE,0,0);
     int rc=poll_once(io,fd,0,slice,r);if(rc!=PW_WC_RECORD)return rc;
     unsigned char bytes[PW_WC_WIRE_BYTES];
     union{struct cmsghdr align;unsigned char bytes[CMSG_SPACE(MAX_RIGHTS*sizeof(int))];} control;

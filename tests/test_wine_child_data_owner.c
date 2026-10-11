@@ -57,6 +57,8 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #define pw_wine_child_wire_same_session owner_wire_same_session
 #define pw_wine_child_wire_receive owner_wire_receive
 #define pw_wine_child_wire_receive_step owner_wire_receive_step
+#define pw_wine_child_wire_receive_nowait owner_wire_receive_nowait
+#define pw_wine_child_wire_send_step owner_wire_send_step
 #include "../native/pw_wine_fixture_owner.c"
 #undef pw_wine_child_wire_validate
 #undef pw_wine_child_wire_send
@@ -64,6 +66,8 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #undef pw_wine_child_wire_same_session
 #undef pw_wine_child_wire_receive
 #undef pw_wine_child_wire_receive_step
+#undef pw_wine_child_wire_receive_nowait
+#undef pw_wine_child_wire_send_step
 #include "../native/pw_wine_child_bootstrap.h"
 int pw_wine_child_wire_same_session(const PwWineChildFrame*,const PwWineChildFrame*);
 int pw_wine_child_wire_encode(unsigned char[PW_WC_WIRE_BYTES],const PwWineChildFrame*);
@@ -234,7 +238,7 @@ int owner_wire_send(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int rig
     return m.send_error==2?-1:m.send_error;
 }
 int owner_wire_try_send(int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
-{CHECK(fd==80&&right==-1&&f->kind==PW_WC_SIGNAL);m.sent=*f;m.sends++;(void)r;return m.send_error;}
+{CHECK(fd==80&&right==-1&&(f->kind==PW_WC_SIGNAL||f->kind==PW_WC_CANCEL));m.sent=*f;m.sends++;(void)r;return m.send_error;}
 int owner_wire_same_session(const PwWineChildFrame *a,const PwWineChildFrame *b)
 {return pw_wine_child_wire_same_session(a,b);}
 int owner_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
@@ -264,6 +268,15 @@ int owner_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFram
 }
 int owner_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
 {CHECK(io&&fd==80&&kinds&&out&&*right==-1&&r);if(m.step_result==PW_WC_RECORD){*out=m.sent;out->kind=PW_WC_SIGNAL_ACK;}return m.step_result;}
+/* The actual codec remains linked; owner-side transport is fully inert. */
+int owner_wire_receive_nowait(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
+{
+    if(kinds&(PW_WC_KIND(PW_WC_HELLO)|PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)))
+        return owner_wire_receive(io,fd,kinds,out,right,r);
+    return owner_wire_receive_step(io,fd,kinds,out,right,r);
+}
+int owner_wire_send_step(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
+{return owner_wire_send(io,fd,f,right,r)?PW_WC_ERROR:PW_WC_RECORD;}
 static PwWineFixtureOwnerConfig config(unsigned profile)
 {
     PwWineFixtureOwnerConfig c={.session=0x123400,.profile=profile,.child_unix_path="/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe",.child_sha256=hash64,.helper_image=helper_bytes,.helper_bytes=4,.build_id=build40,.context=&m,.clock_ms=clock_cb,.cancelled=cancel_cb,.record=record_cb};return c;
@@ -293,6 +306,7 @@ static Generation *begin(unsigned reply,int send_error)
 }
 static void held(Generation *g)
 {
+    if(atomic_load(&g->state)==G_HELPER_DRAIN)supervise(&owner,g);
     CHECK(g->helper_possible&&atomic_load(&g->state)==G_UNCERTAIN);
     CHECK(atomic_load(&owner.blocked)&&atomic_load(&owner.uncertain)&&!g->ack);
     unsigned lists=m.lists,adds=m.adds,kills=m.kills;

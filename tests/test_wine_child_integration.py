@@ -452,6 +452,8 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
 
     def test_actual_root_helper_hold(self):
         source = (ROOT / 'native/wine64_main.c').read_text()
+        predicate = function(source, 'static int root_helper_release_proved(') if 'static int root_helper_release_proved(' in source else ''
+        null_check = 'assert(!root_helper_release_proved(NULL));' if predicate else ''
         code = r'''
         #define _DEFAULT_SOURCE
         #include <assert.h>
@@ -460,9 +462,11 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
         #include <stdio.h>
         #include <string.h>
         #include "pw_data_mount.h"
+        #include "lapy_elevation_protocol.h"
         #define PW_WINE64_ROOT_DATA "/data/prospero-win"
         static PwDataMountResult result;
         static int status, requests, sleeps, logs;
+        static unsigned cases, holds, returns;
         static char messages[4096];
         static jmp_buf held;
         static void log_mock(const char *format,...) {
@@ -479,25 +483,59 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
         }
         #define usleep fake_usleep
         int pw_data_mount_request(PwDataMountResult *out) {requests++;*out=result;return status;}
-        ''' + function(source, 'static void root_hold_for_helper(') + '\n' + function(source, 'static int prepare_root_data(') + r'''
-        int main(void) {
-            for(status=-1;status<=0;status++)for(unsigned possible=0;possible<2;possible++)
-            for(unsigned terminal=0;terminal<2;terminal++) {
-                memset(&result,0,sizeof(result));messages[0]=0;requests=sleeps=logs=0;
-                result.helper.possible_apply=possible;result.helper.terminal=terminal;
-                result.before.observed=3;result.before.lstat_raw=-1;result.before.lstat_errno=1;
-                if(!setjmp(held)) {
-                    int rc=prepare_root_data();
-                    assert(!(possible&&!terminal));assert(rc==status&&!sleeps&&logs==2);
-                } else {
-                    assert(possible&&!terminal&&sleeps==4&&logs==3);
-                    assert(strstr(messages,"root_helper_held reason=nonterminal-helper-result"));
-                }
-                assert(requests==1);
-                assert(strstr(messages,"stat_before_raw=0 stat_before_errno=0"));
-                assert(strstr(messages,"lstat_before_raw=-1 lstat_before_errno=1"));
+        ''' + predicate + '\n' + function(source, 'static void root_hold_for_helper(') + '\n' + function(source, 'static int prepare_root_data(') + r'''
+        static void check_result(int release) {
+            messages[0]=0;requests=sleeps=logs=0;cases++;
+            result.before.observed=3;result.before.lstat_raw=-1;result.before.lstat_errno=1;
+            if(!setjmp(held)) {
+                int rc=prepare_root_data();
+                if(!release)fprintf(stderr,"unsafe return: case=%u no_dispatch=%u possible=%u terminal=%u no_request=%u settled=%u cancel=%u transaction=%llu status=%u\n",
+                    cases,result.helper.no_dispatch,result.helper.possible_apply,result.helper.terminal,
+                    result.helper.no_request,result.helper.settled_failure,result.helper.cancel_attempted,
+                    (unsigned long long)result.helper.transaction_id,result.helper.helper_status);
+                assert(release);assert(rc==status&&!sleeps&&logs==2);returns++;
+            } else {
+                assert(!release&&sleeps==4&&logs==3);holds++;
+                assert(strstr(messages,"root_helper_held reason=unproved-helper-release"));
             }
-            puts("root title hold: uncertain helper cannot return or retry");
+            assert(requests==1);
+            assert(strstr(messages,"stat_before_raw=0 stat_before_errno=0"));
+            assert(strstr(messages,"lstat_before_raw=-1 lstat_before_errno=1"));
+        }
+        int main(void) {
+        ''' + null_check + r'''
+            /* No REQUEST is not proof of no dispatch: first/partial/full ELF
+             * upload failures all remain held until a validated terminal result. */
+            for(unsigned upload_boundary=0;upload_boundary<3;upload_boundary++) {
+                memset(&result,0,sizeof(result));result.helper.no_request=1;
+                result.helper.transaction_id=123;status=-1;check_result(0);
+            }
+            /* Independent accepted-tuple table. Each local flag is also tested
+             * at 2, which is invalid evidence rather than a truthy certificate.
+             * A terminal flag comes from the matched adapter's validator; the
+             * root does not consume raw protocol frames or rerun that parser. */
+            for(status=-1;status<=0;status++)for(unsigned encoded=0;encoded<729;encoded++)
+            for(unsigned transaction=0;transaction<2;transaction++)for(unsigned outcome=0;outcome<14;outcome++) {
+                memset(&result,0,sizeof(result));
+                unsigned value=encoded,flags=0,valid=1;
+                unsigned *fields[]={&result.helper.no_dispatch,&result.helper.possible_apply,
+                    &result.helper.terminal,&result.helper.no_request,&result.helper.settled_failure,
+                    &result.helper.cancel_attempted};
+                for(unsigned bit=0;bit<6;bit++) {
+                    unsigned digit=value%3;value/=3;*fields[bit]=digit;
+                    if(digit==2)valid=0;else flags|=digit<<bit;
+                }
+                result.helper.transaction_id=transaction;
+                result.helper.helper_status=outcome==13?UINT32_MAX:outcome;
+                int known_status=outcome<12&&outcome!=8;
+                int release=valid&&((!outcome&&(flags==1||flags==9))||
+                    (transaction&&!outcome&&flags==6)||
+                    (transaction&&known_status&&outcome!=11&&flags==22)||
+                    (transaction&&known_status&&flags==54)||
+                    (transaction&&outcome==11&&flags==60));
+                check_result(release);
+            }
+            printf("root title hold: %u cases, %u held, %u returned; no retries or native operations\n",cases,holds,returns);
             return 0;
         }
         '''
@@ -506,6 +544,7 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
             (path / 'test.c').write_text(code)
             command = [os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
                        '-I' + str(ROOT / 'native'), str(path / 'test.c'), '-o', str(path / 'test')]
+            command[1:1] = os.environ.get('ROOT_HOLD_TEST_CFLAGS', '').split()
             subprocess.run(command, check=True)
             subprocess.run([str(path / 'test')], check=True, timeout=10)
         library = function(source, 'static int open_library(')

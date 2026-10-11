@@ -58,6 +58,8 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #define pw_wine_child_wire_same_session owner_wire_same_session
 #define pw_wine_child_wire_receive owner_wire_receive
 #define pw_wine_child_wire_receive_step owner_wire_receive_step
+#define pw_wine_child_wire_receive_nowait owner_wire_receive_nowait
+#define pw_wine_child_wire_send_step owner_wire_send_step
 #include "../native/pw_wine_fixture_owner.c"
 #undef pw_wine_child_wire_validate
 #undef pw_wine_child_wire_send
@@ -65,6 +67,8 @@ static int intercepted_weak(atomic_uint *p,unsigned *expected,unsigned desired,m
 #undef pw_wine_child_wire_same_session
 #undef pw_wine_child_wire_receive
 #undef pw_wine_child_wire_receive_step
+#undef pw_wine_child_wire_receive_nowait
+#undef pw_wine_child_wire_send_step
 #include "wine_child_data_bridge.h"
 int pw_wine_child_wire_same_session(const PwWineChildFrame*,const PwWineChildFrame*);
 static DiagnosticCase scenario;
@@ -233,7 +237,7 @@ int owner_wire_send(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int rig
     return m.send_error;
 }
 int owner_wire_try_send(int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
-{CHECK(fd==80&&right==-1&&f->kind==PW_WC_SIGNAL);m.sent=*f;m.sends++;(void)r;return m.send_error;}
+{CHECK(fd==80&&right==-1&&(f->kind==PW_WC_SIGNAL||f->kind==PW_WC_CANCEL));m.sent=*f;m.sends++;(void)r;return m.send_error;}
 int owner_wire_same_session(const PwWineChildFrame *a,const PwWineChildFrame *b)
 {return pw_wine_child_wire_same_session(a,b);}
 int owner_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
@@ -250,6 +254,15 @@ int owner_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFram
 }
 int owner_wire_receive_step(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
 {CHECK(io&&fd==80&&kinds&&out&&*right==-1&&r);if(m.step_result==PW_WC_RECORD){*out=m.sent;out->kind=PW_WC_SIGNAL_ACK;}return m.step_result;}
+/* The actual codec remains linked; owner-side transport is fully inert. */
+int owner_wire_receive_nowait(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
+{
+    if(kinds&(PW_WC_KIND(PW_WC_HELLO)|PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)))
+        return owner_wire_receive(io,fd,kinds,out,right,r);
+    return owner_wire_receive_step(io,fd,kinds,out,right,r);
+}
+int owner_wire_send_step(PwNativeChildIo *io,int fd,const PwWineChildFrame *f,int right,PwWineChildWireResult *r)
+{return owner_wire_send(io,fd,f,right,r)?PW_WC_ERROR:PW_WC_RECORD;}
 static PwWineFixtureOwnerConfig config(unsigned profile)
 {
     PwWineFixtureOwnerConfig c={.session=0x123400,.profile=profile,.child_unix_path="/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe",.child_sha256=hash64,.helper_image=helper_bytes,.helper_bytes=4,.build_id=build40,.context=&m,.clock_ms=clock_cb,.cancelled=cancel_cb,.record=record_cb};return c;
@@ -274,7 +287,9 @@ static Generation *bound(unsigned profile)
 
 static Generation *flow(unsigned profile,int which,int data_mode)
 {
- scenario=(DiagnosticCase){.which=which,.data_mode=data_mode};Generation *g=bound(profile);g->stream_fd=71;g->wine_tid=47;if(profile==2)g->machine=PW_WC_MACHINE_I386;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);return g;
+ scenario=(DiagnosticCase){.which=which,.data_mode=data_mode};Generation *g=bound(profile);g->stream_fd=71;g->wine_tid=47;if(profile==2)g->machine=PW_WC_MACHINE_I386;atomic_store(&g->state,G_STARTING);start_generation(&owner,g);
+ if(atomic_load(&g->state)==G_HELPER_DRAIN)supervise(&owner,g);
+ return g;
 }
 int main(void)
 {
@@ -302,8 +317,8 @@ int main(void)
    Generation *g=flow(profile,failures[i],0);
    CHECK(child_result.data.data_before&&child_result.data.ready&&child_result.data_calls==2&&!child_result.data_clones&&!child_result.data_sends);
    CHECK(!child_result.parked&&child_result.exit_code==14&&child_result.failure.kind==PW_WC_FAILURE&&!g->ack&&!child_result.threads);
-   CHECK(g->helper_possible&&atomic_load(&g->state)==G_UNCERTAIN&&!m.kills);
-   CHECK((child_result.failure.returned_length>>PW_WCD_STATE_SHIFT)==(PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE));
+   CHECK(!g->helper_possible&&atomic_load(&g->state)==G_CLEANUP&&!m.kills);
+   CHECK((child_result.failure.returned_length>>PW_WCD_STATE_SHIFT)==(PW_WCD_DATA_BEFORE|PW_WCD_DATA_AFTER|PW_WCD_LSTAT_BEFORE|PW_WCD_NO_DISPATCH));
    CHECK((child_result.failure.returned_length&0xffff)==(failures[i]==CASE_LOG?PW_WC_DATA_DIRECTORY:failures[i]==CASE_PREFIX?PW_WC_DIRECTORY_PREFIX:failures[i]==CASE_CWD?PW_WC_DIRECTORY_CWD:0)); /* no fallback helper after filesystem refusal */
   }
   Generation *g=flow(profile,CASE_SUCCESS,0);CHECK(child_result.data.data_before&&!child_result.data_sends&&!g->helper_possible&&g->ack&&child_result.loads==1&&child_result.threads==1);
@@ -316,13 +331,13 @@ int main(void)
    CHECK(child_result.data.lstat_after&&child_result.data.settled_ms==1000&&g->ack&&!g->helper_possible&&child_result.loads==1&&child_result.threads==1);
    CHECK(child_result.data.lstat_before_error==(mode==8?EPERM:ENOENT)&&child_result.data.data_before==(mode==8));
   }
-  for(unsigned mode=0;mode<2;mode++){g=flow(profile,CASE_DATA_MARKER,(int)mode);CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads);CHECK(child_result.data_marker_count==1&&child_result.failure.failure_api==PW_WC_DIAG_LOG_HEADER&&g->helper_possible);}
+  for(unsigned mode=0;mode<2;mode++){g=flow(profile,CASE_DATA_MARKER,(int)mode);CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads);CHECK(child_result.data_marker_count==1&&child_result.failure.failure_api==PW_WC_DIAG_LOG_HEADER&&!g->helper_possible);}
   g=flow(profile,CASE_SUCCESS,2);CHECK(child_result.data.possible_apply&&!child_result.data.terminal&&!child_result.data.ready);
   CHECK(child_result.parked&&child_result.exit_code==0&&!g->ack&&!child_result.loads&&!child_result.threads);
   CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==(PW_WCD_POSSIBLE<<PW_WCD_STATE_SHIFT)&&g->helper_possible);
   CHECK(child_result.closes[72]==1&&child_result.closes[3]==1&&!child_result.closes[5]);
   g=flow(profile,CASE_SUCCESS,5);CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads);
-  CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==0&&child_result.failure.returned_value==0&&child_result.failure.failure_api==PW_WCD_SOCKET&&child_result.failure.failure_raw==-1&&child_result.failure.errno_valid&&child_result.failure.native_error==EIO);
+  CHECK(child_result.failure.status==-PW_WCB_DATA&&child_result.failure.returned_length==(PW_WCD_NO_DISPATCH<<PW_WCD_STATE_SHIFT)&&child_result.failure.returned_value==0&&child_result.failure.failure_api==PW_WCD_SOCKET&&child_result.failure.failure_raw==-1&&child_result.failure.errno_valid&&child_result.failure.native_error==EIO);
   const unsigned stopped_modes[]={4,6,7};
   for(unsigned i=0;i<3;i++){
    unsigned mode=stopped_modes[i];g=flow(profile,CASE_SUCCESS,(int)mode);
@@ -335,7 +350,7 @@ int main(void)
    if(mode==6)CHECK(child_result.data.raw==-1&&child_result.data.errno_valid&&child_result.data.native_error==EIO&&!child_result.data.resolution_index);
   }
   g=flow(profile,CASE_SUCCESS,3);CHECK(child_result.data.possible_apply&&child_result.data.terminal&&!child_result.data.ready);
-  CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads&&g->helper_possible);
+  CHECK(!child_result.parked&&child_result.exit_code==14&&!g->ack&&!child_result.loads&&!child_result.threads&&!g->helper_possible);
  }
  printf("Actual adapter/main/bootstrap/codec/owner with mocked platform boundaries: %u checks passed\n",checks);return 0;
 }

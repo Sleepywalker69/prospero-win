@@ -3,6 +3,7 @@
 #include "pw_wine_child_data.h"
 #include "pw_wine_child_bootstrap.h"
 #include "lapy_elevation_protocol.h"
+#include "pw_lapy_client.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -27,12 +28,17 @@ int *sceNetErrnoLoc(void);
 #define HELPER_LIMIT (4u*1024u*1024u)
 #define SETTLE_MS 1000u
 #define VISIBLE_MS 5000u
-_Static_assert(sizeof(struct lapy_elevation_message)==24,"fixed helper protocol");
+_Static_assert(sizeof(struct lapy_elevation_message)==32,"fixed helper protocol");
 _Static_assert(__BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__,"helper wire is little endian");
 
 typedef struct DataContext {
     PwWineChildData *result;
     PwNativeChildIo *original,io;
+    const PwWineChildDataConfig *config;
+    uint64_t recovery_end;
+    int recovering,helper_socket;
+    unsigned upload_complete,exchange_started;
+    const PwLapyClient *active_client; /* synchronous exchange only; never retained by callbacks */
 } DataContext;
 static int data_fail(DataContext *c,unsigned api,int32_t raw,int error)
 {
@@ -49,8 +55,17 @@ static int data_cancel(void *context)
 {
     DataContext *c=context;
     if(c->original->cancelled&&c->original->cancelled(c->original->context)){
-        c->result->control_refused=1;
+        c->result->cancel_requested=1;
         return data_fail(c,PW_WCD_CONTROL,1,0)!=0;
+    }
+    if(c->config->cancel_probe){
+        int rc=c->config->cancel_probe(c->config->cancel_context);
+        if(rc){
+            if(rc>0)c->result->cancel_requested=1;
+            else c->result->control_refused=1;
+            return data_fail(c,PW_WCD_CONTROL,rc,0)!=0;
+        }
+        return 0;
     }
     /* Ordinary inherited control FD, never a SceNet socket ID. No second
      * reader: any pre-ACK input or closure is a refusal, not a new command. */
@@ -66,11 +81,26 @@ static int data_cancel(void *context)
 static int data_budget(DataContext *c,unsigned *remaining)
 {
     unsigned left;
-    int rc=pw_native_child_remaining(&c->io,&left);
+    PwNativeChildIo checked=c->io;
+    if(c->recovering){checked.cancelled=NULL;checked.stage_end=c->recovery_end;}
+    int rc=pw_native_child_remaining(&checked,&left);
+    c->io.last_clock=checked.last_clock;
     c->original->last_clock=c->io.last_clock;
     if(rc)return data_fail(c,PW_WCD_BUDGET,rc,0);
     if(remaining)*remaining=left;
     return 0;
+}
+static int progress(DataContext *c,unsigned stage)
+{
+    if(!c->result->progress)return 0;
+    if(data_budget(c,NULL))return -1;
+    if(c->result->progress){
+        int rc=c->result->progress(c->result->progress_context,stage);
+        /* The callback may sample the original clock; do not discard it. */
+        if(c->original->last_clock>c->io.last_clock)c->io.last_clock=c->original->last_clock;
+        if(rc)return data_fail(c,PW_WCD_PROGRESS,rc,0);
+    }
+    return data_budget(c,NULL);
 }
 static int net_error(int rc)
 {
@@ -139,61 +169,74 @@ static int transfer(DataContext *c,int socket,void *bytes,size_t size,int sendin
     size_t used=0;
     while(used<size){
         if(timeouts(c,socket)||data_budget(c,NULL))return -1;
+        if(sending&&api==PW_WCD_UPLOAD)c->result->no_dispatch=0;
         int got=sending?sceNetSend(socket,(unsigned char *)bytes+used,size-used,0):
                         sceNetRecv(socket,(unsigned char *)bytes+used,size-used,0);
         int error=net_error(got);
         if(got<=0||(size_t)got>size-used)return data_fail(c,api,got,error);
         used+=(size_t)got;
+        if(sending&&api==PW_WCD_UPLOAD&&used==size)c->upload_complete=1;
         if(data_budget(c,NULL))return used==size?1:-1;
     }
     return 0;
 }
-static int matches(const struct lapy_elevation_message *m,const struct lapy_elevation_message *request,unsigned kind)
+static unsigned client_api(unsigned phase)
 {
-    return m->magic==request->magic&&m->version==request->version&&m->size==request->size&&
-           m->kind==kind&&m->capability==request->capability&&m->pid==request->pid;
+    switch(phase){case PW_LC_REQUEST:return PW_WCD_REQUEST;case PW_LC_PREPARE:return PW_WCD_PREPARE;
+    case PW_LC_PREPARED:return PW_WCD_PREPARED;case PW_LC_CANCEL:return PW_WCD_CANCEL;default:return PW_WCD_RESULT;}
 }
-static int terminal_status(unsigned status,int prepared)
+static int client_remaining(void *context,int recovery,unsigned *left)
 {
-    if(!prepared)return status>=LAPY_ELEVATION_INVALID_REQUEST&&status<=LAPY_ELEVATION_TARGET_MISMATCH;
-    return status==LAPY_ELEVATION_OK||status==LAPY_ELEVATION_TARGET_MISMATCH||status==LAPY_ELEVATION_UNAVAILABLE||
-           status==LAPY_ELEVATION_PREPARE_FAILED||status==LAPY_ELEVATION_APPLY_FAILED||
-           status==LAPY_ELEVATION_TRANSPORT_ERROR||status==LAPY_ELEVATION_PROTOCOL_ERROR;
+    DataContext *c=context;c->recovering=recovery;
+    if(!data_budget(c,left))return 0;
+    return errno>0?errno:EIO;
 }
-static int exchange(DataContext *c,int socket)
+static long client_transfer(DataContext *c,void *p,size_t size,unsigned phase,int recovery,int *error,int sending)
 {
-    if(data_budget(c,NULL))return -1;
+    c->recovering=recovery;
+    if(timeouts(c,c->helper_socket)||data_budget(c,NULL)){*error=errno>0?errno:EIO;return -1;}
+    int n=sending?sceNetSend(c->helper_socket,p,size,0):sceNetRecv(c->helper_socket,p,size,0);
+    *error=net_error(n);
+    if(n<=0||(size_t)n>size)data_fail(c,client_api(phase),n,*error);
+    return n;
+}
+static long client_send(void *context,const void *p,size_t size,unsigned left,unsigned phase,int recovery,int *error)
+{(void)left;return client_transfer(context,(void*)p,size,phase,recovery,error,1);}
+static long client_receive(void *context,void *p,size_t size,unsigned left,unsigned phase,int recovery,int *error)
+{(void)left;return client_transfer(context,p,size,phase,recovery,error,0);}
+static int client_prepare(void *context,int *error)
+{
+    DataContext *c=context;errno=0;int rc=seteuid(geteuid());*error=rc<0?errno:0;
+    if(rc)data_fail(c,PW_WCD_LOCAL_PREPARE,rc,*error);
+    return rc;
+}
+static void client_result(DataContext *c,const PwLapyClient *client)
+{
+    c->result->possible_apply=client->possible_apply;c->result->no_request=client->no_request;
+    c->result->terminal=client->terminal;c->result->settled_failure=client->settled_failure;
+    c->result->helper_status=client->helper_status;c->result->cancel_attempted=client->cancel_attempted;
+}
+static int client_progress(void *context,unsigned phase)
+{
+    static const unsigned stages[]={0,PW_WCP_REQUEST_BEGIN,PW_WCP_PREPARE_RECEIVED,
+        PW_WCP_LOCAL_PREPARE_BEGIN,PW_WCP_LOCAL_PREPARE_RETURNED,PW_WCP_PREPARED_SENT,PW_WCP_RESULT_RECEIVED};
+    DataContext *c=context;
+    if(c->active_client)client_result(c,c->active_client);
+    if(phase>=sizeof(stages)/sizeof(stages[0])||progress(c,stages[phase]))return EIO;
+    return 0;
+}
+static int exchange(DataContext *c,int socket,int cancel_only)
+{
     pid_t pid=getpid();if(pid<=1)return data_fail(c,PW_WCD_ARGUMENT,(int32_t)pid,0);
-    struct lapy_elevation_message request={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,
-        sizeof(request),LAPY_ELEVATION_REQUEST,LAPY_ELEVATION_FILESYSTEM,(uint32_t)pid,LAPY_ELEVATION_OK};
-    struct lapy_elevation_message message={0};
-    /* The helper targets no process before REQUEST. Mark before its first
-     * potentially delivered byte and never infer recall from a send failure. */
-    c->result->possible_apply=1;
-    if(transfer(c,socket,&request,sizeof(request),1,PW_WCD_REQUEST))return -1;
-    int rc=transfer(c,socket,&message,sizeof(message),0,PW_WCD_PREPARE);
-    if(rc<0)return -1;
-    if(matches(&message,&request,LAPY_ELEVATION_RESPONSE)&&terminal_status(message.status,0)){
-        c->result->helper_status=message.status;c->result->terminal=1;
-        return data_fail(c,PW_WCD_RESULT,(int32_t)message.status,0);
-    }
-    if(!matches(&message,&request,LAPY_ELEVATION_PREPARE)||message.status!=LAPY_ELEVATION_OK)
-        return data_fail(c,PW_WCD_PREPARE,(int32_t)message.status,0);
-    if(rc||data_budget(c,NULL))return -1;
-    errno=0;int prepared=seteuid(geteuid()),error=prepared<0?errno:0;
-    if(prepared)data_fail(c,PW_WCD_LOCAL_PREPARE,prepared,error);
-    if(data_budget(c,NULL))return -1;
-    message=request;message.kind=LAPY_ELEVATION_PREPARED;
-    message.status=prepared?LAPY_ELEVATION_PREPARE_FAILED:LAPY_ELEVATION_OK;
-    if(transfer(c,socket,&message,sizeof(message),1,PW_WCD_PREPARED))return -1;
-    memset(&message,0,sizeof(message));rc=transfer(c,socket,&message,sizeof(message),0,PW_WCD_RESULT);
-    if(rc<0)return -1;
-    c->result->helper_status=message.status;
-    if(!matches(&message,&request,LAPY_ELEVATION_RESPONSE)||!terminal_status(message.status,1)||
-       (prepared&&message.status==LAPY_ELEVATION_OK))return data_fail(c,PW_WCD_RESULT,(int32_t)message.status,0);
-    c->result->terminal=1;
-    if(message.status||prepared)return data_fail(c,PW_WCD_RESULT,(int32_t)message.status,0);
-    return rc||data_budget(c,NULL)?-1:0;
+    c->helper_socket=socket;c->exchange_started=1;
+    PwLapyClient client;const PwLapyClientOps ops={c,client_remaining,client_send,client_receive,client_prepare,client_progress,c->upload_complete,(unsigned)cancel_only};
+    c->active_client=&client;
+    int rc=pw_lapy_client_exchange(&client,&ops,(uint32_t)pid,c->config->transaction_id);
+    c->active_client=NULL;
+    client_result(c,&client);
+    c->recovering=0;
+    if(rc)return data_fail(c,PW_WCD_RESULT,(int32_t)client.helper_status,client.error);
+    return 0;
 }
 static int sleep_slice(DataContext *c,unsigned milliseconds)
 {
@@ -250,53 +293,61 @@ static int wait_data(DataContext *c)
             return data_fail(c,PW_WCD_DATA_LSTAT,c->result->lstat_after_raw,c->result->lstat_after_error);
         if(sleep_slice(c,100))return -1;
     }
+    if(progress(c,PW_WCP_DATA_VISIBLE))return -1;
     begun=c->io.last_clock;
     while(c->io.last_clock-begun<SETTLE_MS){
         uint64_t elapsed=c->io.last_clock-begun;unsigned left=SETTLE_MS-(unsigned)elapsed;
         if(sleep_slice(c,left>100?100:left))return -1;
     }
     c->result->settled_ms=(unsigned)(c->io.last_clock-begun);
-    return data_budget(c,NULL);
+    return progress(c,PW_WCP_DATA_SETTLED)||data_budget(c,NULL)?-1:0;
 }
-int pw_wine_child_data_prepare(PwWineChildData *result,PwNativeChildIo *io,const char *expected)
+int pw_wine_child_data_prepare(PwWineChildData *result,PwNativeChildIo *io,const char *expected,const PwWineChildDataConfig *config)
 {
-    if(!result||!io||!io->ready||!io->clock_ms||!expected)return -1;
-    DataContext c={.result=result,.original=io,.io=*io};
+    if(!result||!io||!io->ready||!io->clock_ms||!expected||!config||!config->transaction_id)return -1;
+    DataContext c={.result=result,.original=io,.io=*io,.config=config};
+    c.recovery_end=io->stage_end>UINT64_MAX-PW_WINE_CHILD_CLEANUP_MS?UINT64_MAX:io->stage_end+PW_WINE_CHILD_CLEANUP_MS;
+    if(c.recovery_end>io->total_end)c.recovery_end=io->total_end;
     if(result->attempted)return data_fail(&c,PW_WCD_ARGUMENT,-1,0);
-    result->attempted=1;c.io.context=&c;c.io.clock_ms=data_clock;c.io.cancelled=data_cancel;
+    result->attempted=1;result->no_dispatch=1;result->no_request=1;result->transaction_id=config->transaction_id;c.io.context=&c;c.io.clock_ms=data_clock;c.io.cancelled=data_cancel;
     if(strlen(expected)!=64)return data_fail(&c,PW_WCD_ARGUMENT,-1,0);
     for(unsigned i=0;i<64;i++)if(!((expected[i]>='0'&&expected[i]<='9')||(expected[i]>='a'&&expected[i]<='f')))
         return data_fail(&c,PW_WCD_ARGUMENT,-1,0);
     int rc=observe_data_access(&c,0);
     if(rc<0)return -1;
+    if(progress(&c,PW_WCP_DATA_OBSERVED))return -1;
     if(!rc){result->data_after=result->ready=1;return 0;}
+    if(progress(&c,PW_WCP_HELPER_READ_BEGIN))return -1;
     size_t size=0;unsigned char *bytes=helper_bytes(&c,expected,&size);
     if(!bytes)return -1;
     int socket=-1,success=0;
-    if(data_budget(&c,NULL))goto done;
+    if(data_budget(&c,NULL)||progress(&c,PW_WCP_HELPER_VERIFIED)||progress(&c,PW_WCP_NET_SOCKET_BEGIN))goto done;
     socket=sceNetSocket("pw-wine-child-data",AF_INET,SOCK_STREAM,6);
     int error=net_error(socket);
     if(socket<0){data_fail(&c,PW_WCD_SOCKET,socket,error);goto done;}
-    if(data_budget(&c,NULL)||timeouts(&c,socket))goto done;
+    if(progress(&c,PW_WCP_NET_SOCKET_READY)||data_budget(&c,NULL)||timeouts(&c,socket))goto done;
     /* SceNet uses the target BSD sockaddr layout even in host controls. */
     struct { uint8_t length,family;uint16_t port;uint32_t address;uint8_t zero[8]; } address={0};
     _Static_assert(sizeof(address)==16,"fixed SceNet IPv4 address");
     address.length=sizeof(address);address.family=AF_INET;
     address.port=(uint16_t)((9021u<<8)|(9021u>>8));address.address=UINT32_C(0x0100007f);
-    if(data_budget(&c,NULL))goto done;
+    if(progress(&c,PW_WCP_NET_CONNECT_BEGIN)||data_budget(&c,NULL))goto done;
     rc=sceNetConnect(socket,(const struct sockaddr *)&address,sizeof(address));error=net_error(rc);
     if(rc){data_fail(&c,PW_WCD_CONNECT,rc,error);goto done;}
-    if(data_budget(&c,NULL)||transfer(&c,socket,bytes,size,1,PW_WCD_UPLOAD))goto done;
+    if(progress(&c,PW_WCP_NET_CONNECTED)||data_budget(&c,NULL)||transfer(&c,socket,bytes,size,1,PW_WCD_UPLOAD))goto done;
     free(bytes);bytes=NULL;
-    if(exchange(&c,socket)||wait_data(&c))goto done;
+    if(progress(&c,PW_WCP_HELPER_UPLOADED))goto done;
+    if(exchange(&c,socket,0)||wait_data(&c))goto done;
     success=1;
  done:
     free(bytes);
+    if(socket>=0&&c.upload_complete&&!c.exchange_started)(void)exchange(&c,socket,1);
     if(socket>=0){
         rc=sceNetSocketClose(socket);error=net_error(rc);
         if(rc){data_fail(&c,PW_WCD_NET_CLOSE,rc,error);success=0;}
     }
     if(data_budget(&c,NULL))success=0;
+    if(success&&!result->api&&progress(&c,PW_WCP_NET_CLOSED))success=0;
     if(success&&!result->api){result->ready=1;return 0;}
     return -1;
 }

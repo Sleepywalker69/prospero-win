@@ -37,15 +37,16 @@ to observe its Windows parent's exit without requiring the native title to
 exit first. It does not manufacture a process signal or native reap result.
 The existing in-process own-PID timer exemption remains in force.
 
-This guarantee covers the ordinary serialized root exit path. Fatal exits,
-direct `_exit`, process crashes and simultaneous uncontrolled teardown remain
-unverified. A native owner must distinguish safe host release after a settled
-failed run from a successful Windows compatibility result. It must never use
-elapsed time to clear uncertain ownership. If restoring the process-creation signal
+The checked-detach guarantee covers the ordinary serialized root exit path.
+A native owner must distinguish safe host release after a settled failed run
+from a successful Windows compatibility result. It must never use elapsed
+time to clear uncertain ownership. If restoring the process-creation signal
 mask fails, the consumer records the actual pthread error and calls Wine's
-`abort_thread(1)`. It does not return success with the wrong mask. A last-thread
-abort still reaches direct `_exit`, so this fatal branch is outside the ordinary
-root-settlement guarantee.
+`abort_thread(1)`. It does not return success with the wrong mask. Patch 0921
+retains an installed root provider's native process on a last-thread abort,
+without claiming checked detach or settlement; see the fatal-abort section.
+Other direct `_exit` paths, process crashes and simultaneous uncontrolled
+teardown remain outside that narrow protection.
 
 Patch 0913 prepares only newly owned ordinary stream endpoints used by Wine
 IPC. It checks exact `SO_TYPE`, successful `FIOCLEX` when requested, and
@@ -72,3 +73,32 @@ The source reference is the pinned
 and its existing server process and thread lifecycle. The original two-program
 fixture and a separately admitted installer attempt must still be built and
 validated with one matching runtime cohort.
+
+## Fatal root client abort
+
+In the experimental cohort, `abort_process` must retain the native title when
+an installed root provider exists. This also covers the last-Wine-thread path
+through `abort_thread`; the independent title and supervisor threads are not
+counted as Wine threads. A raw `_exit` would otherwise bypass both the ordinary
+root exit barrier and the title's `atexit` hold.
+
+Patch 0921 publishes the original Windows status through the root callback,
+reports `root_abort_held`, and permanently parks that caller. The abnormal path
+makes no Wine server request, closes no endpoint, claims no checked logical
+detach, and never treats a callback result or sleep error as release. It does
+not globally cancel descendants or alter the ordinary profile-2 admission
+rules. No-provider children/default processes keep ordinary abort behavior;
+a non-last Wine thread still exits only its own thread.
+
+The diagnostic is bounded in length; logging is not guaranteed to complete.
+The native PID remains retained even if the output sink blocks. This guard
+cannot prevent external kernel/app-manager termination or other unrelated raw
+exit paths. Safe helper cancellation and terminal evidence remain separate
+requirements, not outcomes inferred from this hold.
+
+`check_wine_fixture_consumers.py` compiles and executes the exact production
+abort bodies with the feature enabled and disabled, checking direct abort,
+last/non-last Wine threads, original DWORD status, absent root provider,
+misleading release callbacks, interrupted sleeps and permanent sleep errors.
+These inert-boundary controls do not replace the matched target build or
+console lifetime evidence.

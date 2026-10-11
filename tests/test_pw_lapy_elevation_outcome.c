@@ -12,12 +12,16 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
+#define PW_LAPY_HELPER_SHA256 "132bad75b1586e7949595b174c71d5d80a3bf6ebce9bfdffb95a2d0a509bcf83"
 #include "native/pw_lapy_elevation.h"
 #include "native/lapy_elevation_protocol.h"
 static int mock_open(const char *,int,...), mock_fstat(int,struct stat *), mock_close(int);
 static ssize_t mock_read(int,void *,size_t);
 static int mock_seteuid(uid_t);
 static uid_t mock_geteuid(void);
+static int mock_clock_gettime(clockid_t,struct timespec *);
+#define clock_gettime mock_clock_gettime
 #define open mock_open
 #define fstat mock_fstat
 #define close mock_close
@@ -25,6 +29,7 @@ static uid_t mock_geteuid(void);
 #define seteuid mock_seteuid
 #define geteuid mock_geteuid
 #include "native/pw_lapy_elevation.c"
+#undef clock_gettime
 #undef open
 #undef fstat
 #undef close
@@ -38,37 +43,55 @@ struct Mock {
  long fail_send_at,fail_recv_at;
  int opens,closes,sockets,netcloses,clones,options,reads,neterror;
  size_t chunk;
+ uint64_t now;size_t expire_after_tx;
 }m;
 static unsigned checks,cases;
 #define CHECK(x) do {++checks;if(!(x)){fprintf(stderr,"case=%u line=%d assertion=%s tx=%zu rx=%zu\n",cases,__LINE__,#x,m.txn,m.rxi);assert(x);}}while(0)
-static int mock_open(const char *p,int flags,...){CHECK(!strcmp(p,PW_LAPY_HELPER_PATH)&&flags==O_RDONLY);m.opens++;if(m.fail_open){errno=ENOENT;return -1;}return 90;}
-static int mock_fstat(int fd,struct stat *st){CHECK(fd==90);if(m.fail_stat){errno=EIO;return -1;}memset(st,0,sizeof(*st));st->st_mode=m.nonregular?S_IFDIR:S_IFREG;st->st_size=7;return 0;}
+static int mock_open(const char *p,int flags,...){CHECK(!strcmp(p,PW_LAPY_HELPER_PATH)&&flags==(O_RDONLY|O_NOFOLLOW|O_NONBLOCK));m.opens++;if(m.fail_open){errno=ENOENT;return -1;}return 90;}
+static int mock_fstat(int fd,struct stat *st){CHECK(fd==90);if(m.fail_stat){errno=EIO;return -1;}memset(st,0,sizeof(*st));st->st_mode=m.nonregular?S_IFDIR:S_IFREG;st->st_size=8;return 0;}
 static int mock_close(int fd){CHECK(fd==90);m.closes++;if(m.fail_close){errno=EBADF;return -1;}return 0;}
-static ssize_t mock_read(int fd,void *p,size_t n){CHECK(fd==90);m.reads++;if(m.fail_read){errno=EIO;return -1;}size_t left=7-m.filei;if(n>left)n=left;memcpy(p,&"ELFTEST"[m.filei],n);m.filei+=n;return (ssize_t)n;}
+static ssize_t mock_read(int fd,void *p,size_t n){CHECK(fd==90);m.reads++;if(m.fail_read){errno=EIO;return -1;}size_t left=8-m.filei;if(n>left)n=left;memcpy(p,&"\177ELFabc!"[m.filei],n);m.filei+=n;return (ssize_t)n;}
+static int mock_clock_gettime(clockid_t kind,struct timespec *t){CHECK(kind==CLOCK_MONOTONIC);t->tv_sec=(time_t)(m.now/1000);t->tv_nsec=(long)(m.now%1000)*1000000;return 0;}
 static uid_t mock_geteuid(void){return 1000;}
 static int mock_seteuid(uid_t uid){CHECK(uid==1000);m.clones++;if(m.clone_fail){errno=EPERM;return -1;}return 0;}
 int ps5log_ps5_socket(int d,int t,int p){CHECK(d==AF_INET&&t==SOCK_STREAM&&p==IPPROTO_TCP);m.sockets++;if(m.fail_socket){errno=ENOBUFS;return -1;}return 42;}
 int ps5log_ps5_connect(int fd,const struct sockaddr *p,socklen_t n){CHECK(fd==42&&p&&n==16);if(m.fail_connect){errno=ECONNREFUSED;return -1;}return 0;}
 int ps5log_ps5_setsockopt(int fd,int level,int option,const void *p,socklen_t n){CHECK(fd==42&&level==0xffff&&p&&n==4&&(option==0x1105||option==0x1106||option==0x1109));m.options++;if(m.fail_option==m.options){errno=EIO;return -1;}return 0;}
 int ps5log_ps5_close(int fd){CHECK(fd==42);m.netcloses++;if(m.fail_close){errno=EBADF;return -1;}return 0;}
-long ps5log_ps5_send(int fd,const void *p,size_t n,int flags){CHECK(fd==42&&p&&flags==0);if(m.fail_send_at>=0&&(long)m.txn>=m.fail_send_at){errno=EPIPE;return m.send_failure_kind==1?0:m.send_failure_kind==2?(long)n+1:-1;}if(n>m.chunk)n=m.chunk;CHECK(m.txn+n<=sizeof(m.tx));memcpy(m.tx+m.txn,p,n);m.txn+=n;return (long)n;}
+long ps5log_ps5_send(int fd,const void *p,size_t n,int flags){CHECK(fd==42&&p&&flags==0);if(m.fail_send_at>=0&&(long)m.txn>=m.fail_send_at){errno=EPIPE;return m.send_failure_kind==1?0:m.send_failure_kind==2?(long)n+1:-1;}if(n>m.chunk)n=m.chunk;CHECK(m.txn+n<=sizeof(m.tx));memcpy(m.tx+m.txn,p,n);m.txn+=n;if(m.expire_after_tx&&m.txn>=m.expire_after_tx)m.now=31000;return (long)n;}
 int sceNetRecv(int fd,void *p,size_t n,int flags){CHECK(fd==42&&p&&flags==0);if(m.fail_recv_at>=0&&(long)m.rxi>=m.fail_recv_at){m.neterror=ETIMEDOUT;return m.recv_failure_kind==1?0:m.recv_failure_kind==2?(int)n+1:-1;}if(n>m.chunk)n=m.chunk;if(n>m.rxn-m.rxi)n=m.rxn-m.rxi;memcpy(p,m.rx+m.rxi,n);m.rxi+=n;return (int)n;}
 int *sceNetErrnoLoc(void){return &m.neterror;}
-static void reset(void){memset(&m,0,sizeof(m));m.fail_send_at=m.fail_recv_at=-1;m.chunk=1;cases++;}
-static struct lapy_elevation_message frame(unsigned kind,unsigned status){struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),kind,LAPY_ELEVATION_FILESYSTEM,1234,status};return f;}
+static void reset(void){memset(&m,0,sizeof(m));m.fail_send_at=m.fail_recv_at=-1;m.chunk=1;m.now=1000;cases++;}
+static struct lapy_elevation_message frame(unsigned kind,unsigned status){struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),kind,LAPY_ELEVATION_FILESYSTEM,1234,status,((uint64_t)1234<<32)^1000};return f;}
 static void queue(struct lapy_elevation_message f){CHECK(m.rxn+sizeof(f)<=sizeof(m.rx));memcpy(m.rx+m.rxn,&f,sizeof(f));m.rxn+=sizeof(f);}
 static int invoke(PwLapyElevationResult *r){memset(r,0xa5,sizeof(*r));errno=E2BIG;return pw_lapy_elevation_request_result(1234,r);}
-static int is_terminal(unsigned s,int phase){return phase?(s==0||s==4||s==5||s==6||s==7||s==9||s==10):(s>=1&&s<=4);}
+static int is_terminal(unsigned s,int phase){return phase?(s==0||s==4||s==5||s==6||s==7||s==9||s==10):((s>=1&&s<=5)||s==7||s==9||s==10);}
 static void good(void){queue(frame(LAPY_ELEVATION_PREPARE,0));queue(frame(LAPY_ELEVATION_RESPONSE,0));}
 int main(void){PwLapyElevationResult r;
  reset();good();CHECK(invoke(&r)==0);CHECK(r.possible_apply==1&&r.terminal==1&&r.helper_status==0&&m.clones==1&&m.closes==1&&m.netcloses==1);
+
+#ifdef PW_LAPY_ADAPTER_SMOKE
+ puts("Root v2 adapter smoke: fragmented request/response, verified inert helper fixture and transaction identity passed; all platform boundaries mocked");return 0;
+#endif
  for(unsigned phase=0;phase<2;phase++)for(unsigned s=0;s<16;s++){reset();if(phase)queue(frame(LAPY_ELEVATION_PREPARE,0));queue(frame(LAPY_ELEVATION_RESPONSE,s));int rc=invoke(&r);CHECK((rc==0)==(phase&&s==0));CHECK(r.possible_apply==1);CHECK((r.terminal!=0)==is_terminal(s,phase));CHECK(m.clones==(int)phase&&m.closes==1&&m.netcloses==1);}
- for(unsigned phase=0;phase<2;phase++)for(unsigned field=0;field<7;field++){reset();struct lapy_elevation_message f=frame(phase?LAPY_ELEVATION_RESPONSE:LAPY_ELEVATION_PREPARE,0);if(phase)queue(frame(LAPY_ELEVATION_PREPARE,0));switch(field){case 0:f.magic^=1;break;case 1:f.version++;break;case 2:f.size--;break;case 3:f.kind=77;break;case 4:f.capability++;break;case 5:f.pid++;break;case 6:f.status=0xffffffff;break;}queue(f);CHECK(invoke(&r)<0);CHECK(r.possible_apply==1&&!r.terminal);}
- for(int kind=0;kind<3;kind++)for(long at=0;at<55;at++){reset();good();m.fail_send_at=at;m.send_failure_kind=kind;CHECK(invoke(&r)<0);CHECK((r.possible_apply!=0)==(at>=7));CHECK(!r.terminal&&m.closes==1&&m.netcloses==1);}
- for(int kind=0;kind<3;kind++)for(long at=0;at<48;at++){reset();good();m.fail_recv_at=at;m.recv_failure_kind=kind;CHECK(invoke(&r)<0);CHECK(r.possible_apply==1&&!r.terminal&&m.closes==1&&m.netcloses==1);}
- for(unsigned i=0;i<8;i++){reset();good();switch(i){case 0:m.fail_open=1;break;case 1:m.fail_stat=1;break;case 2:m.nonregular=1;break;case 3:m.fail_socket=1;break;case 4:m.fail_connect=1;break;case 5:m.fail_option=1;break;case 6:m.fail_option=3;break;case 7:m.fail_read=1;break;}CHECK(invoke(&r)<0);CHECK(!r.possible_apply&&!r.terminal);}
+ for(unsigned phase=0;phase<2;phase++)for(unsigned field=0;field<8;field++){reset();struct lapy_elevation_message f=frame(phase?LAPY_ELEVATION_RESPONSE:LAPY_ELEVATION_PREPARE,0);if(phase)queue(frame(LAPY_ELEVATION_PREPARE,0));switch(field){case 0:f.magic^=1;break;case 1:f.version++;break;case 2:f.size--;break;case 3:f.kind=77;break;case 4:f.capability++;break;case 5:f.pid++;break;case 6:f.status=0xffffffff;break;case 7:f.transaction_id^=1;break;}queue(f);CHECK(invoke(&r)<0);CHECK(r.possible_apply==1&&!r.terminal);}
+ for(int kind=0;kind<3;kind++)for(long at=0;at<72;at++){reset();good();m.fail_send_at=at;m.send_failure_kind=kind;CHECK(invoke(&r)<0);CHECK((r.possible_apply!=0)==(at>=8));CHECK(!r.terminal&&m.closes==1&&m.netcloses==1);}
+ for(int kind=0;kind<3;kind++)for(long at=0;at<64;at++){reset();good();m.fail_recv_at=at;m.recv_failure_kind=kind;CHECK(invoke(&r)<0);CHECK(r.possible_apply==1&&!r.terminal&&m.closes==1&&m.netcloses==1);}
+ for(unsigned i=0;i<8;i++){reset();good();switch(i){case 0:m.fail_open=1;break;case 1:m.fail_stat=1;break;case 2:m.nonregular=1;break;case 3:m.fail_socket=1;break;case 4:m.fail_connect=1;break;case 5:m.fail_option=1;break;case 6:m.fail_option=3;break;case 7:m.fail_read=1;break;}CHECK(invoke(&r)<0);CHECK(!r.possible_apply&&!r.terminal&&r.no_dispatch);}
  for(unsigned s=0;s<16;s++){reset();m.clone_fail=1;queue(frame(LAPY_ELEVATION_PREPARE,0));queue(frame(LAPY_ELEVATION_RESPONSE,s));CHECK(invoke(&r)<0);CHECK(r.possible_apply==1);CHECK((r.terminal!=0)==(s&&is_terminal(s,1)));CHECK(m.clones==1);}
- for(unsigned at=0;at<2;at++){reset();good();m.fail_close=1;if(at)m.fail_recv_at=47;int rc=invoke(&r);CHECK(r.possible_apply==1);CHECK((r.terminal!=0)==!at);CHECK(!at||rc<0);}
+ for(unsigned at=0;at<2;at++){reset();good();m.fail_close=1;if(at)m.fail_recv_at=63;int rc=invoke(&r);CHECK(r.possible_apply==1);CHECK((r.terminal!=0)==!at);CHECK(!at||rc<0);}
  for(int pid=-1;pid<=1;pid++){reset();memset(&r,0xa5,sizeof(r));CHECK(pw_lapy_elevation_request_result(pid,&r)<0);CHECK(!r.possible_apply&&!r.terminal&&!m.opens);}
- printf("Independent actual root helper: %u checks in %u cases; all file/network/native boundaries mocked\n",checks,cases);return 0;
+ /* Admission failure after full upload cancels on that same connection.
+  * No new upload or REQUEST is allowed, and EOF is never a receipt. */
+ for(unsigned state=0;state<4;state++){
+  reset();m.expire_after_tx=8;queue(frame(LAPY_ELEVATION_RESPONSE,state==1?LAPY_ELEVATION_OK:LAPY_ELEVATION_CANCELLED));
+  if(state==2){m.rx[24]^=1;}if(state==3){m.rxn=0;}
+  CHECK(invoke(&r)<0);CHECK(!r.no_dispatch&&r.no_request&&!r.possible_apply&&r.cancel_attempted);
+  CHECK(r.terminal==(state==0)&&r.settled_failure==(state==0));CHECK(m.sockets==1&&m.txn==40&&!m.clones);
+  struct lapy_elevation_message cancel;memcpy(&cancel,m.tx+8,sizeof(cancel));CHECK(cancel.kind==LAPY_ELEVATION_CANCEL);
+ }
+ reset();m.expire_after_tx=72;queue(frame(LAPY_ELEVATION_PREPARE,0));queue(frame(LAPY_ELEVATION_RESPONSE,LAPY_ELEVATION_CANCELLED));
+ CHECK(invoke(&r)<0&&r.terminal&&r.settled_failure&&r.cancel_attempted&&r.possible_apply);CHECK(m.txn==104&&m.sockets==1&&m.clones==1);
+ for(unsigned at=0;at<8;at++){reset();m.fail_send_at=at;CHECK(invoke(&r)<0&&!r.no_dispatch&&r.no_request&&!r.possible_apply&&!r.terminal);CHECK(m.sockets==1&&!m.clones);}
+ printf("Actual root client adapter: %u checks in %u cases; all file/network/native boundaries mocked\n",checks,cases);return 0;
 }

@@ -1,0 +1,50 @@
+From: prospero-win contributors
+Subject: [PATCH] ntdll: retain root title ownership on fatal client abort
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -2270,6 +2270,27 @@
+  * Close server socket and exit process normally.
+  */
+ #ifdef PW_WINE_SERVICE_FIXTURE
++/* A fatal client abort may arrive after the Wine connection is broken. The
++ * ordinary exit barrier performs server requests and therefore cannot be used
++ * here. Keep the root native PID and all retained owner state alive forever;
++ * do not claim logical detach, close potentially reused descriptors, or infer
++ * native release from a callback/time/socket outcome. Child ntdll has no root
++ * provider and retains the existing abort semantics. */
++void pw_wine_fixture_root_abort( unsigned int windows_status )
++{
++    const PwWineFixtureProvider *fixture = pw_wine_fixture_get();
++    char message[128];
++    int length;
++    if (!fixture) return;
++    fixture->root_exit( fixture->context, windows_status );
++    length = snprintf( message, sizeof(message),
++                       "wine fixture: root_abort_held status=%08x reason=fatal-client-abort\n",
++                       windows_status );
++    if (length > 0)
++        wine_write_stderr( message, (size_t)length < sizeof(message) ? (size_t)length : sizeof(message) - 1 );
++    for (;;) usleep(10000);
++}
++
+ /* Ordinary root exit only. First freeze admission, then detach the real
+  * Wine client through normal server requests and HUP cleanup. Windows parent
+  * death can therefore unblock a child while the native host remains alive. */
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1571,6 +1571,12 @@
+  */
+ void abort_process( int status )
+ {
++#ifdef PW_WINE_SERVICE_FIXTURE
++    {
++        extern void pw_wine_fixture_root_abort( unsigned int );
++        pw_wine_fixture_root_abort( (unsigned int)status );
++    }
++#endif
+     _exit( get_unix_exit_code( status ));
+ }
+ 

@@ -1,0 +1,61 @@
+{
+  "acceptance": "Exact portable nonprogress C/header successor and independent inert control/checkpoint/finish evidence accepted. Transfer returns IO after 1024 zero-ready waits without observable clock or byte progress; this is a computational work budget, not an elapsed-time guarantee. Self-exit native source remains byte-identical; observed helper exit and post-target recovery remain unproved.",
+  "deployment_gate": "No console admission. No version-bound observed helper exit/stop receipt or bounded post-target no-reboot recovery route is established.",
+  "files": [
+    {
+      "bytes": 59686,
+      "path": "owned_root_daemon.c",
+      "sha256": "43006e6876bc745010332594f3d0d6c66884c6aea936ffafd2715e4b750d291b"
+    },
+    {
+      "bytes": 4149,
+      "path": "owned_helper_control.c",
+      "sha256": "dffd69b9f33d3f8033ee7263a5a9a49fb465af65652058edb217f8dd2f4c5678"
+    },
+    {
+      "bytes": 2425,
+      "path": "owned_helper_control.h",
+      "sha256": "6d9bf9e82273cdfa6fa0418cd1c29b6264c9027b53ba33043c28ff83b33b167e"
+    },
+    {
+      "bytes": 1489,
+      "path": "lapy_elevation_protocol.h",
+      "sha256": "adab9fe6b08acbded26aa0587906fb7f293e303b50f7a45480b63076b4aa5c7c"
+    },
+    {
+      "bytes": 6124,
+      "path": "donor_transaction.c",
+      "sha256": "6844275eca240aab25d5d61ae030f94b50b9538116452ccb6078f6518ba876d9"
+    },
+    {
+      "bytes": 2319,
+      "path": "donor_transaction.h",
+      "sha256": "c976e43a298a3621b2ff0f83f92f1304dc5c177a00d5af14c5a78a9620d2ce5b"
+    },
+    {
+      "bytes": 701,
+      "path": "vnode_ref_probe.c",
+      "sha256": "ef49b83a80cdc980ea6b5cdb0477110b08b10feba7e7229cbb0c7db1bf0a87f0"
+    },
+    {
+      "bytes": 665,
+      "path": "vnode_ref_probe.h",
+      "sha256": "13e7f3b9ba77c696209f647e5a0fb60f50a6e8112991bb4bfc63da632a6a0153"
+    },
+    {
+      "bytes": 1741,
+      "path": "LICENSE",
+      "sha256": "5ef18e95f617c9d3a2674cc3256f5c0d6ec2f794a57e9e40f2185dd454c9f8da"
+    }
+  ],
+  "license_notes": [
+    "Preserve the root MIT LICENSE copyright and disclaimer verbatim.",
+    "lapy_elevation_protocol.h carries SPDX LGPL-2.1-or-later; preserve it. Do not describe the entire mixed cohort as MIT-only."
+  ],
+  "schema": "pw-owned-helper-reviewed-cohort/1",
+  "upstream": {
+    "candidate_is_modified": true,
+    "commit": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
+    "repository": "https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon"
+  }
+}
