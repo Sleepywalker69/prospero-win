@@ -992,3 +992,6 @@ tests/test_wine_user_title_build.py
 tests/test_windows_child_user_package.py
 tools/windows_child_user_package.py
 tests/test_user_workflow_join.py
+.github/workflows/transfer-user-runtime.yml
+tools/split_verified_artifact.py
+tests/test_split_verified_artifact.py
