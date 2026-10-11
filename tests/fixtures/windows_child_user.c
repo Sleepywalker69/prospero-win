@@ -43,14 +43,12 @@ static void record(const char *stage,const char *format,...)
     (void)fputs(line,stdout);(void)fflush(stdout);
 }
 
-static void self_exit(DWORD code)
+static _Noreturn void self_exit(DWORD code)
 {
     OutputDebugStringA("PW_CHILD_USER stage=self_exit result=attempt native_settlement=unverified\r\n");
     (void)TerminateProcess(GetCurrentProcess(),code);
+    /* ExitProcess is nonreturning; no process-lifetime storage is released. */
     ExitProcess(code+1);
-    /* If both unexpected returns occur, preserve process-lifetime storage.
-     * Do not return while another thread can still access it. */
-    for(;;)Sleep(1000);
 }
 
 static DWORD remaining_at(ULONGLONG now)
@@ -68,7 +66,7 @@ static DWORD WINAPI watchdog(void *unused)
     wait_ms=main_limit+WATCHDOG_MARGIN_MS-(DWORD)(now-started);
     wait=WaitForSingleObject(watchdog_stop,wait_ms);
     if(wait==WAIT_OBJECT_0)return 0;
-    self_exit(122);return 122;
+    self_exit(122);
 }
 
 static int begin(void)

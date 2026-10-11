@@ -6,8 +6,11 @@ BUILD := build/host
 # conventional ignored location, overridable with
 # `make wine-check WINE_SOURCE=<checkout>`.
 # Preserve an explicitly configured source path, including a missing one.
-WINE_SOURCE_EXPLICIT := $(if $(filter undefined,$(origin WINE_SOURCE)),0,1)
 WINE_SOURCE ?= .deps/wine/source
+# The workflow WINE_SOURCE is raw pinned Wine, not the composed PS5 tree.
+# Source-body key checks need an explicitly supplied composed checkout.
+WINE_COMPOSED_SOURCE_EXPLICIT := $(if $(filter undefined,$(origin WINE_COMPOSED_SOURCE)),0,1)
+WINE_COMPOSED_SOURCE ?=
 HEADERS := $(wildcard include/*.h src/*.h native/*.h tests/*.h)
 
 .PHONY: all test wine-check sanitize audit check-whitespace native native-release box86-catalog clean
@@ -321,16 +324,16 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_creation_abi.py
 	python3 tests/test_private_dispatch_wow64_contract.py
 	python3 tests/test_wine_fixture_build.py
-	@if test -d "$(WINE_SOURCE)"; then \
+	@if test -d "$(WINE_COMPOSED_SOURCE)"; then \
 		key_out=$$(mktemp -d "$(BUILD)/ps5-extended-keys.XXXXXX") && \
-		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_SOURCE)" \
+		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_COMPOSED_SOURCE)" \
 			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/strict" && \
-		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_SOURCE)" \
+		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_COMPOSED_SOURCE)" \
 			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/ubsan" --ubsan; \
-	elif test "$(WINE_SOURCE_EXPLICIT)" = 0 && test ! -e "$(WINE_SOURCE)" && test ! -L "$(WINE_SOURCE)"; then \
-		echo "ps5 extended keys skipped: optional composed Wine source is unavailable at $(WINE_SOURCE)"; \
+	elif test "$(WINE_COMPOSED_SOURCE_EXPLICIT)" = 0; then \
+		echo "ps5 extended keys skipped: set WINE_COMPOSED_SOURCE to run optional composed-source controls"; \
 	else \
-		echo "ps5 extended keys: configured Wine source is missing or invalid: $(WINE_SOURCE)" >&2; exit 2; \
+		echo "ps5 extended keys: configured Wine source is missing or invalid: $(WINE_COMPOSED_SOURCE)" >&2; exit 2; \
 	fi
 	python3 tests/test_wine_child_integration.py
 	python3 tests/test_wine_build_performance.py
