@@ -915,20 +915,56 @@ the console's date checked.
 
 ## Data directory
 
-A title can write only its own `/download0` sandbox, where `/data` is absent,
-so the Wine prefix would be limited to that sandbox. Before loading the
-library or starting Wine, `native/pw_data_mount.c` streams the bundled
-`/app0/lapy.elf` to the local elfldr listener at
-`127.0.0.1:9021`. The connection stays open for a versioned
+A title can have `/data` absent, or another payload can make it visible in the
+ordinary title sandbox. Visibility alone is not readiness. Before loading
+profiles or Wine, `native/pw_data_mount.c` observes both ordinary `stat` and
+`lstat` on `/data`. Only two successful directory observations reuse access
+without a helper request. A directory `stat` plus `lstat` EPERM, or a missing
+`stat` (ENOENT) plus missing/EPERM `lstat`, permits the existing one-shot helper
+request. Other errors, non-directories, symlinks and inconsistent pairs fail
+closed. These observations are not a general privilege or prefix-access proof;
+all subsequent real path, prefix and runtime checks remain necessary.
+
+When required, the title streams the bundled `/app0/lapy.elf` to the local
+elfldr listener at `127.0.0.1:9021`. The connection stays open for a versioned
 request/prepare/result exchange that identifies this process by PID. The
 helper is built for `PPSA99995` and validates the requested title. The title
-performs `seteuid(geteuid())` only after the helper's prepare response, then
-waits for the final success response and confirms `/data` is reachable. After
-access appears it waits another second (`PW_DATA_MOUNT_SETTLE_MS`) before
-continuing. If elfldr or the helper does not complete successfully, the title
-logs the failure and returns to Home without loading profiles or starting
-Wine. Each launcher/game `LoadExec` process performs its own request through
-the same startup point.
+performs `seteuid(geteuid())` only after the helper's valid prepare response.
+Success requires a valid final OK response, then the same successful `stat`
+and `lstat` directory pair and a completed one-second settle delay. There is
+no fallback to the original visible directory after a helper failure or
+readiness timeout. Each fresh launcher/game `LoadExec` process checks access
+at this same startup point and makes at most one helper request.
+
+The helper outcome records `possible_apply` before the first possibly delivered
+REQUEST byte and sets `terminal` only for a matching, phase-valid final response.
+An incomplete, malformed or contradictory response after possible delivery
+retains the original root PID in an inert wait before profile loading, Wine,
+exit hooks or child ownership start. It cannot automatically exit to Home,
+restart, retry, or infer helper completion from elapsed time or socket closure.
+This is a conservative hold, not an automatic recovery or a claim that an
+operator restart is safe. Safe pre-request failures and known terminal failures
+block startup through the existing failure return. Child ownership behavior is
+unchanged. A valid `terminal` response describes helper completion, not successful
+readiness or proof that subsequent operations will work.
+
+Root logs include the helper outcome plus both raw path returns, immediate errno,
+directory type and observation flags before and after the request. Unattempted
+post-helper probes have zero observation flags. `data_before` and `data_after`
+describe stat-directory visibility; the separate `ready` field describes the
+combined admission result. `PW_DATA_MOUNT_WAIT_MS` bounds requested post-helper
+polling sleeps (with a clamped final interval); readiness at the exact boundary
+is accepted. It does not include helper transport time or the separate settle
+delay and is not the child's absolute monotonic bootstrap deadline. Native sleep
+retries its remaining interval after EINTR and fails closed on other errors;
+`sleep_stage`, `sleep_raw` and `sleep_errno` retain a polling or settle failure.
+The helper transport retains its existing per-operation socket timeouts.
+
+Host controls exercise the actual root probe and helper protocol source with
+mocked transport, plus real host directory/file/symlink probes and the extracted
+actual title hold. PS5 firmware 13.60 startup and the raw fatal operation behind
+the beta5fix1 logs still require console evidence; passing these controls does
+not establish either a target fix or installer progress.
 
 The title build fetches the helper and manifest from one pinned release of
 `mpereiraesaa/PS5-Lapy-JB-Daemon` every time: `lapy_release` in
