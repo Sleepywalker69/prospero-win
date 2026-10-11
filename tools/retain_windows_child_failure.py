@@ -95,6 +95,18 @@ def collect_title_inspection(collector,title_build):
 
 def collect(args):
     c=Collector(args.out);identities={}
+    # Small exact PE evidence goes first, before large archives/PRXs can use
+    # the bounded diagnostic allowance. This collector also runs on success.
+    for arch in ('i386','x86_64'):
+        for unit in ('main','query'):
+            c.copy(args.wine_work/'build/dlls/dnsapi'/(arch+'-windows')/(unit+'.o'),
+                   args.wine_work,'target/wine')
+    for unit in ('ps5drv','window','winstation','syscall'):
+        c.copy(args.wine_work/'build/dlls/win32u'/(unit+'.o'), args.wine_work,'target/wine')
+    for name in ('service-translation-units.log','user-driver-compiler','user-driver-sdk-compiler'):
+        c.copy(args.wine_work/name,args.wine_work,'target/wine')
+    for name in ('report.json','private-dispatch-pe.json'):
+        c.copy(args.wine_work/name,args.wine_work,'target/wine')
     # Preserve source first, even if later large diagnostics hit their bound.
     for name,root in [('project',args.repo),('title-foundation',args.title_foundation),('prx-foundation',args.foundation)]:
         try:identities[name]=archive_git(c,root,name)
@@ -114,8 +126,6 @@ def collect(args):
                     if path.is_file():c.copy(path,base,'dependency-sources/'+label)
     c.tree(args.wine_work/'prx','target/wine/prx')
     c.tree(args.wine_work/'pe','target/wine/pe')
-    for name in ('report.json','private-dispatch-pe.json'):
-        c.copy(args.wine_work/name,args.wine_work,'target/wine')
     for name in ('ntdll','win32u','winevulkan','opengl32','ws2_32','crypt32','dwrite','secur32'):
         path=args.wine_work/'build/dlls'/name/(name+'.so')
         c.copy(path,args.wine_work,'target/wine')

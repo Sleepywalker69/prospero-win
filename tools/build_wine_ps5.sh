@@ -101,7 +101,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # side (patch 0720), so its PE and Unix halves must come from the same build.
 # winevulkan: emit its PE thunks alongside the Unix side so command-stream
 # hooks and dispatch table capability checks come from the same source.
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz opengl32 winevulkan"
+# dnsapi: its PE-side guard refuses an unavailable optional Unix resolver
+# (patch 0916); both architectures must carry that checked boundary.
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz opengl32 winevulkan dnsapi"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
@@ -382,9 +384,11 @@ fi
 # Compile complete experimental units with the actual generated target rules.
 if [ "$service_fixture" = 1 ]; then
     set -- -C "$build" -k -j"$jobs"
-    for source in dlls/ntdll/unix/creation.c dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c server/creation.c server/trace.c server/process.c server/ptrace.c server/request.c server/thread.c; do
+    for source in dlls/ntdll/unix/creation.c dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c dlls/win32u/ps5drv.c dlls/win32u/window.c dlls/win32u/winstation.c dlls/win32u/syscall.c dlls/dnsapi/main.c dlls/dnsapi/query.c server/creation.c server/trace.c server/process.c server/ptrace.c server/request.c server/thread.c; do
         set -- "$@" -W "$tree/$source"
     done
+    cp "$wine_cc" "$work/user-driver-compiler" || fail "cannot retain selected USER compiler"
+    cp "$sdk/bin/prospero-clang" "$work/user-driver-sdk-compiler" || fail "cannot retain USER SDK compiler"
     make "$@" \
         dlls/ntdll/unix/creation.o \
         dlls/ntdll/unix/loader.o \
@@ -394,6 +398,14 @@ if [ "$service_fixture" = 1 ]; then
         dlls/ntdll/unix/thread.o \
         dlls/ntdll/unix/virtual.o \
         dlls/wow64/x86_64-windows/syscall.o \
+        dlls/win32u/ps5drv.o \
+        dlls/win32u/window.o \
+        dlls/win32u/winstation.o \
+        dlls/win32u/syscall.o \
+        dlls/dnsapi/i386-windows/main.o \
+        dlls/dnsapi/i386-windows/query.o \
+        dlls/dnsapi/x86_64-windows/main.o \
+        dlls/dnsapi/x86_64-windows/query.o \
         server/creation.o \
         server/trace.o \
         server/process.o \
@@ -936,6 +948,16 @@ for name in ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfree
 # The patched PE modules, beside the PRXs.
 result["pe"] = {str(path.relative_to(Path(prx).parent / "pe")): hashlib.sha256(path.read_bytes()).hexdigest()
                 for path in sorted((Path(prx).parent / "pe").glob("*-windows/*.dll"))}
+# Keep the exact four PE objects in the bounded evidence collector as well.
+# Their identities join the guarded source and the final DLLs without a new
+# runtime export or a claim that the missing Unix resolver is implemented.
+sys.path.insert(0, os.environ["PW_TOOLS_ROOT"])
+sys.dont_write_bytecode = True
+from check_wine_prx_build import dnsapi_guard_record, user_driver_record
+try:
+    result["dnsapi_guard"] = dnsapi_guard_record(Path(build).parent)
+except (OSError, ValueError) as error:
+    result["dnsapi_guard_error"] = str(error)
 # Commits of the PRX foundation, PS5_Mesa, PS5_Vulkan, the payload SDK RADV
 # was linked with and ps5-opengl; SHA-256 of the ps5vk archive and of the
 # OpenGL SDK's manifest. Null when not linked or not recorded.
@@ -944,6 +966,10 @@ result["sources"] = {key: os.environ.get(f"PW_SOURCE_{key.upper()}") or None
                                  "ps5_opengl_sdk", "ps5_opengl", "ca_bundle")}
 result["tls_configured"] = os.environ.get("PW_TLS_ENABLED") == "1"
 if os.environ.get("PW_SERVICE_FIXTURE") == "1":
+    try:
+        result["user_driver_fixes"] = user_driver_record(Path(build).parent)
+    except (OSError, ValueError) as error:
+        result["user_driver_error"] = str(error)
     result["creation"] = {"abi": 1, "protocol": 962, "profile": 2, "maximum_depth": 2, "runtime_validated": False}
     result["service_fixture"] = {"enabled": True, "unix_define": "PW_WINE_SERVICE_FIXTURE=1",
                                  "abi": 1, "runtime_validated": False}
@@ -988,6 +1014,8 @@ modules = result["prx"]["modules"].values()
 if result.get("tls_error"):
     print(f"TLS provenance error: {result['tls_error']}", file=sys.stderr)
 sys.exit(5 if result.get("tls_error") else
+         6 if result.get("dnsapi_guard_error") else
+         7 if result.get("user_driver_error") else
          3 if any(e.get("title_unbound") for e in modules) else
          4 if any(e.get("raw_syscalls") for e in modules) else 0)
 PY
@@ -995,6 +1023,8 @@ then title_status=0; else title_status=$?; fi
 [ "$status" -eq 0 ] || fail "build failed; see $work/make.log"
 [ "$title_status" -ne 3 ] || fail "PRX imports only libkernel_sys exports, which a title does not get"
 [ "$title_status" -ne 5 ] || fail "TLS runtime provenance failed; see $work/report.json"
+[ "$title_status" -ne 6 ] || fail "DNSAPI build provenance failed; see $work/report.json"
+[ "$title_status" -ne 7 ] || fail "USER driver build provenance failed; see $work/report.json"
 [ "$title_status" -eq 0 ] || [ "$title_status" -eq 4 ] || fail "report generation failed (status $title_status)"
 # A warning until the working-directory shim stops issuing raw syscalls.
 [ "$title_status" -ne 4 ] ||

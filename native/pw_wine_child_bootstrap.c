@@ -17,15 +17,24 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
     if(!b||!io||!o||!o->runtime||!o->directory||!o->register_thread||!o->unregister_thread||
        !o->output||!o->socket_sink||!o->context||!o->wine.load_start||!o->wine.module_info||!o->wine.set_env||
        !o->wine.start_thread||fd<0||!hash||abi!=1||strlen(hash)!=64)return -1;
-    if((profile!=PW_WC_PROFILE_FIXTURE&&profile!=PW_WC_PROFILE_BATTLENET)||
+    if((profile!=PW_WC_PROFILE_FIXTURE&&profile!=PW_WC_PROFILE_BATTLENET&&profile!=PW_WC_PROFILE_USER&&profile!=PW_WC_PROFILE_NET)||
        (machine!=PW_WC_MACHINE_AMD64&&machine!=PW_WC_MACHINE_I386)||
-       (profile==PW_WC_PROFILE_FIXTURE&&machine!=PW_WC_MACHINE_AMD64))return -1;
+       ((profile==PW_WC_PROFILE_FIXTURE||profile==PW_WC_PROFILE_USER||profile==PW_WC_PROFILE_NET)&&machine!=PW_WC_MACHINE_AMD64))return -1;
     if(o->child.abi!=PW_WINE_CREATION_ABI||o->child.bytes!=sizeof(o->child)||
        !o->child.generation||!o->child.wine_pid||!o->child.wine_tid||
        o->child.profile!=profile||o->child.machine!=machine)return -1;
-    const char *prefix=profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_PREFIX:PW_WINE_CHILD_BATTLENET_PREFIX;
-    const char *logical_cwd=profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_CWD:PW_WINE_CHILD_BATTLENET_CWD;
-    const char *placeholder=profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_IMAGE:PW_WINE_CHILD_BATTLENET_IMAGE;
+    const char *prefix,*logical_cwd,*placeholder;
+    switch(profile){
+    case PW_WC_PROFILE_FIXTURE:
+        prefix=PW_WINE_CHILD_PREFIX;logical_cwd=PW_WINE_CHILD_CWD;placeholder=PW_WINE_CHILD_IMAGE;break;
+    case PW_WC_PROFILE_BATTLENET:
+        prefix=PW_WINE_CHILD_BATTLENET_PREFIX;logical_cwd=PW_WINE_CHILD_BATTLENET_CWD;placeholder=PW_WINE_CHILD_BATTLENET_IMAGE;break;
+    case PW_WC_PROFILE_USER:
+        prefix=PW_WINE_CHILD_USER_PREFIX;logical_cwd=PW_WINE_CHILD_USER_CWD;placeholder=PW_WINE_CHILD_USER_IMAGE;break;
+    case PW_WC_PROFILE_NET:
+        prefix=PW_WINE_CHILD_NET_PREFIX;logical_cwd=PW_WINE_CHILD_NET_CWD;placeholder=PW_WINE_CHILD_NET_IMAGE;break;
+    default:return -1;
+    }
     for(unsigned i=0;i<64;i++)if(!((hash[i]>='0'&&hash[i]<='9')||(hash[i]>='a'&&hash[i]<='f')))return -1;
     if(b->stage||b->prepared||b->started||b->status)return -1;
     if(step(b,io,o,PW_WCB_PATHS,0))return -1;
@@ -49,7 +58,13 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
         {"WINE_PS5_MUTEX_SHARED","0"},{"WINE_PS5_SYNC_SHARED","0"},
         {"WINE_PS5_SCHED","0"},{"WINE_PS5_TRACE_STARTUP","1"},{"WINEDEBUG","err+all,+process"},{"WINE_PS5_WOW64_CPU","wowprospero.dll"}};
     memcpy(b->env,env,sizeof(env));b->argv[0]="wine";b->argv[1]=placeholder;b->argv[2]=NULL;
-    b->config=(PwWineStartConfig){b->ntdll,b->runtime,prefix,b->env,13,2,b->argv,16u<<20};
+    size_t env_count=13;
+    if(profile==PW_WC_PROFILE_USER){
+        /* Same desktop as the root; set before any Wine module constructor. */
+        b->env[env_count++]=(PwWineStartEnv){"WINE_PS5_DESKTOP","800x600"};
+        b->env[env_count++]=(PwWineStartEnv){"WINE_PS5_VIEW","desktop"};
+    }
+    b->config=(PwWineStartConfig){b->ntdll,b->runtime,prefix,b->env,env_count,2,b->argv,16u<<20};
     rc=pw_wine_start_environment(&b->start,&b->config,&o->wine);
     if(step(b,io,o,PW_WCB_ENVIRONMENT,rc))return -1;
     rc=pw_wine_start_load(&b->start,&b->config,&o->wine);

@@ -1,0 +1,46 @@
+Subject: [PATCH] win32u: report the PS5 wake pipe as handled
+
+Adapted from upstream 5c597f7ab61eac109f502b8b42e68f791944a542 (#428).
+https://github.com/mpereiraesaa/prospero-win/commit/5c597f7ab61eac109f502b8b42e68f791944a542
+Only context is adapted for the retained native bridge input guards.
+The upstream behavior and commentary are preserved.
+
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -548,6 +548,7 @@
+     struct ps5_input event;
+     HWND hwnd = NtUserGetForegroundWindow();
+     UINT processed = 0;
++    BOOL polled = FALSE;
+     BOOL suppress_bridge_input;
+ 
+     if (!next_input || bridge_current_token()) return FALSE;
+@@ -567,7 +568,11 @@
+         /* drain the wake pipe first: input posted from now on wakes again */
+         char buffer[64];
+         int fd = input_fd();
+-        if (fd != -1) while (read( fd, buffer, sizeof(buffer) ) > 0) {}
++        if (fd != -1)
++        {
++            while (read( fd, buffer, sizeof(buffer) ) > 0) {}
++            polled = TRUE;
++        }
+     }
+     while (processed < PS5_INPUT_BATCH && next_input( &event ))
+     {
+@@ -591,7 +596,14 @@
+             break;
+         }
+     }
+-    return processed != 0;
++    /* The wake pipe is every GUI thread's queue fd, so a byte sets QS_DRIVER
++     * on all their queues while one of them drains it and takes the events;
++     * a byte can also come after its event was taken here. Either way this
++     * thread finds nothing, and unless it reports the fd as handled, win32u
++     * neither clears its QS_DRIVER nor re-arms the fd: a zero-timeout
++     * message wait (DirectInput's GetDeviceState) then spins until the next
++     * input. A byte still in the pipe makes the re-armed fd fire again. */
++    return processed != 0 || polled;
+ }
+ 
+ /***********************************************************************

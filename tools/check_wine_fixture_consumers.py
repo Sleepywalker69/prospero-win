@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 
 
 def function(text, signature):
@@ -126,6 +127,32 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     args.wine_source = args.wine_source.resolve(strict=True)
     check_dependency_inventory(args.wine_source, out, args.cc)
+    # Compile the complete guarded DNSAPI main/query units with actual Wine
+    # headers and inert platform boundaries. Both PE builds remain required.
+    dns_guard = Path(__file__).resolve().with_name("check_dnsapi_guard.py")
+    for suffix in ("strict", "ubsan"):
+        subprocess.run([sys.executable, str(dns_guard), "--wine-source", str(args.wine_source),
+                        "--fixtures", str(dns_guard.parent.parent / "tests/fixtures/dnsapi_guard"),
+                        "--cc", args.cc, "--out", str(out / ("dnsapi-" + suffix)),
+                        *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
+    # Exact USER driver/message bodies with inert boundaries; target objects
+    # and full win32u linking remain separate mandatory checks.
+    user_fixes = Path(__file__).resolve().with_name("check_wine_user_fixes.py")
+    for suite, case in (("wake", "all"), ("desktop", "all"), ("desktop", "desktop-nonps5")):
+        for suffix in ("strict", "ubsan"):
+            subprocess.run([sys.executable, str(user_fixes), "--wine-source", str(args.wine_source),
+                            "--fixtures", str(user_fixes.parent.parent / "tests/fixtures/wine_user_fixes"),
+                            "--cc", args.cc, "--only", suite, "--case", case,
+                            "--out", str(out / ("user-" + suite + "-" + case + "-" + suffix)),
+                            *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
+    # Exact extended-key translation, with real Wine input types and inert
+    # boundaries. The earlier USER checks run on this same combined source.
+    keys = Path(__file__).resolve().parents[1] / "tests/test_ps5_extended_keys.py"
+    for suffix in ("strict", "ubsan"):
+        subprocess.run([sys.executable, str(keys), "--wine-source", str(args.wine_source),
+                        "--fixtures", str(keys.parent / "fixtures"), "--cc", args.cc,
+                        "--out", str(out / ("extended-keys-" + suffix)),
+                        *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
     paths = ["dlls/ntdll/unix/process.c", "dlls/ntdll/unix/server.c", "server/process.c", "server/ptrace.c", "dlls/ntdll/unix/thread.c", "include/wine/pw_wine_fixture_provider.h"]
     source = {n: (args.wine_source/n).read_text() for n in paths}
     (out/"source-hashes.json").write_text(json.dumps({n: hashlib.sha256((args.wine_source/n).read_bytes()).hexdigest() for n in paths}, indent=2)+"\n")

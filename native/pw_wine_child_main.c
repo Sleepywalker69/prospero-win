@@ -123,7 +123,7 @@ static void socket_failure_sink(void *context,const PwWineFixtureSocketResult *f
 static int directory(void *unused,const char *path)
 {
     struct stat st;(void)unused;
-    unsigned which=!strcmp(path,PW_WINE_CHILD_PREFIX)||!strcmp(path,PW_WINE_CHILD_BATTLENET_PREFIX)?
+    unsigned which=!strcmp(path,PW_WINE_CHILD_PREFIX)||!strcmp(path,PW_WINE_CHILD_BATTLENET_PREFIX)||!strcmp(path,PW_WINE_CHILD_USER_PREFIX)||!strcmp(path,PW_WINE_CHILD_NET_PREFIX)?
                    PW_WC_DIRECTORY_PREFIX:PW_WC_DIRECTORY_CWD;
     if(boot_budget())return -1;
     errno=0;int rc=stat(path,&st),error=rc<0?errno:0;
@@ -331,7 +331,15 @@ static int run_child(void)
     if(session->child_pid!=hello.child_pid||session->child_ppid!=hello.child_ppid||
        memcmp(session->build_id,hello.build_id,41)){
         pw_wine_child_wire_close(&fd,&wire_result);return 13;}
-    child_io.total_end=begun+(session->profile==PW_WC_PROFILE_FIXTURE?PW_WC_LIFETIME_MS:PW_WC_BATTLENET_LIFETIME_MS);
+    unsigned lifetime;
+    switch(session->profile){
+    case PW_WC_PROFILE_FIXTURE:lifetime=PW_WC_LIFETIME_MS;break;
+    case PW_WC_PROFILE_BATTLENET:lifetime=PW_WC_BATTLENET_LIFETIME_MS;break;
+    case PW_WC_PROFILE_USER:lifetime=PW_WC_USER_LIFETIME_MS;break;
+    case PW_WC_PROFILE_NET:lifetime=PW_WC_NET_LIFETIME_MS;break;
+    default:pw_wine_child_wire_close(&fd,&wire_result);return 13;
+    }
+    child_io.total_end=begun+lifetime;
     const PwWineChildBootstrapOps ops={.context=session,.wine={sceKernelLoadStartModule,sceKernelGetModuleInfo,set_env,start_thread},
         .runtime=runtime,.directory=directory,.register_thread=pw_wine_thread_register,
         .unregister_thread=pw_wine_thread_unregister,.output=output,.socket_sink=socket_failure_sink,.record=record,

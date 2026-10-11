@@ -143,7 +143,18 @@ static int admitted_path(PwWineFixtureOwner *o,const char *path,uint32_t machine
         return machine==PW_WINE_FIXTURE_AMD64&&
             (!strcmp(path,o->config.child_unix_path)||!strcmp(path,alias));
     }
-    if(machine!=PW_WINE_FIXTURE_AMD64&&machine!=PW_WINE_FIXTURE_I386)return 0;
+    if(o->config.profile==3){
+        static const char alias[]="/data/prospero-win/prefixes/windows-child-user-v1/dosdevices/c:/windows-child-user/user-child.exe";
+        return machine==PW_WINE_FIXTURE_AMD64&&
+            (!strcmp(path,o->config.child_unix_path)||!strcmp(path,alias));
+    }
+    if(o->config.profile==4){
+        static const char alias[]="/data/prospero-win/prefixes/windows-child-net-v1/dosdevices/c:/windows-child-net/net-child.exe";
+        return machine==PW_WINE_FIXTURE_AMD64&&
+            (!strcmp(path,o->config.child_unix_path)||!strcmp(path,alias));
+    }
+    if(o->config.profile!=2||
+       (machine!=PW_WINE_FIXTURE_AMD64&&machine!=PW_WINE_FIXTURE_I386))return 0;
     static const char drive[]="/data/prospero-win/prefixes/battlenet-experimental-v1/drive_c/";
     static const char alias[]="/data/prospero-win/prefixes/battlenet-experimental-v1/dosdevices/c:/";
     const char *relative=NULL;
@@ -174,7 +185,7 @@ static uint32_t admit(void *context,uint32_t pid,uint32_t tid,uint32_t machine,c
         if(atomic_load(&o->blocked)||pause_client(o,o->end-PW_WFO_CLEANUP_MS,&last))goto done;
     }
     unsigned count=atomic_load_explicit(&o->count,memory_order_acquire);
-    unsigned cap=o->config.profile==1?3:PW_WFO_MAX_GENERATIONS;
+    unsigned cap=o->config.profile==1?3:(o->config.profile==3||o->config.profile==4)?1:PW_WFO_MAX_GENERATIONS;
     if(count>=cap||(o->root_pid&&o->root_pid!=pid))goto done;
     for(unsigned i=0;i<count;i++)
         if(o->generations[i].caller_tid==tid&&atomic_load(&o->generations[i].state)==G_ADMITTED)goto done;
@@ -184,13 +195,13 @@ static uint32_t admit(void *context,uint32_t pid,uint32_t tid,uint32_t machine,c
             if(atomic_load(&o->blocked)||pause_client(o,o->end-PW_WFO_CLEANUP_MS,&last))goto done;
         }
     }
-    if(atomic_load(&o->blocked)||(o->config.profile==1&&check_image(o))||
+    if(atomic_load(&o->blocked)||((o->config.profile==1||o->config.profile==3||o->config.profile==4)&&check_image(o))||
        clock_now(o,o->end-PW_WFO_CLEANUP_MS,&now,0)||atomic_load(&o->root_done))goto done;
     Generation *g=&o->generations[count];
     g->generation=(o->config.session&~UINT64_C(31))+(uint64_t)count+1;
     g->caller_pid=pid;g->caller_tid=tid;g->machine=machine;g->depth=1;g->started=g->last_clock=now;
     uint64_t limit=o->end-PW_WFO_CLEANUP_MS;
-    unsigned lifetime=o->config.profile==1?PW_WFO_CHILD_MS:PW_WFO_VENDOR_CHILD_MS;
+    unsigned lifetime=o->config.profile==1?PW_WFO_CHILD_MS:o->config.profile==3?PW_WFO_USER_CHILD_MS:o->config.profile==4?PW_WFO_NET_CHILD_MS:PW_WFO_VENDOR_CHILD_MS;
     g->startup_end=limit-now<PW_WFO_STARTUP_MS?limit:now+PW_WFO_STARTUP_MS;
     g->end=limit-now<lifetime?limit:now+lifetime;
     o->root_pid=pid;
@@ -545,10 +556,17 @@ int pw_wine_fixture_owner_creation(PwWineFixtureOwner *o,PwWineCreationProvider 
 unsigned pw_wine_fixture_owner_bytes(void){return sizeof(PwWineFixtureOwner);}
 int pw_wine_fixture_owner_init(void *storage,unsigned bytes,const PwWineFixtureOwnerConfig *c,PwWineFixtureProvider *out)
 {
-    if(!storage||bytes!=sizeof(PwWineFixtureOwner)||!c||!out||!c->session||c->session>UINT64_MAX-32||(c->profile!=1&&c->profile!=2)||
+    if(!storage||bytes!=sizeof(PwWineFixtureOwner)||!c||!out||!c->session||c->session>UINT64_MAX-32||(c->profile!=1&&c->profile!=2&&c->profile!=3&&c->profile!=4)||
        (c->profile==1&&(!c->child_unix_path||strcmp(c->child_unix_path,"/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe")||
+                       !c->child_sha256||strlen(c->child_sha256)!=64))||
+       (c->profile==3&&(!c->child_unix_path||strcmp(c->child_unix_path,PW_WINE_CHILD_USER_CWD "/user-child.exe")||
+                       !c->child_sha256||strlen(c->child_sha256)!=64))||
+       (c->profile==4&&(!c->child_unix_path||strcmp(c->child_unix_path,PW_WINE_CHILD_NET_CWD "/net-child.exe")||
                        !c->child_sha256||strlen(c->child_sha256)!=64))||!c->build_id||strlen(c->build_id)!=40||
        !c->helper_image||!c->helper_bytes||c->helper_bytes>16*1024*1024||!c->clock_ms||!c->cancelled||!c->record)return -1;
+    if(c->profile==3||c->profile==4)for(unsigned i=0;i<64;i++)
+        if(!((c->child_sha256[i]>='0'&&c->child_sha256[i]<='9')||
+             (c->child_sha256[i]>='a'&&c->child_sha256[i]<='f')))return -1;
     PwWineFixtureOwner *o=storage;memset(o,0,sizeof(*o));o->config=*c;o->helper_index=-1;
     for(unsigned i=0;i<PW_WFO_MAX_GENERATIONS;i++){
         o->generations[i].stream_fd=o->generations[i].control_fd=o->generations[i].passed_fd=-1;
@@ -556,7 +574,7 @@ int pw_wine_fixture_owner_init(void *storage,unsigned bytes,const PwWineFixtureO
     }
     if(pthread_mutex_init(&o->clock_lock,NULL))return -1;
     uint64_t now;if(c->clock_ms(c->context,&now)||now>UINT64_MAX-PW_WFO_VENDOR_MS)return -1;
-    o->started=o->last_clock=now;o->end=now+(c->profile==1?PW_WFO_ATTEMPT_MS:PW_WFO_VENDOR_MS);
+    o->started=o->last_clock=now;o->end=now+(c->profile==1?PW_WFO_ATTEMPT_MS:c->profile==3?PW_WFO_USER_MS:c->profile==4?PW_WFO_NET_MS:PW_WFO_VENDOR_MS);
     *out=(PwWineFixtureProvider){PW_WINE_FIXTURE_ABI,sizeof(*out),o,counted_admit,counted_bind_process,counted_release_process,
                                  counted_spawn,counted_remaining,counted_startup_result,counted_signal_request,counted_process_state,root_exit,root_detached};
     return 0;

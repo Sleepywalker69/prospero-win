@@ -26,6 +26,12 @@ SLUG = 'windows-child-fixture-v1'
 APP = 'drive_c/windows-child-fixture'
 BATTLE_SLUG = 'battlenet-experimental-v1'
 BATTLE_APP = 'drive_c/installer'
+USER_SLUG = 'windows-child-user-v1'
+USER_APP = 'drive_c/windows-child-user'
+USER_IMAGES = ('user-parent.exe', 'user-child.exe')
+NETWORK_SLUG = 'windows-child-net-v1'
+NETWORK_APP = 'drive_c/windows-child-net'
+NETWORK_IMAGES = ('net-parent.exe', 'net-child.exe')
 WINE = '490f6d5dcbb2a5047345b8af88d114bbcaad69a8'
 require, sha = audit.require, audit.sha
 
@@ -197,7 +203,20 @@ def battle_profile(root):
             '\n[runtime]\ncpu = translator\n')
 
 
-def recipe(battlenet=False):
+def recipe(battlenet=False, user=False, network=False):
+    require(sum(bool(x) for x in (battlenet, user, network)) <= 1, 'conflicting prefix roles')
+    if network:
+        return {'name': 'Original Windows child network test', 'game_slug': NETWORK_SLUG, 'runner': 'wine',
+                'prospero': {'graphics': 'auto', 'display': {
+                    'desktop': '800x600', 'view': 'desktop', 'show_fps': False}},
+                'script': {'game': {'exe': NETWORK_APP + '/net-parent.exe',
+                                    'working_dir': '$GAMEDIR/' + NETWORK_APP}, 'wine': {'dxvk': False}}}
+    if user:
+        return {'name': 'Original Windows worker USER test', 'game_slug': USER_SLUG, 'runner': 'wine',
+                'prospero': {'graphics': 'auto', 'display': {
+                    'desktop': '800x600', 'view': 'desktop', 'show_fps': False}},
+                'script': {'game': {'exe': USER_APP + '/user-parent.exe',
+                                    'working_dir': '$GAMEDIR/' + USER_APP}, 'wine': {'dxvk': False}}}
     if battlenet:
         return {'name': 'Battle.net experimental installer', 'game_slug': BATTLE_SLUG, 'runner': 'wine',
                 'prospero': {'graphics': 'auto'}, 'script': {'game': {
@@ -208,14 +227,16 @@ def recipe(battlenet=False):
                 'exe': APP + '/parent.exe', 'working_dir': '$GAMEDIR/' + APP}, 'wine': {'dxvk': False}}}
 
 
-def installer(root, host, library, battlenet=False):
+def installer(root, host, library, battlenet=False, user=False, network=False):
+    require(sum(bool(x) for x in (battlenet, user, network)) <= 1, 'conflicting prefix roles')
     tool = load_tool(root, 'pw_install')
-    args = argparse.Namespace(slug=BATTLE_SLUG if battlenet else SLUG, library=str(library), wine=str(host / 'bin/wine'),
+    args = argparse.Namespace(slug=NETWORK_SLUG if network else (USER_SLUG if user else (BATTLE_SLUG if battlenet else SLUG)), library=str(library), wine=str(host / 'bin/wine'),
                               resolution='1920x1080', file=[], input=[], disc=None, mesa_zink=None)
-    return tool.Installer(recipe(battlenet), root / 'tools/prepare_windows_child_prefix.py', args)
+    return tool.Installer(recipe(battlenet, user, network), root / 'tools/prepare_windows_child_prefix.py', args)
 
 
-def initialize(args, battlenet=False):
+def initialize(args, battlenet=False, user=False, network=False):
+    require(sum(bool(x) for x in (battlenet, user, network)) <= 1, 'conflicting prefix roles')
     root, host_work = args.repo.resolve(strict=True), args.host_work.resolve(strict=True)
     identity, host = host_identity(root, host_work, args.cohort)
     work = absent(args.work, (root, host_work))
@@ -234,14 +255,14 @@ def initialize(args, battlenet=False):
                       FONTCONFIG_PATH=str(work), WINEDEBUG='-all')
     for name in ('WINEPREFIX', 'WINEDLLPATH', 'WINESERVERSOCKET', 'WINELOADER', 'WINESERVER'):
         os.environ.pop(name, None)
-    setup = installer(root, host, work / 'library', battlenet)
+    setup = installer(root, host, work / 'library', battlenet, user, network)
     setup.gamedir.mkdir(parents=True, mode=0o700)
     setup.task({'name': 'create_prefix'})
     subprocess.run([str(setup.wineserver), '-w'], env=setup.wine_env(), check=True, timeout=60)
     after, _ = host_identity(root, host_work, args.cohort)
     require(after == identity, 'host/source changed during initialization')
     json_out(work / 'INITIALIZED.json', {'schema': 'pw-fixture-prefix-initialized/1', 'inputs': identity,
-              'slug': BATTLE_SLUG if battlenet else SLUG, 'fixture_executed': False, 'operation': 'pw_install create_prefix; wineboot --init; wineserver -w'})
+              'slug': NETWORK_SLUG if network else (USER_SLUG if user else (BATTLE_SLUG if battlenet else SLUG)), 'fixture_executed': False, 'operation': 'pw_install create_prefix; wineboot --init; wineserver -w'})
 
 
 def compiler_inputs(name):
@@ -362,7 +383,7 @@ def patched_pe_set(root, wine_work):
     expected = {a + '/' + n + '.dll' for a in ('i386-windows', 'x86_64-windows') for n in checker.PE}
     expected |= {'x86_64-windows/wow64.dll', 'x86_64-windows/wow64win.dll'}
     report = json.loads((wine_work / 'report.json').read_text())
-    require(set(report['pe']) == expected and len(expected) == 22, 'wrong matched patched PE set')
+    require(set(report['pe']) == expected and len(expected) == 24, 'wrong matched patched PE set')
     for name in expected:
         ordinary(wine_work / 'pe' / name)
         require(sha(wine_work / 'pe' / name) == report['pe'][name], 'stale patched PE: ' + name)
@@ -423,8 +444,10 @@ def check_battlenet_runtime(repo, host_work, wine_work, cohort, cpu_output, llvm
             'runtime_validated': False}
 
 
-def export(args, battlenet=False):
-    slug, application = (BATTLE_SLUG, BATTLE_APP) if battlenet else (SLUG, APP)
+def export(args, battlenet=False, user=False, network=False):
+    require(sum(bool(x) for x in (battlenet, user, network)) <= 1, 'conflicting prefix roles')
+    slug, application = (NETWORK_SLUG, NETWORK_APP) if network else ((USER_SLUG, USER_APP) if user else ((BATTLE_SLUG, BATTLE_APP) if battlenet else (SLUG, APP)))
+    image_names = NETWORK_IMAGES if network else (USER_IMAGES if user else ('parent.exe', 'child.exe'))
     root, host_work, work = (p.resolve(strict=True) for p in (args.repo, args.host_work, args.work))
     identity, host = host_identity(root, host_work, args.cohort)
     initialized = json.loads((work / 'INITIALIZED.json').read_text())
@@ -436,7 +459,15 @@ def export(args, battlenet=False):
     verify_source_snapshot(wine_work / 'source', json.loads(args.cohort.read_text())['ps5_source'])
     cpu, cpu_dll = verify_cpu(args.cpu_output.resolve(strict=True), cpu_inputs(root, host_work, args.cohort))
     pair = None
-    if not battlenet:
+    if network:
+        pair = load_tool(root, 'windows_child_network_contract').validate_pair(
+            args.fixture.resolve(strict=True), identity['project'], root,
+            os.environ.get('GITHUB_RUN_ID'), os.environ.get('GITHUB_RUN_ATTEMPT'))
+    elif user:
+        pair = load_tool(root, 'windows_child_user_contract').validate_pair(
+            args.fixture.resolve(strict=True), identity['project'], root,
+            os.environ.get('GITHUB_RUN_ID'), os.environ.get('GITHUB_RUN_ATTEMPT'))
+    elif not battlenet:
         pair = validate_pair(args.fixture.resolve(strict=True), identity['project'])
         require(pair.get('source_sha256') == sha(root / 'tests/fixtures/windows_child_process.c'), 'fixture source changed')
         require(pair.get('recipe_sha256') == sha(root / 'tools/build_windows_child_fixture.ps1'), 'fixture build recipe changed')
@@ -472,10 +503,10 @@ def export(args, battlenet=False):
     app = prefix / application
     absent(app, ()); app.mkdir()
     if not battlenet:
-        for name in ('parent.exe', 'child.exe'):
+        for name in image_names:
             shutil.copyfile(args.fixture / name, app / name)
             (app / name).chmod(0o644)
-    setup = installer(root, host, library, battlenet)
+    setup = installer(root, host, library, battlenet, user, network)
     profile = library / 'profiles' / (slug + '.profile')
     profile.parent.mkdir(exist_ok=True)
     require(not profile.exists(), 'profile already exists')
@@ -493,6 +524,10 @@ def export(args, battlenet=False):
     require(sha(exported / converter.CPU_DLL) == cpu['outputs']['x86_64-windows/wowprospero.dll']['sha256'], 'CPU conversion input differs')
     if battlenet:
         require(not any((exported / application).iterdir()), 'installer directory must remain empty')
+    elif network:
+        load_tool(root, 'windows_child_network_contract').verify_pair_copy(exported / application, pair)
+    elif user:
+        load_tool(root, 'windows_child_user_contract').verify_pair_copy(exported / application, pair)
     else:
         verify_pair_copy(exported / application, pair)
     for record in fonts.values():
@@ -512,6 +547,12 @@ def export(args, battlenet=False):
               'fixture': pair, 'cpu': cpu, 'source_audit': source_audit, 'portable_fonts': fonts, 'patched_pe_delta': changes,
               'private_dispatcher': abi, 'inventory': inventory(out), 'fixture_executed': False,
               'console_execution_verified': False, 'scope': 'fresh hosted wineboot and filesystem conversion only'}
+    if network:
+        result.update(schema='pw-windows-child-network-prefix/1', network_validated=False,
+                      child_presentation=False, child_input=False)
+    if user:
+        result.update(schema='pw-windows-child-user-prefix/1',
+                      child_presentation=False, child_input=False)
     if battlenet:
         for name in ('ntdll', 'win32u'):
             selected = exported / 'drive_c/windows/syswow64' / (name + '.dll')
@@ -528,7 +569,7 @@ def export(args, battlenet=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('stage-reference', 'build-cpu', 'initialize', 'export', 'initialize-battlenet', 'export-battlenet'))
+    parser.add_argument('operation', choices=('stage-reference', 'build-cpu', 'initialize', 'export', 'initialize-battlenet', 'export-battlenet', 'initialize-user', 'export-user', 'initialize-network', 'export-network'))
     parser.add_argument('--repo', type=Path, required=True)
     for name in ('host-work', 'work', 'cohort', 'wine-work', 'wine-source', 'wine-archive', 'fixture',
                  'cpu-output', 'llvm-bindir', 'out', 'report'):
@@ -538,12 +579,20 @@ def main():
                 'build-cpu': ('host-work', 'cohort', 'out'), 'initialize': ('host-work', 'cohort', 'work'),
                 'export': ('host-work', 'cohort', 'work', 'wine-work', 'wine-source', 'wine-archive', 'fixture',
                            'cpu-output', 'llvm-bindir', 'out', 'report')}
+    required['initialize-network'] = required['initialize']
+    required['export-network'] = required['export']
+    required['initialize-user'] = required['initialize']
+    required['export-user'] = required['export']
     required['initialize-battlenet'] = required['initialize']
     required['export-battlenet'] = tuple(n for n in required['export'] if n != 'fixture')
     require(all(getattr(args, n.replace('-', '_')) for n in required[args.operation]), 'missing operation inputs')
     {'stage-reference': stage_reference, 'build-cpu': build_cpu, 'initialize': initialize, 'export': export,
      'initialize-battlenet': lambda a: initialize(a, True),
-     'export-battlenet': lambda a: export(a, True)}[args.operation](args)
+     'export-battlenet': lambda a: export(a, True),
+     'initialize-user': lambda a: initialize(a, user=True),
+     'export-user': lambda a: export(a, user=True),
+     'initialize-network': lambda a: initialize(a, network=True),
+     'export-network': lambda a: export(a, network=True)}[args.operation](args)
 
 
 if __name__ == '__main__':

@@ -216,7 +216,8 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         self.assertEqual(''.join(runtime['if'].split()), ''.join(reference['if'].split()))
         steps = runtime['steps']
         joins = [i for i, step in enumerate(steps)
-                 if 'tools/wine_workflow_join.py' in step.get('run', '')]
+                 if 'tools/wine_workflow_join.py' in step.get('run', '')
+                 and '--job ' not in step.get('run', '')]
         self.assertEqual([steps[i].get('id') for i in joins],
                          ['early-reference-join', 'reference-join'])
         early_index, join_index = joins
@@ -233,12 +234,15 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         host_index = next(i for i, step in enumerate(steps)
                           if '--stage host-runtime --' in step.get('run', ''))
         self.assertLess(target_index, early_index)
-        self.assertEqual(early_index + 1, host_index)
+        self.assertEqual(early_index + 3, host_index)
+        self.assertIn('--job original-network-x64-reference', steps[early_index + 2]['run'])
+        self.assertIn('--job original-user-x64-reference', steps[early_index + 1]['run'])
         join_source = (ROOT / 'tools/wine_workflow_join.py').read_text()
         for variable in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_REPOSITORY'):
             self.assertIn(variable, join_source)
         downloads = [i for i, step in enumerate(steps)
-                     if step.get('uses', '').startswith('actions/download-artifact@')]
+                     if step.get('uses', '').startswith('actions/download-artifact@')
+                     and step.get('with', {}).get('name', '').startswith('original-fixture-x64-')]
         self.assertEqual(len(downloads), 1)
         download_index = downloads[0]
         self.assertEqual(join_index + 1, download_index)
@@ -259,6 +263,62 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         self.assertTrue(consumers)
         self.assertEqual(preflight_index + 1, min(consumers))
         self.assertTrue(all(preflight_index < i for i in consumers))
+
+    def test_separate_user_reference_has_two_strict_same_run_joins(self):
+        jobs = workflow()['jobs']
+        runtime, reference = jobs['matched-runtime'], jobs['original-user-x64-reference']
+        self.assertNotIn('original-user-x64-reference', runtime.get('needs', []))
+        self.assertEqual(''.join(runtime['if'].split()), ''.join(reference['if'].split()))
+        steps = runtime['steps']
+        all_joins = [i for i, step in enumerate(steps)
+                     if 'tools/wine_workflow_join.py' in step.get('run', '')]
+        user_joins = [i for i in all_joins
+                      if '--job original-user-x64-reference' in steps[i]['run']]
+        self.assertEqual(len(all_joins), 6)
+        self.assertEqual(len(user_joins), 2)
+        early, final = user_joins
+        for index, output in zip(user_joins, ('early-user-reference-join', 'user-reference-join')):
+            step = steps[index]
+            self.assertNotIn('if', step)
+            self.assertNotIn('continue-on-error', step)
+            self.assertEqual(step['env'], {'GH_TOKEN': '${{ github.token }}'})
+            command = ' '.join(step['run'].replace('\\\n', ' ').split())
+            self.assertEqual(command, 'python3 tools/wine_workflow_join.py '
+                             '--job original-user-x64-reference --output '
+                             '"$RUNNER_TEMP/fixture-evidence/' + output + '.json"')
+        host = next(i for i, step in enumerate(steps)
+                    if '--stage host-runtime --' in step.get('run', ''))
+        self.assertEqual(early + 2, host)
+        self.assertIn('--job original-network-x64-reference', steps[early + 1]['run'])
+        self.assertEqual(steps[early - 1]['id'], 'early-reference-join')
+        downloads = [i for i, step in enumerate(steps)
+                     if step.get('uses', '').startswith('actions/download-artifact@')]
+        self.assertEqual(len(downloads), 3)
+        download = steps[final + 1]
+        self.assertIn(final + 1, downloads)
+        self.assertNotIn('if', download)
+        self.assertNotIn('continue-on-error', download)
+        self.assertEqual(download['with'], {
+            'name': 'original-user-x64-${{ github.sha }}-${{ github.run_attempt }}',
+            'path': '${{ runner.temp }}/user-x64'})
+        preflight = steps[final + 2]
+        self.assertNotIn('if', preflight)
+        self.assertNotIn('continue-on-error', preflight)
+        command = ' '.join(preflight['run'].replace('\\\n', ' ').split())
+        self.assertEqual(command, 'python3 tools/windows_child_user_contract.py '
+                         '--directory "$RUNNER_TEMP/user-x64" --repo "$GITHUB_WORKSPACE" '
+                         '--report "$RUNNER_TEMP/fixture-evidence/user-preflight.json" '
+                         '--run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"')
+        consumers = [i for i, step in enumerate(steps)
+                     if ' export-user ' in step.get('run', '') or
+                     'PW_WINDOWS_CHILD_USER_DIR' in step.get('env', {}) or
+                     'package_windows_child_fixture.py assemble' in step.get('run', '')]
+        self.assertTrue(consumers)
+        self.assertEqual(final + 3, min(consumers))
+        self.assertTrue(all(final + 2 < i for i in consumers))
+        for step in reference['steps']:
+            self.assertFalse('actions/cache' in step.get('uses', '') or
+                             'download-artifact' in step.get('uses', ''))
 
     def test_original_msvc_reference_is_always_fresh(self):
         steps = workflow()['jobs']['original-x64-reference']['steps']
