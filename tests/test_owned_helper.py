@@ -165,8 +165,14 @@ class Admission(unittest.TestCase):
         for command in self.build['commands']:
             command['argv'] = [arg.replace('/inert-sdk', str(sdk)) for arg in command['argv']]
         self.rebind()
-        with patch.object(helper, 'sdk_record', return_value={}):
-            with self.assertRaises(ValueError): helper.validate_owned_helper(self.out, self.repo, sdk=sdk)
+        with patch.object(helper, 'producer_llvm_identity', return_value=self.host_llvm) as llvm, \
+             patch.object(helper, 'sdk_record', return_value={}) as sdk_inputs, \
+             patch.object(helper, 'inspect_elf') as inspect:
+            with self.assertRaisesRegex(ValueError, 'helper SDK/link inspection differs'):
+                helper.validate_owned_helper(self.out, self.repo, sdk=sdk)
+            llvm.assert_called_once_with(sdk.resolve())
+            sdk_inputs.assert_called_once_with(sdk.resolve())
+            inspect.assert_not_called()
         with patch.object(helper, 'sdk_record', return_value=self.sdk), patch.object(helper, 'producer_llvm_identity', return_value=self.host_llvm), patch.object(helper, 'inspect_elf', return_value={}):
             with self.assertRaises(ValueError): helper.validate_owned_helper(self.out, self.repo, sdk=sdk)
 
