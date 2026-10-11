@@ -3,6 +3,7 @@
 """Executable acceptance controls with original report/ELF/SELF/tool fixtures."""
 import importlib.util
 import json
+import shlex
 from pathlib import Path
 import struct
 import subprocess
@@ -62,12 +63,34 @@ class Fixture:
             self.report["prx"]["modules"][name] = entry
         self.write("source/dlls/secur32/schannel_gnutls.c", b"LOAD_FUNCPTR(gnutls_handshake)\n")
         self.write("source/dlls/crypt32/unixlib.c", b"LOAD_FUNCPTR(gnutls_global_init)\n")
+        for name in ("main.c", "dnsapi.h", "query.c", "Makefile.in", "dnsapi.spec"):
+            self.write("source/dlls/dnsapi/" + name, ("inert source " + name).encode())
+        for arch in ("i386", "x86_64"):
+            for unit in ("main", "query"):
+                self.write(f"build/dlls/dnsapi/{arch}-windows/{unit}.o", b"inert object identity")
+        self.report["dnsapi_guard"] = check.dnsapi_guard_record(self.work)
 
     def write(self, name, contents):
         path = self.work / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(contents)
         return path
+
+    def enable_user_driver(self):
+        self.report["service_fixture"] = {"enabled": True}
+        lines = []
+        for unit in check.USER_DRIVER_UNITS:
+            source = "dlls/win32u/" + unit + ".c"
+            target = "dlls/win32u/" + unit + ".o"
+            self.write("source/" + source, b"inert source identity")
+            self.write("build/" + target, binary(1))
+            lines.append(shlex.join(["/fixture/sdk/prospero-clang", "-c", "../source/" + source, "-o", target]))
+        for name in ("ntuser_private.h", "win32u_private.h", "Makefile.in"):
+            self.write("source/dlls/win32u/" + name, b"inert header identity")
+        self.write("service-translation-units.log", ("\n".join(lines) + "\n").encode())
+        for name in ("user-driver-compiler", "user-driver-sdk-compiler"):
+            self.write(name, b"inert compiler wrapper identity")
+        self.report["user_driver_fixes"] = check.user_driver_record(self.work)
 
     def needed(self, name):
         return [self.system_soname] + (["ntdll.prx"] if name == "secur32" else [])
@@ -78,7 +101,12 @@ class Fixture:
         if command == "git":
             output = self.pin if Path(argv[2]) == self.foundation else self.wine
         elif command == "llvm-readelf":
-            if "--dyn-syms" in argv:
+            if "-s" in argv:
+                kind = "OBJECT" if self.mode == "user-wrong-type" else "FUNC"
+                section = "UND" if self.mode == "user-import-only" else "1"
+                output = f"1: 00000128 1 {kind} GLOBAL HIDDEN {section} ps5_install_user_driver\n"
+                if self.mode == "user-branch-missing": output = ""
+            elif "--dyn-syms" in argv:
                 exports = ["module_start", "NtClose"]
                 if name == "secur32": exports += ["__wine_unix_call_funcs", "__wine_unix_call_wow64_funcs"]
                 if name == "libgnutls": exports += ["gnutls_handshake", "gnutls_global_init"]
@@ -196,6 +224,82 @@ class DataFixture(Fixture):
 
 
 class PrxBuildContracts(unittest.TestCase):
+    def test_user_driver_reads_complete_make_continued_commands(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Fixture(Path(d)); f.enable_user_driver()
+            log = f.work / "service-translation-units.log"
+            expected, physical = {}, []
+            for line in log.read_text().splitlines():
+                argv = shlex.split(line) + ["-D__WINESRC__", "-DLABEL=two words", "-DWINE_UNIX_LIB"]
+                expected[argv[argv.index("-o") + 1]] = [argv]
+                physical.append(shlex.join(argv[:1]) + " \\\n  " +
+                                shlex.join(argv[1:3]) + " \\\n  " + shlex.join(argv[3:]))
+            complete = "\n".join(physical) + "\n"
+            log.write_text(complete)
+            f.report["user_driver_fixes"] = check.user_driver_record(f.work)
+            self.assertEqual(f.report["user_driver_fixes"]["compile_commands"], expected)
+            f.validate()
+            for broken in (complete.replace("../source/dlls/win32u/ps5drv.c", "../source/wrong.c"),
+                           complete.rstrip("\n") + " \\",
+                           complete.rstrip("\n") + " \\\n",
+                           complete.replace(" -c ", " 'unterminated -c ", 1)):
+                log.write_text(broken)
+                with self.assertRaises(ValueError): check.user_driver_record(f.work)
+
+    def test_user_driver_requires_actual_ps5_branch_and_target_objects(self):
+        for defect in ("valid", "user-branch-missing", "user-import-only", "user-wrong-type", "user-pe-object"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d)); f.enable_user_driver(); f.mode = defect
+                if defect == "user-pe-object":
+                    f.write("build/dlls/win32u/ps5drv.o", b"MZinert PE or empty guarded object")
+                    f.report["user_driver_fixes"] = check.user_driver_record(f.work)
+                if defect == "valid": f.validate()
+                else:
+                    with self.assertRaisesRegex(ValueError, "USER"): f.validate()
+
+    def test_user_driver_binds_sources_commands_compilers_and_exact_object_set(self):
+        for part, prefix in (("sources", "source/"), ("objects", "build/"), ("evidence", "")):
+            with tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d)); f.enable_user_driver()
+                names = list(f.report["user_driver_fixes"][part])
+            for name in names:
+                with self.subTest(part=part, name=name), tempfile.TemporaryDirectory() as d:
+                    f = Fixture(Path(d)); f.enable_user_driver()
+                    f.write(prefix + name, b"changed input")
+                    with self.assertRaisesRegex(ValueError, "USER"): f.validate()
+        for defect in ("missing", "extra", "runtime", "wrong-source-command"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d)); f.enable_user_driver()
+                if defect == "missing": del f.report["user_driver_fixes"]
+                elif defect == "extra": f.report["user_driver_fixes"]["objects"]["other.o"] = "0" * 64
+                elif defect == "runtime": f.report["user_driver_fixes"]["runtime_validated"] = True
+                else:
+                    p = f.work / "service-translation-units.log"
+                    p.write_text(p.read_text().replace("ps5drv.c", "other.c"))
+                with self.assertRaisesRegex(ValueError, "USER"): f.validate()
+
+    def test_dnsapi_guard_binds_sources_objects_and_both_final_dlls(self):
+        for part, base in (("sources", "source"), ("objects", "build"), ("pe", "pe")):
+            with tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d))
+                names = list(f.report["dnsapi_guard"][part])
+            for name in names:
+                with self.subTest(part=part, name=name), tempfile.TemporaryDirectory() as d:
+                    f = Fixture(Path(d))
+                    f.write(base + "/" + name, b"changed after the report")
+                    if part == "pe":
+                        # A coherent general PE hash cannot waive guard binding.
+                        f.report["pe"][name] = check.sha(f.work / base / name)
+                    with self.assertRaisesRegex(ValueError, "DNSAPI guarded"):
+                        f.validate()
+        for defect in ("missing", "extra", "claimed-runtime"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
+                f = Fixture(Path(d))
+                if defect == "missing": del f.report["dnsapi_guard"]
+                elif defect == "extra": f.report["dnsapi_guard"]["objects"]["other.o"] = "0" * 64
+                else: f.report["dnsapi_guard"]["runtime_validated"] = True
+                with self.assertRaisesRegex(ValueError, "DNSAPI guarded"): f.validate()
+
     def test_documented_system_data_has_exact_provider_type_and_relocations(self):
         with tempfile.TemporaryDirectory() as d:
             f = DataFixture(Path(d))
@@ -222,7 +326,7 @@ class PrxBuildContracts(unittest.TestCase):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as d:
                 f = Fixture(Path(d))
                 target = "x86_64-windows/wow64win.dll"
-                self.assertEqual(len(f.report["pe"]), 22)
+                self.assertEqual(len(f.report["pe"]), 24)
                 if defect == "missing-report": del f.report["pe"][target]
                 elif defect == "missing-file": (f.work / "pe" / target).unlink()
                 elif defect == "changed-file": f.write("pe/" + target, b"changed after build report")

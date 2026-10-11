@@ -117,6 +117,18 @@ before evaluating a candidate built from that cache.
 | 0898 | `ntdll`: this process's memory counters (GetProcessMemoryInfo, ProcessVmCounters, SystemProcessInformation) come from its views, also for a handle opened on its own id; the console has no /proc or procstat, and every counter was zero |
 | 0899 | `include`: list the PS5 sync headers (0810, 0820, 0885, 0887) in `include/Makefile.in`, which makedep needs to resolve them; configure failed without it |
 | 0911 | `server`: allow watchdog guest-memory reads only when the registered thread/process native PIDs are positive, consistent and equal to the server host PID; keep server-owned wait/object diagnostics for other clients |
+| 0916 | `dnsapi`: keep numeric-address and PE-only operations usable when Unix resolver initialization fails, and return `ERROR_NOT_SUPPORTED` (DNS_STATUS 50) from every unavailable resolver operation before dispatch; this supplies no DNS backend or synthetic answer |
+
+Patch 0916 keeps DNSAPI loadable and records the raw initialization status.
+Resolver readiness requires both successful initialization and a nonzero Unix
+call handle. All four operations (search list, server list, server override and
+query) share the private checked boundary; healthy calls retain their arguments
+and returned status. The literal A/AAAA and hostname/domain configuration paths
+keep their existing behavior. Both PE architectures are rebuilt and overlaid
+into each matched prefix. The native PRX set is unchanged: this guard neither
+implements DNS resolution nor establishes the cause of a particular console
+fault. DNSAPI reports results in the [DNS_STATUS error-code domain](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsquery_a);
+the local unavailable-capability result is [ERROR_NOT_SUPPORTED, 50](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-).
 
 The optional `WINE_PS5_WAIT_WATCHDOG` diagnostics directly inspect guest TEB,
 CPU and stack addresses only for that registered local address space. A foreign,
@@ -1465,3 +1477,83 @@ console, `access()` reported the uploaded PRX absent in both places, while
 `open()` succeeds, so the probe's presence check opens the file.
 Wine-level initialisation (`__wine_main`, the wineserver) is not part of
 this probe.
+
+## PS5 input queue re-arming
+
+Patch 0917 adapts upstream [#428](https://github.com/mpereiraesaa/prospero-win/commit/5c597f7ab61eac109f502b8b42e68f791944a542).
+A valid wake pipe counts as handled even when another GUI thread consumed its
+input event. This lets Wine clear and re-arm the driver queue. Existing bridge
+domain refusal, suppression and event batch limits are preserved; no event is
+invented and no child input transport is provided.
+
+The mandatory composed-source gate runs the exact driver and message-pump
+function bodies with inert boundaries, under strict compilation and UBSan.
+These are host controls. The experimental target gate separately compiles
+ps5drv.o, retains its real compile commands and compiler wrappers, and requires
+an AMD64 ELF object defining ps5_install_user_driver. That definition is inside
+the PS5 USER branch, so an empty object from a disabled driver cannot pass.
+The build report binds source, headers, object and evidence hashes; the bounded
+collector retains the small objects and compiler evidence before large inputs.
+The normal win32u link/conversion and package checks remain required. No new
+module, export or process ABI is introduced, and the original MSVC fixture is
+unchanged. Console input delivery remains unverified for this correction.
+
+## Fresh-worker desktop recognition and failed geometry
+
+Patch 0918 adapts upstream [#606](https://github.com/mpereiraesaa/prospero-win/commit/da57aaab64bfd54e068da35522139ef6d6886a31).
+A fresh PS5 worker queries existing desktop handles before walking GA_ROOT,
+without creating a desktop or initializing the USER driver. Later full USER
+initialization still runs the driver and builtin-class callbacks once, with
+reentrant lookup preserved. Changing desktop successfully resets the cache.
+Absent roots or failed rectangle reads return empty virtual/monitor rectangles
+before any mapping; valid geometry retains its existing behavior.
+
+The reviewed adaptation handles a partial pair: a cached top window with no
+message window retains the original force=TRUE completion query. If that query
+fails, or succeeds with only the same top, the previously confirmed top remains
+available and the existing initialization tail runs once with message handle
+zero. This is deliberately different from a fresh failed query, whose original
+fallback remains. No message handle is synthesized and no extra retry is added.
+The source controls cover both failure outcomes, complete cached pairs, fresh
+failure, cache reset/reentrancy, geometry failures and the non-PS5 branch.
+
+The private Unix thread structure gains a field. Rebuild and retain the actual
+window.o, winstation.o and syscall.o alongside ps5drv.o; syscall.c owns its
+sizeof-based allocation. All four commands, objects and relevant headers are
+bound into the build report. Full win32u linking remains mandatory. This does
+not add a server request, process ABI, profile, child display/input transport or
+an observed console compatibility result. The existing MSVC fixture stays
+unchanged; a separate worker-first-USER fixture remains future validation.
+
+## Extended-key flags in existing PS5 input events
+
+Patch 0919 reuses the exact upstream [#426](https://github.com/mpereiraesaa/prospero-win/commit/df5778b62b4bb69af51ccbda486578a3c24ad873)
+patch body. It marks the existing extended virtual-key set with KEYEVENTF_EXTENDEDKEY
+while preserving key-up, scan-code/layout mapping, target-window routing, bridge
+domain suppression and the bounded input batch. The mandatory composed-source
+gate runs the exact driver/helper bodies and real Wine key definitions with
+inert boundaries, in strict and UBSan variants. The same gate runs the wake and
+desktop controls against all three patches together. The existing real target
+ps5drv.o evidence and final win32u link/conversion checks cover this new body.
+
+This does not restore distinctions already lost by the HID producer: right and
+left Ctrl/Alt map to the generic virtual keys, and keypad Enter maps to Return.
+It does not provide child physical-input forwarding, focus ownership, IME or
+keyboard-layout compatibility. The original MSVC fixture and all process/ABI
+contracts remain unchanged. Host controls do not establish console key delivery.
+
+## Separate original USER process control
+
+The optional mode 3 control described in the
+[matched child build](WINDOWS_CHILD_FIXTURE_BUILD.md#optional-original-worker-first-user-control)
+uses an independently built original AMD64 parent/child pair. It exercises a
+fresh child worker's first USER call and later ordinary class/GDI setup, while
+keeping the original headless fixture and Battle profile distinct. It introduces
+no Wine patch, protocol version, public export or native module. The USER fixes
+above are still validated through their own source controls and all four real
+target objects, including the syscall allocator.
+
+The new capability is enabled only with a checked same-run reference and exact
+child hash. The additional USER32/GDI32 imports do not imply a presentation or
+input bridge. Host source controls and PE inspection remain separate from actual
+Windows reference execution and PS5 guest/native ownership evidence.

@@ -107,7 +107,7 @@ int main(void)
     reset();m.profile=PW_WC_PROFILE_BATTLENET;strcpy(module.names[9],"missing");assert(prepare()&&!m.bindings);
     reset();m.profile=PW_WC_PROFILE_BATTLENET;m.wow64_abi=0;assert(prepare()&&b.stage==PW_WCB_ABI&&!m.bindings);
     reset();m.machine=PW_WC_MACHINE_I386;assert(prepare()&&!m.loads&&!m.envs);
-    reset();m.profile=3;assert(prepare()&&!m.loads&&!m.envs);
+    reset();m.profile=4;assert(prepare()&&!m.loads&&!m.envs);
     reset();m.profile=PW_WC_PROFILE_BATTLENET;m.machine=0xaa64;assert(prepare()&&!m.loads&&!m.envs);
     puts("wine child bootstrap: all mocked controls and SHA256 vectors passed");return 0;
 }

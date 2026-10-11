@@ -12,6 +12,9 @@
 #define PW_WINE_CHILD_BATTLENET_PREFIX "/data/prospero-win/prefixes/battlenet-experimental-v1"
 #define PW_WINE_CHILD_BATTLENET_CWD PW_WINE_CHILD_BATTLENET_PREFIX "/drive_c"
 #define PW_WINE_CHILD_BATTLENET_IMAGE "C:\\installer\\Battle.net-Setup.exe"
+#define PW_WINE_CHILD_USER_PREFIX "/data/prospero-win/prefixes/windows-child-user-v1"
+#define PW_WINE_CHILD_USER_CWD PW_WINE_CHILD_USER_PREFIX "/drive_c/windows-child-user"
+#define PW_WINE_CHILD_USER_IMAGE "C:\\windows-child-user\\user-child.exe"
 #define PW_WINE_CHILD_RUNTIME "/app0/win/wine/lib/wine/x86_64-unix"
 #define PW_WINE_CHILD_RUNTIME_ALIAS "/mnt/sandbox/PPSA99995_000/app0/win/wine/lib/wine/x86_64-unix"
 enum { PW_WCB_INITIAL, PW_WCB_PATHS, PW_WCB_ENVIRONMENT, PW_WCB_LOAD,
@@ -34,7 +37,7 @@ typedef struct PwWineChildBootstrapOps {
 typedef struct PwWineChildBootstrap {
     PwWineStart start;
     PwWineStartConfig config;
-    PwWineStartEnv env[13];
+    PwWineStartEnv env[15];
     const char *argv[3];
     char runtime[256], ntdll[272], socket_text[16];
     unsigned stage, prepared, started;

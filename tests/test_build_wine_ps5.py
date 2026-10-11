@@ -6,6 +6,7 @@ import os
 import json
 import hashlib
 import re
+import shlex
 import subprocess
 import sys
 from unittest.mock import patch
@@ -61,9 +62,10 @@ make() {
         assert not stale.exists()
         requests = (work / 'requests').read_text().splitlines()
         for arch in ('i386', 'x86_64'):
-            target = f'dlls/winevulkan/{arch}-windows/winevulkan.dll'
-            assert requests.count(target) == 1
-            assert (work / f'pe/{arch}-windows/winevulkan.dll').read_bytes() == ('MZfresh:' + target).encode()
+            for module in ('winevulkan', 'dnsapi'):
+                target = f'dlls/{module}/{arch}-windows/{module}.dll'
+                assert requests.count(target) == 1
+                assert (work / f'pe/{arch}-windows/{module}.dll').read_bytes() == ('MZfresh:' + target).encode()
         for arch in ('i386', 'x86_64'):
             for module in ('ntdll', 'win32u'):
                 assert requests.count(f'dlls/{module}/{arch}-windows/{module}.dll') == 1
@@ -73,13 +75,14 @@ make() {
             assert (work / f'pe/x86_64-windows/{module}.dll').read_bytes() == ('MZfresh:' + target).encode()
             assert f'dlls/{module}/i386-windows/{module}.dll' not in requests
         assert (work / 'status').read_text() == '0'
-        failed = 'dlls/winevulkan/i386-windows/winevulkan.dll'
-        (build / failed).unlink()
-        env['PW_PE_FAIL_TARGET'] = failed
-        result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
-        assert result.returncode == 0, result.stderr
-        assert (work / 'status').read_text() == '17'
-        assert not (work / 'pe/i386-windows/winevulkan.dll').exists()
+        for module, arch in (('winevulkan', 'i386'), ('dnsapi', 'i386'), ('dnsapi', 'x86_64')):
+            failed = f'dlls/{module}/{arch}-windows/{module}.dll'
+            (build / failed).unlink()
+            env['PW_PE_FAIL_TARGET'] = failed
+            result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            assert (work / 'status').read_text() == '17'
+            assert not (work / f'pe/{arch}-windows/{module}.dll').exists()
 
 
 def main() -> int:
@@ -149,6 +152,12 @@ def check_tls_reporting() -> None:
             write(tls / name, f"synthetic {name}")
         for name in (*tls_manifest.MODULES, *tls_manifest.NOTICES, "ca-certificates.crt"):
             write(prx / name, f"synthetic {name}")
+        for name in ("main.c", "dnsapi.h", "query.c", "Makefile.in", "dnsapi.spec"):
+            write(base / "source/dlls/dnsapi" / name, f"inert source {name}")
+        for arch in ("i386", "x86_64"):
+            for unit in ("main", "query"):
+                write(build / f"dlls/dnsapi/{arch}-windows/{unit}.o", f"inert {arch} {unit} object")
+            write(base / f"pe/{arch}-windows/dnsapi.dll", f"inert {arch} final PE")
         with patch.dict(os.environ, {"LLVM_CONFIG": str(llvm_config)}):
             tls_manifest.record(tls, tls_manifest.inputs(ROOT / "tools/build_tls_ps5.sh", sdk))
         log, report = base / "make.log", base / "report.json"
@@ -163,6 +172,40 @@ def check_tls_reporting() -> None:
 
         result = run()
         assert result.returncode == 0, result.stderr
+        from check_wine_prx_build import dnsapi_guard_record
+        assert json.loads(report.read_text())["dnsapi_guard"] == dnsapi_guard_record(base)
+        missing_object = build / "dlls/dnsapi/i386-windows/main.o"
+        saved = missing_object.read_bytes(); missing_object.unlink()
+        result = run()
+        assert result.returncode == 6
+        assert "dnsapi_guard_error" in json.loads(report.read_text())
+        missing_object.write_bytes(saved)
+        # Service builds retain the actual USER compilation inputs before
+        # inspecting the final PRX; a missing object must fail the producer.
+        from check_wine_prx_build import USER_DRIVER_UNITS, user_driver_record
+        lines = []
+        for unit in USER_DRIVER_UNITS:
+            source = f"dlls/win32u/{unit}.c"
+            target = f"dlls/win32u/{unit}.o"
+            write(base / "source" / source, "inert USER source")
+            write(build / target, "inert USER object identity")
+            lines.append(shlex.join(["/inert/prospero-clang", "-c", "../source/" + source, "-o", target]))
+        for name in ("ntuser_private.h", "win32u_private.h", "Makefile.in"):
+            write(base / "source/dlls/win32u" / name, "inert USER header")
+        write(base / "service-translation-units.log", "\n".join(lines) + "\n")
+        for name in ("user-driver-compiler", "user-driver-sdk-compiler"):
+            write(base / name, "inert compiler wrapper")
+        env["PW_SERVICE_FIXTURE"] = "1"
+        result = run()
+        assert result.returncode == 0, result.stderr
+        assert json.loads(report.read_text())["user_driver_fixes"] == user_driver_record(base)
+        for unit in USER_DRIVER_UNITS:
+            object_path = build / f"dlls/win32u/{unit}.o"
+            saved = object_path.read_bytes(); object_path.unlink()
+            result = run()
+            assert result.returncode == 7 and "user_driver_error" in json.loads(report.read_text())
+            object_path.write_bytes(saved)
+        env.pop("PW_SERVICE_FIXTURE")
         # ON requires actual staged PE metadata and records the native bytes.
         env["PW_PRIVATE_DISPATCH"] = "1"
         result = run()

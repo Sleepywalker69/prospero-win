@@ -336,6 +336,8 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
         #include <string.h>
         #include "pw_game_profile.h"
         #include "pw_wine_launch.h"
+        /* This extracted mode1/2 caller control uses the actual default-off configuration. */
+        #define PW_WINE_USER_PROFILE_ENABLED 0
         static unsigned checks,restarts;
         #define CHECK(x) do { ++checks; assert(x); } while(0)
         static PwWineLaunch launch;
