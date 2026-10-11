@@ -41,6 +41,7 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
     int state;
     if (!detail) detail = &local;
     memset(detail, 0, sizeof(*detail));
+    detail->helper.no_dispatch=1;
     if (!ops || !ops->request || !ops->stat_path || !ops->lstat_path || !ops->sleep_ms ||
         pid <= 1 || max_wait_ms < 0 || PW_DATA_MOUNT_POLL_MS <= 0 || PW_DATA_MOUNT_SETTLE_MS < 0)
         return -1;
@@ -97,6 +98,7 @@ static int native_helper_request(int32_t pid, PwLapyElevationResult *result)
 #if defined(PW_DATA_MOUNT_HOST_TEST)
     (void)pid;
     memset(result, 0, sizeof(*result));
+    result->no_dispatch=1;
     errno = ENOENT;
     return -1;
 #else

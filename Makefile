@@ -174,7 +174,17 @@ PW_DATA_MOUNT_TEST_FLAGS := -DPW_DATA_MOUNT_HOST_TEST -DPW_DATA_MOUNT_PATH='"/tm
 $(eval $(call test_rule,test_pw_data_mount_native,tests/test_pw_data_mount_native.c native/pw_data_mount.c,$(PW_DATA_MOUNT_TEST_FLAGS)))
 PW_LAPY_ELEVATION_TEST_FLAGS := -DPW_LAPY_HELPER_PATH='"/tmp/pw_lapy_test_helper"'
 $(eval $(call test_rule,test_pw_lapy_elevation_outcome,tests/test_pw_lapy_elevation_outcome.c,-I.))
-$(BUILD)/test_pw_lapy_elevation_outcome: native/pw_lapy_elevation.c
+$(BUILD)/test_pw_lapy_elevation_outcome: native/pw_lapy_elevation.c native/pw_lapy_elevation.h native/pw_lapy_client.h native/lapy_elevation_protocol.h native/pw_sha256.h
+$(eval $(call test_rule,test_pw_lapy_client,tests/test_pw_lapy_client.c,-Inative))
+$(eval $(call test_rule,test_pw_lapy_client_fail_closed,tests/test_pw_lapy_client_fail_closed.c,-Inative))
+$(BUILD)/test_pw_lapy_client $(BUILD)/test_pw_lapy_client_fail_closed: native/pw_lapy_client.h native/lapy_elevation_protocol.h
+# Portable control only: all callbacks are inert; no operational helper unit is linked.
+$(eval $(call test_rule,test_owned_helper_control_nonprogress,tests/test_owned_helper_control_nonprogress.c native/owned_helper/owned_helper_control.c,-Inative/owned_helper))
+$(BUILD)/test_owned_helper_control_nonprogress: native/owned_helper/owned_helper_control.h native/owned_helper/lapy_elevation_protocol.h
+$(eval $(call test_rule,test_initial_cancel_adapter,tests/test_initial_cancel_adapter.c,-I. -Inative))
+$(eval $(call test_rule,test_initial_cancel_main,tests/test_initial_cancel_main.c,-I. -Inative))
+$(BUILD)/test_initial_cancel_adapter: native/pw_lapy_elevation.c native/pw_lapy_elevation.h native/pw_lapy_client.h native/pw_sha256.h native/lapy_elevation_protocol.h native/ps5log/ps5log.h native/ps5log/ps5log_ps5_net.h
+$(BUILD)/test_initial_cancel_main: native/pw_lapy_initial_cancel_main.c native/pw_lapy_initial_cancel_fixture.h native/pw_lapy_elevation.h native/ps5log/ps5log.h
 $(eval $(call test_rule,test_pw_native_child_protocol,tests/test_pw_native_child_protocol.c native/pw_native_child_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_protocol,tests/test_pw_native_peer_protocol.c native/pw_native_peer_protocol.c,))
 $(eval $(call test_rule,test_pw_native_peer_worker,tests/test_pw_native_peer_worker.c,))
@@ -197,6 +207,7 @@ $(eval $(call test_rule,test_wine_child_data,tests/test_wine_child_data.c native
 $(eval $(call test_rule,test_wine_child_data_owner,tests/test_wine_child_data_owner.c native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_DATA_TEST_FLAGS)))
 $(eval $(call test_rule,test_wine_child_data_flow,tests/test_wine_child_data_flow.c tests/wine_child_data_main.c tests/test_wine_child_data.c native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_DATA_FLOW_FLAGS)))
 $(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_wine_child_data_flow: native/pw_wine_child_data.c native/pw_wine_child_data.h native/lapy_elevation_protocol.h native/pw_wine_child_main.c native/pw_wine_fixture_owner.c native/pw_wine_fixture_owner.h native/pw_wine_child_wire.h native/pw_wine_child_bootstrap.h native/pw_native_child_protocol.h wine/ps5/pw_wine_fixture_provider.h wine/ps5/pw_wine_fixture_socket.h wine/ps5/pw_wine_threads.h wine/ps5/pw_wine_prx.h src/pw_wine_start.h tests/data_adapter_fixture.h tests/wine_child_data_bridge.h tests/data_child_fixture/wine-child-build.h
+$(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_wine_child_data_flow: native/pw_lapy_client.h
 $(BUILD)/test_pw_wine_child_main $(BUILD)/test_bootstrap_diagnostic_flow: native/pw_wine_child_data.h
 $(eval $(call test_rule,test_pw_wine_child_wire,tests/test_pw_wine_child_wire.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
 $(eval $(call test_rule,test_pw_wine_child_bootstrap,tests/test_pw_wine_child_bootstrap.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
@@ -289,7 +300,8 @@ $(eval $(call test_rule,test_pw_native_fd_controller,native/pw_native_child_prot
 PW_NATIVE_PEER_CONTROLLER_TEST_FLAGS := -Itests/native_child_probe_fixture -DPW_NATIVE_CHILD_PEER_MODE=1 -MMD -MP -MF $(BUILD)/native-peer-controller-test.d
 -include $(BUILD)/native-peer-controller-test.d
 $(eval $(call test_rule,test_pw_native_peer_controller,native/pw_native_child_protocol.c tests/test_pw_native_child_probe.c tests/native_child_probe_fixture/native-child-build.h,$(PW_NATIVE_PEER_CONTROLLER_TEST_FLAGS)))
-$(eval $(call test_rule,test_pw_lapy_elevation,tests/test_pw_lapy_elevation.c native/pw_lapy_elevation.c,$(PW_LAPY_ELEVATION_TEST_FLAGS)))
+$(eval $(call test_rule,test_pw_lapy_elevation,tests/test_pw_lapy_elevation.c,-I.))
+$(BUILD)/test_pw_lapy_elevation: tests/test_pw_lapy_elevation_outcome.c native/pw_lapy_elevation.c native/pw_lapy_elevation.h native/pw_lapy_client.h native/lapy_elevation_protocol.h native/pw_sha256.h
 $(eval $(call test_rule,classify_x86,tools/classify_x86.c src/pw_x86_block.c src/pw_x87.c src/pw_guest_fp.c,))
 $(eval $(call test_rule,dbt_differential,tools/dbt_differential.c src/pw_x86_hostexec.c src/pw_x86_engine.c src/pw_x86_cache.c src/pw_x86_block.c src/pw_x86_reencode.c src/pw_x87.c src/pw_guest_fp.c src/pw_vm.c src/pw_vm_posix.c,))
 $(eval $(call test_rule,bench_dynarec,tools/bench_dynarec.c src/pw_x86_engine.c src/pw_x86_cache.c src/pw_x86_block.c src/pw_x86_reencode.c src/pw_x87.c src/pw_guest_fp.c src/pw_vm.c src/pw_vm_posix.c,-lm))
@@ -320,7 +332,7 @@ TESTS := test_wine_net_title test_wine_net_disabled test_wine_net_installer test
 	test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top test_pw_x86_engine \
 	test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle test_pw_videoout_layout \
-	test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount test_d3d9_getter_wire test_pw_data_mount_native test_pw_lapy_elevation test_pw_lapy_elevation_outcome test_d3d9_device_wire \
+	test_pw_videoout_tile test_pw_pad_ps5 test_pw_data_mount test_d3d9_getter_wire test_pw_data_mount_native test_pw_lapy_elevation test_pw_lapy_elevation_outcome test_pw_lapy_client test_pw_lapy_client_fail_closed test_initial_cancel_adapter test_initial_cancel_main test_owned_helper_control_nonprogress test_d3d9_device_wire \
 	test_d3d9_command_wire test_vk_present_interval test_pw_ws2_32_console test_pw_gnutls_libc test_pw_native_child_protocol test_pw_native_child_probe test_native_fd_mock \
 	test_pw_native_fd_report test_pw_native_child_capabilities test_pw_native_fd_worker test_pw_native_fd_controller test_pw_native_peer_protocol test_pw_native_peer_controller test_pw_native_peer_worker \
 	test_pw_native_peer_probe test_pw_native_socket_diagnostic test_pw_native_service_packet test_pw_native_service_packet_worker test_pw_native_service_worker test_pw_native_service_child test_pw_native_suite
@@ -339,6 +351,9 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_native_service_converter.py
 	python3 tests/test_native_suite.py
 	python3 tests/test_fetch_lapy_helper.py
+	python3 tests/test_owned_helper.py
+	python3 tests/test_initial_cancel_build.py
+	python3 tests/test_initial_cancel_workflow.py
 	python3 tests/test_package_release.py
 	python3 tests/test_private_dispatch_contract.py
 	python3 tests/test_private_dispatch_build.py

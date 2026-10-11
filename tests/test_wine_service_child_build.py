@@ -50,6 +50,27 @@ def fixture():
 
 
 class WineServiceChildBuild(unittest.TestCase):
+    def test_shared_client_header_is_part_of_service_identity(self):
+        self.assertIn('native/pw_lapy_client.h', build.HEADERS)
+        class InertCommands:
+            def run(self, *argv):
+                if 'status' in argv:
+                    return ''
+                return '1' * 40
+        project, sources = build.source_identity(ROOT, InertCommands())
+        name = 'native/pw_lapy_client.h'
+        self.assertEqual(sources[name], build.sha(ROOT / name))
+        mutated = dict(sources, **{name: '0' * 64})
+        self.assertNotEqual(build.identity({'project': project, 'sources': sources}),
+                            build.identity({'project': project, 'sources': mutated}))
+
+    def test_root_shared_headers_are_frozen(self):
+        for name in ('native/pw_data_mount.c', 'native/pw_data_mount.h',
+                     'native/pw_lapy_elevation.c', 'native/pw_lapy_elevation.h',
+                     'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h',
+                     'native/pw_sha256.h'):
+            self.assertIn(name, build.TITLE_USER_SOURCES)
+
     def test_helper_inputs_bind_same_title_pin_manifest_and_retained_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'tools').mkdir();(root/'native').mkdir();work=root/'child';work.mkdir()

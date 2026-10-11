@@ -17,6 +17,7 @@
 #include "../native/pw_wine_child_bootstrap.h"
 #include "../native/lapy_elevation_protocol.h"
 static unsigned checks;
+#define TEST_TRANSACTION UINT64_C(0x1020304050607080)
 #define CHECK(c) do{++checks;assert(c);}while(0)
 static int test_open(const char*,int,...),test_fstat(int,struct stat*),test_close(int),test_stat(const char*,struct stat*);
 int test_lstat(const char*,struct stat*);
@@ -88,6 +89,7 @@ enum { F_STAT=1,F_OPEN,F_FSTAT,F_READ,F_CLOSE,F_MODULE,F_SYMBOL,F_NET_LOAD,F_NET
 static struct {
  uint64_t now;int cancel,clock_fail,data_before,lstat_error,lstat_error_always,lstat_retry_count,lstat_success,lstat_type,stat_type,stat_error,missing_pair_count,missing_pair_always,no_data,poll_error,poll_flags,poll_at,hup_after_socket,hup_after_request,fail_at,fail_result,expired_at,cancelled_at;
  unsigned calls,after_stop,stopped,stats,lstats,opens,fstats,reads,closes,modules,symbols,loads,handles,inits,sockets,options,connects,sends,receives,net_closes,clones,sleeps;
+ unsigned request_frames,prepared_frames,cancel_frames,cancel_response_mode;
  unsigned partial,file_at,rx_at,rx_size,tx_size,phase,bad_hash,extra_byte,changed,mutate_after_close,header_bad;
  int native_errno,net_errno,setuid_error,net_close_error,close_error,socket_value,module_value,module_started,socket_failure,null_errno,net_errno_calls,net_module_value,sleep_interrupts,short_sleep,backward_at;
  unsigned char helper[8],upload[256],incoming[128];int ops[1024];unsigned tx_before[1024],rx_before[1024];
@@ -142,13 +144,29 @@ int net_socket(const char *name,int family,int type,int protocol)
 int net_connect(int fd,const struct sockaddr *address,socklen_t size)
 {static const unsigned char expected[16]={16,2,0x23,0x3d,127,0,0,1,0,0,0,0,0,0,0,0};CHECK(fd==m.socket_value&&address&&size==16&&!memcmp(address,expected,16));m.connects++;return boundary(F_CONNECT)?m.fail_result:0;}
 int net_option(int fd,int level,int option,const void *value,socklen_t size)
-{CHECK(fd==m.socket_value&&level==0xffff&&value&&size==4&&(option==0x1105||option==0x1106||option==0x1109));uint32_t n;memcpy(&n,value,4);CHECK(n>0&&n<=5000000&&n<=(io.stage_end-m.now)*1000);m.options++;return boundary(F_OPTION)?m.fail_result:0;}
+{CHECK(fd==m.socket_value&&level==0xffff&&value&&size==4&&(option==0x1105||option==0x1106||option==0x1109));uint32_t n;memcpy(&n,value,4);uint64_t end=io.stage_end+PW_WINE_CHILD_CLEANUP_MS;if(end>io.total_end)end=io.total_end;CHECK(n>0&&n<=5000000&&m.now<end&&n<=(end-m.now)*1000);m.options++;return boundary(F_OPTION)?m.fail_result:0;}
 int net_send(int fd,const void *bytes,size_t n,int flags)
-{CHECK(fd==m.socket_value&&bytes&&n&&!flags);m.sends++;if(!shared_clock&&m.tx_size>=8)CHECK(result.possible_apply);if(boundary(F_SEND))return m.fail_result;
+{CHECK(fd==m.socket_value&&bytes&&n&&!flags);m.sends++;if(boundary(F_SEND))return m.fail_result;
  if(m.partial&&n>3)n=3;
- CHECK(m.tx_size+n<=sizeof(m.upload));memcpy(m.upload+m.tx_size,bytes,n);m.tx_size+=(unsigned)n;return (int)n;}
+ CHECK(m.tx_size+n<=sizeof(m.upload));memcpy(m.upload+m.tx_size,bytes,n);m.tx_size+=(unsigned)n;
+ if(m.tx_size>=8+sizeof(struct lapy_elevation_message)&&!((m.tx_size-8)%sizeof(struct lapy_elevation_message))){
+  struct lapy_elevation_message f;memcpy(&f,m.upload+m.tx_size-sizeof(f),sizeof(f));
+  if(shared_clock){for(unsigned at=0;at+sizeof(f)<=m.rx_size;at+=sizeof(f)){
+   struct lapy_elevation_message reply;memcpy(&reply,m.incoming+at,sizeof(reply));reply.transaction_id=f.transaction_id;memcpy(m.incoming+at,&reply,sizeof(reply));}}
+  else {CHECK(f.transaction_id==TEST_TRANSACTION);}if(f.kind==LAPY_ELEVATION_REQUEST)m.request_frames++;
+  else if(f.kind==LAPY_ELEVATION_PREPARED)m.prepared_frames++;else{CHECK(f.kind==LAPY_ELEVATION_CANCEL);m.cancel_frames++;if(m.cancel_response_mode==3)m.now=io.total_end;}
+  CHECK(m.request_frames<=1&&m.prepared_frames<=1&&m.cancel_frames<=1);
+ }
+ return (int)n;}
 int net_receive(int fd,void *bytes,size_t n,int flags)
-{CHECK(fd==m.socket_value&&bytes&&n&&!flags);if(!shared_clock)CHECK(result.possible_apply);m.receives++;if(boundary(F_RECEIVE))return m.fail_result;
+{CHECK(fd==m.socket_value&&bytes&&n&&!flags);m.receives++;if(boundary(F_RECEIVE))return m.fail_result;
+ if(m.cancel_frames&&m.rx_size==2*sizeof(struct lapy_elevation_message)&&m.rx_at<=sizeof(struct lapy_elevation_message)&&!(m.rx_at%sizeof(struct lapy_elevation_message))){
+  struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),LAPY_ELEVATION_RESPONSE,LAPY_ELEVATION_FILESYSTEM,600,LAPY_ELEVATION_CANCELLED,TEST_TRANSACTION};
+  if(m.cancel_response_mode==1)f.transaction_id^=1;
+  if(m.cancel_response_mode==2)return 0;
+  if(!m.request_frames){memcpy(m.incoming,&f,sizeof(f));m.rx_size=sizeof(f);}
+  else if(m.rx_at==sizeof(f))memcpy(m.incoming+sizeof(f),&f,sizeof(f));
+ }
  size_t left=m.rx_size-m.rx_at;if(n>left)n=left;if(m.partial&&n>5)n=5;memcpy(bytes,m.incoming+m.rx_at,n);m.rx_at+=(unsigned)n;return (int)n;}
 int net_close(int fd){CHECK(fd==m.socket_value&&!m.net_closes);m.net_closes++;int fail=boundary(F_NET_CLOSE);m.net_errno=EBADF;return fail?m.fail_result:m.net_close_error;}
 int *net_errno(void){m.net_errno_calls++;return m.null_errno?NULL:&m.net_errno;}
@@ -161,7 +179,7 @@ int test_symbol(int32_t module,const char *symbol,void **address)
  CHECK(!strcmp(symbol,"sceNetInit"));m.symbols++;(void)boundary(F_SYMBOL);
  return (int32_t)UINT32_C(0x80020003);}
 static void message(unsigned kind,unsigned status)
-{struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),kind,LAPY_ELEVATION_FILESYSTEM,600,status};CHECK(m.rx_size+sizeof(f)<=sizeof(m.incoming));memcpy(m.incoming+m.rx_size,&f,sizeof(f));m.rx_size+=sizeof(f);}
+{struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),kind,LAPY_ELEVATION_FILESYSTEM,600,status,TEST_TRANSACTION};CHECK(m.rx_size+sizeof(f)<=sizeof(m.incoming));memcpy(m.incoming+m.rx_size,&f,sizeof(f));m.rx_size+=sizeof(f);}
 static void reset(void)
 {shared_clock=NULL;memset(&m,0,sizeof(m));memset(&result,0,sizeof(result));m.now=1000;m.module_value=(int32_t)UINT32_C(0x80020002);m.net_module_value=33;m.socket_value=42;m.native_errno=EACCES;m.net_errno=EIO;m.fail_result=-1;memcpy(m.helper,original_helper,8);
  io=(PwNativeChildIo){.clock_ms=now,.cancelled=stop,.ready=1,.last_clock=1000,.stage_end=31000,.total_end=61000};
@@ -169,12 +187,82 @@ static void reset(void)
 static void success_responses(void){message(LAPY_ELEVATION_PREPARE,0);message(LAPY_ELEVATION_RESPONSE,0);}
 void data_adapter_fixture_reset(uint64_t *clock,unsigned mode)
 {reset();shared_clock=clock;m.now=*clock;m.data_before=mode==0;m.partial=1;if(mode==1)success_responses();else if(mode==2)message(LAPY_ELEVATION_PREPARE,0);else if(mode==3)message(LAPY_ELEVATION_RESPONSE,LAPY_ELEVATION_TARGET_MISMATCH);else if(mode==4)m.poll_flags=POLLHUP;else if(mode==5)m.socket_failure=1;else if(mode==6){m.socket_failure=1;m.hup_after_socket=1;}else if(mode==7){success_responses();m.hup_after_request=1;}else if(mode==8){success_responses();m.data_before=1;m.lstat_error=EPERM;}else if(mode==9){success_responses();m.missing_pair_count=3;}}
+int data_adapter_fixture_control_refused(void)
+{struct pollfd p={.fd=3,.events=POLLIN};int rc=test_poll(&p,1,0);return rc!=0||p.revents!=0;}
 void data_adapter_fixture_counts(unsigned *calls,unsigned *clones,unsigned *sends)
 {*calls=m.calls;*clones=m.clones;*sends=m.sends;}
 #ifndef PW_WINE_DATA_COMPOSED
-static int run(void){return pw_wine_child_data_prepare(&result,&io,helper_hash);}
+static int run(void){const PwWineChildDataConfig config={TEST_TRANSACTION,NULL,NULL};return pw_wine_child_data_prepare(&result,&io,helper_hash,&config);}
+static struct {unsigned count,last,fail,expire,control;} progress_test;
+static int adapter_progress(void *context,unsigned stage)
+{
+    CHECK(context==&progress_test&&stage>progress_test.last&&stage>=PW_WCP_DATA_OBSERVED&&stage<=PW_WCP_NET_CLOSED);
+    progress_test.last=stage;progress_test.count++;
+    CHECK(!result.ready&&io.stage_end==31000&&io.total_end==61000);
+    if(stage==PW_WCP_REQUEST_BEGIN)CHECK(!result.possible_apply&&m.tx_size==sizeof(original_helper));
+    if(stage>=PW_WCP_PREPARE_RECEIVED)CHECK(result.possible_apply);
+    if(stage>=PW_WCP_RESULT_RECEIVED)CHECK(result.terminal);
+    if(stage>=PW_WCP_DATA_SETTLED)CHECK(result.settled_ms>=1000);
+    if(stage==PW_WCP_NET_CLOSED)CHECK(m.net_closes==1);
+    if(progress_test.expire==stage)m.now=io.stage_end;
+    if(progress_test.control==stage)m.poll_flags=POLLHUP;
+    return progress_test.fail==stage?-1:0;
+}
+static void enable_progress(void)
+{memset(&progress_test,0,sizeof(progress_test));result.progress=adapter_progress;result.progress_context=&progress_test;}
+static void progress_adapter_tests(void)
+{
+    reset();m.data_before=1;enable_progress();CHECK(!run());
+    CHECK(result.ready&&progress_test.count==1&&progress_test.last==PW_WCP_DATA_OBSERVED&&!m.opens&&!result.possible_apply);
+    reset();success_responses();enable_progress();CHECK(!run());
+    CHECK(result.ready&&result.terminal&&progress_test.count==17&&progress_test.last==PW_WCP_NET_CLOSED);
+    for(unsigned stage=PW_WCP_DATA_OBSERVED;stage<=PW_WCP_NET_CLOSED;stage++)for(unsigned mode=0;mode<3;mode++){
+        reset();success_responses();enable_progress();
+        if(mode==0)progress_test.fail=stage;
+        if(mode==1)progress_test.expire=stage;
+        if(mode==2)progress_test.control=stage;
+        CHECK(run()&&!result.ready&&progress_test.last==stage&&progress_test.count==stage-1);
+        CHECK(result.possible_apply==(stage>PW_WCP_REQUEST_BEGIN));
+        CHECK(result.terminal==(stage>=PW_WCP_HELPER_UPLOADED));
+        CHECK(m.closes<=1&&m.net_closes<=1&&io.stage_end==31000&&io.total_end==61000);
+        if(mode==0)CHECK(result.api==PW_WCD_PROGRESS);
+        if(mode==1)CHECK(result.api==PW_WCD_BUDGET);
+        if(mode==2)CHECK(result.api==PW_WCD_CONTROL&&result.control_refused);
+    }
+    /* A terminal helper rejection retains its original status if reporting it
+     * fails; diagnostics cannot turn it into success or remove settlement. */
+    reset();message(LAPY_ELEVATION_PREPARE,0);message(LAPY_ELEVATION_RESPONSE,LAPY_ELEVATION_PREPARE_FAILED);enable_progress();progress_test.fail=PW_WCP_RESULT_RECEIVED;
+    CHECK(run()&&result.terminal&&result.possible_apply&&!result.ready&&result.api==PW_WCD_RESULT&&result.helper_status==LAPY_ELEVATION_PREPARE_FAILED);
+}
+
+static void cancellation_evidence_tests(void)
+{
+    for(unsigned kind=0;kind<4;kind++){
+        reset();success_responses();enable_progress();progress_test.fail=PW_WCP_HELPER_UPLOADED;m.cancel_response_mode=kind;
+        CHECK(run()&&!result.ready&&!result.no_dispatch&&result.no_request&&!result.possible_apply);
+        CHECK(m.sockets==1&&m.connects==1&&!m.request_frames&&!m.prepared_frames&&m.cancel_frames==1&&!m.clones);
+        CHECK(result.terminal==(kind==0)&&result.settled_failure==(kind==0));
+        CHECK(result.api==PW_WCD_PROGRESS&&io.stage_end==31000&&io.total_end==61000);
+    }
+    reset();m.data_before=1;CHECK(!run()&&result.no_dispatch&&!m.sends&&!m.sockets);
+    reset();m.helper[7]^=1;CHECK(run()&&result.no_dispatch&&!m.sends&&!m.sockets);
+    reset();success_responses();enable_progress();progress_test.fail=PW_WCP_NET_CONNECTED;
+    CHECK(run()&&result.no_dispatch&&!m.sends&&m.sockets==1&&m.connects==1);
+    for(unsigned mode=0;mode<3;mode++){
+        reset();success_responses();memcpy(m.upload,original_helper,8);m.tx_size=8;
+        if(mode==2){enable_progress();progress_test.fail=PW_WCP_LOCAL_PREPARE_BEGIN;}
+        const PwWineChildDataConfig config={TEST_TRANSACTION,NULL,NULL};
+        DataContext c={.result=&result,.original=&io,.io=io,.config=&config,.recovery_end=61000,.upload_complete=1};
+        c.io.context=&c;c.io.clock_ms=data_clock;c.io.cancelled=data_cancel;
+        int rc=exchange(&c,m.socket_value,mode==1);
+        CHECK(!c.active_client&&result.terminal&&result.no_request==(mode==1));
+        CHECK((rc==0)==!mode&&m.request_frames==(mode!=1)&&m.cancel_frames==(mode!=0));
+    }
+}
 int main(void)
 {
+ cancellation_evidence_tests();
+ progress_adapter_tests();
 #if defined(PW_DATA_NET_ROUTE_RED) || defined(PW_DATA_NET_LOOKUP_CONTROL)
  reset();success_responses();int route_rc=run();
  printf("Net route: rc=%d api=%u raw=%d index=%u Sysmodule_loads=%u handles=%u lookups=%u init=%u sockets=%u ready=%u\n",route_rc,result.api,result.raw,result.resolution_index,m.loads,m.handles,m.symbols,m.inits,m.sockets,result.ready);fflush(stdout);
@@ -199,25 +287,25 @@ int main(void)
  reset();m.data_before=1;CHECK(!run()&&result.ready&&result.data_before&&result.data_after&&!result.possible_apply&&!m.opens&&!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.clones&&!m.sleeps);
  reset();success_responses();CHECK(!run());CHECK(result.ready&&result.possible_apply&&result.terminal&&result.data_after&&result.settled_ms>=1000&&m.clones==1&&m.closes==1&&m.net_closes==1);
  CHECK(!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.inits);
- CHECK(m.tx_size==56&&!memcmp(m.upload,original_helper,8));CHECK(io.stage_end==31000&&io.total_end==61000);
+ CHECK(m.tx_size==8+2*sizeof(struct lapy_elevation_message)&&!memcmp(m.upload,original_helper,8));CHECK(io.stage_end==31000&&io.total_end==61000);
  reset();m.partial=1;m.mutate_after_close=1;success_responses();CHECK(!run()&&!memcmp(m.upload,original_helper,8));
  for(unsigned status=0;status<=11;status++){
-  reset();message(LAPY_ELEVATION_RESPONSE,status);CHECK(run());CHECK(!result.ready&&!m.clones);CHECK(result.possible_apply);CHECK(result.terminal==(status>=1&&status<=4));
+  reset();message(LAPY_ELEVATION_RESPONSE,status);CHECK(run());CHECK(!result.ready&&!m.clones);CHECK(result.possible_apply);CHECK(result.terminal==((status>=1&&status<=5)||status==7||status==9||status==10));
   reset();message(LAPY_ELEVATION_PREPARE,0);message(LAPY_ELEVATION_RESPONSE,status);int rc=run();int terminal=status==0||status==4||status==5||status==6||status==7||status==9||status==10;
   CHECK(result.terminal==(unsigned)terminal);CHECK((rc==0)==(status==0));CHECK(result.ready==(status==0));
  }
  reset();m.setuid_error=-1;success_responses();CHECK(run()&&!result.terminal&&!result.ready&&result.possible_apply&&result.api==PW_WCD_LOCAL_PREPARE&&result.native_error==EPERM);
  reset();message(LAPY_ELEVATION_PREPARE,0);CHECK(run()&&result.possible_apply&&!result.terminal&&!result.ready);
  reset();success_responses();m.incoming[16]^=1;CHECK(run()&&!m.clones&&!result.terminal&&result.possible_apply);
- reset();success_responses();m.incoming[24+16]^=1;CHECK(run()&&m.clones==1&&!result.terminal&&result.possible_apply);
+ reset();success_responses();m.incoming[sizeof(struct lapy_elevation_message)+16]^=1;CHECK(run()&&m.clones==1&&!result.terminal&&result.possible_apply);
  reset();m.helper[7]^=1;success_responses();CHECK(run()&&result.api==PW_WCD_HELPER_HASH&&!m.sends&&!result.possible_apply);
  reset();m.extra_byte=1;success_responses();CHECK(run()&&result.api==PW_WCD_HELPER_READ&&!m.sends&&!result.possible_apply);
  reset();m.changed=1;success_responses();CHECK(run()&&result.api==PW_WCD_HELPER_CHANGED&&!m.sends&&!result.possible_apply);
  reset();success_responses();CHECK(!run());unsigned calls=m.calls;int operations[1024];memcpy(operations,m.ops,calls*sizeof(int));
  for(unsigned position=1;position<=calls;position++)for(int mode=1;mode<=2;mode++){
   reset();success_responses();if(mode==1)m.expired_at=(int)position;else m.cancelled_at=(int)position;
-  int rc=run();if(!rc||result.ready||m.after_stop){printf("post-call boundary position=%u operation=%d mode=%d rc=%d ready=%u later=%u\n",position,operations[position-1],mode,rc,result.ready,m.after_stop);fflush(stdout);}
-  CHECK(rc&&!result.ready&&!m.after_stop);if(mode==2)CHECK(result.control_refused);CHECK(io.stage_end==31000&&io.total_end==61000);
+  int rc=run();if(!rc||result.ready){printf("post-call boundary position=%u operation=%d mode=%d rc=%d ready=%u later=%u\n",position,operations[position-1],mode,rc,result.ready,m.after_stop);fflush(stdout);}
+  CHECK(rc&&!result.ready);if(mode==2)CHECK(result.cancel_requested);CHECK(m.sockets<=1&&m.connects<=1&&m.clones<=1&&m.request_frames<=1&&m.cancel_frames<=1);CHECK(io.stage_end==31000&&io.total_end==61000);
  }
  for(unsigned position=2;position<=calls;position++){
   if(operations[position-1]==F_STAT)continue; /* visibility polling can legitimately recover */
@@ -236,9 +324,9 @@ int main(void)
  reset();success_responses();CHECK(!run());unsigned prepare_return=0,final_return=0;
  for(unsigned i=0;i<m.calls;i++)if(m.ops[i]==F_RECEIVE){if(!prepare_return)prepare_return=i+1;else final_return=i+1;}
  CHECK(prepare_return&&final_return);
- reset();success_responses();m.expired_at=(int)prepare_return;CHECK(run()&&result.possible_apply&&!result.terminal&&!result.ready&&!m.clones);
+ reset();success_responses();m.expired_at=(int)prepare_return;CHECK(run()&&result.possible_apply&&result.terminal&&!result.ready&&!m.clones&&m.cancel_frames==1);
  reset();success_responses();m.expired_at=(int)final_return;CHECK(run()&&result.possible_apply&&result.terminal&&!result.ready&&m.clones==1);
- for(unsigned size=0;size<48;size++){
+ for(unsigned size=0;size<2*sizeof(struct lapy_elevation_message);size++){
   reset();m.partial=1;success_responses();m.rx_size=size;CHECK(run()&&result.possible_apply&&!result.terminal&&!result.ready);
  }
  const unsigned corrupt_offsets[]={0,4,6,8,12,16};
@@ -249,13 +337,13 @@ int main(void)
  /* First native error survives close changing its own error domain. */
  reset();m.partial=1;success_responses();CHECK(!run());unsigned request_piece=0,prepared_piece=0;
  for(unsigned i=0;i<m.calls;i++)if(m.ops[i]==F_SEND){
-  if(m.tx_before[i]>8&&m.tx_before[i]<32&&!request_piece)request_piece=i+1;
-  if(m.tx_before[i]>32&&!prepared_piece)prepared_piece=i+1;
+  if(m.tx_before[i]>8&&m.tx_before[i]<8+sizeof(struct lapy_elevation_message)&&!request_piece)request_piece=i+1;
+  if(m.tx_before[i]>8+sizeof(struct lapy_elevation_message)&&!prepared_piece)prepared_piece=i+1;
  }
  CHECK(request_piece&&prepared_piece);
  reset();m.partial=1;success_responses();m.poll_at=(int)request_piece;
  CHECK(run()&&result.possible_apply&&!result.terminal&&!result.ready&&result.api==PW_WCD_CONTROL&&result.control_refused&&result.control_revents==POLLHUP);
- CHECK(m.tx_size>8&&m.tx_size<32&&!m.receives&&!m.clones&&m.net_closes==1&&m.closes==1);
+ CHECK(m.tx_size>8&&m.tx_size<8+sizeof(struct lapy_elevation_message)&&!m.receives&&!m.clones&&m.net_closes==1&&m.closes==1);
  for(unsigned which=0;which<2;which++){
   reset();m.partial=1;success_responses();m.fail_at=(int)(which?prepared_piece:request_piece);m.net_close_error=-1;
   CHECK(run()&&result.possible_apply&&!result.terminal&&!result.ready&&result.errno_valid&&result.native_error==EIO);
@@ -274,7 +362,7 @@ int main(void)
    reset();success_responses();m.fail_at=(int)position;m.fail_result=kind==0?-1:kind==1?(int32_t)UINT32_C(0x80020003):-7;
    CHECK(run()&&!result.ready&&result.api==direct_apis[which]&&result.raw==m.fail_result);
    CHECK(result.errno_valid&&result.native_error==(direct_ops[which]==F_NET_CLOSE?EBADF:EIO));
-   CHECK(m.net_errno_calls==1&&m.closes==1&&m.net_closes==(direct_ops[which]!=F_SOCKET));
+   CHECK(m.net_errno_calls>=1&&m.closes==1&&m.net_closes==(direct_ops[which]!=F_SOCKET));
    CHECK(!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.inits);
    CHECK(io.stage_end==31000&&io.total_end==61000);
   }

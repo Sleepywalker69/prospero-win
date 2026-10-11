@@ -1,0 +1,18 @@
+{
+  "commit": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
+  "license": "MIT",
+  "license_scope": "Root LICENSE is MIT; per-file SPDX notices, including LGPL-2.1-or-later protocol header, are preserved separately",
+  "license_sha256": "5ef18e95f617c9d3a2674cc3256f5c0d6ec2f794a57e9e40f2185dd454c9f8da",
+  "notes": "Minimal owned-root one-request helper; reviewed local cancellation changes recorded in the prospero-win source tree. No prebuilt upstream executable is copied.",
+  "repository": "https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon",
+  "schema": "pw-owned-helper-upstream/1",
+  "source_files": {
+    "source/donor_transaction.c": "6844275eca240aab25d5d61ae030f94b50b9538116452ccb6078f6518ba876d9",
+    "source/donor_transaction.h": "c976e43a298a3621b2ff0f83f92f1304dc5c177a00d5af14c5a78a9620d2ce5b",
+    "source/lapy_elevation_protocol.h": "bb02c4aa814eaba7a7a423a31b29ff41f786212c2953678cf29434e85fa0f869",
+    "source/owned_root_daemon.c": "c46ef7642591252450148a7afc51c6ed6105c0f5b661e6906ab2a3ad8dd6a392",
+    "source/vnode_ref_probe.c": "ef49b83a80cdc980ea6b5cdb0477110b08b10feba7e7229cbb0c7db1bf0a87f0",
+    "source/vnode_ref_probe.h": "13e7f3b9ba77c696209f647e5a0fb60f50a6e8112991bb4bfc63da632a6a0153"
+  },
+  "tag": "v0.3.2-experimental"
+}

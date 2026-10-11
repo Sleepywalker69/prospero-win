@@ -44,8 +44,10 @@ typedef struct PwDataMountResult {
  * pair, or a successful terminal helper result followed by that same pair and
  * the settle delay. max_wait_ms bounds requested post-helper polling sleeps,
  * not helper duration, actual elapsed time, or the separate settle delay.
- * A failed possible_apply && !terminal request requires the caller to retain
- * its PID: neither timeout nor socket closure proves the helper has finished. */
+ * Any possible helper dispatch without a validated terminal result requires
+ * the caller to retain its PID, including ELF upload before REQUEST. Only
+ * positive, coherent no_dispatch evidence excludes that work: no_request,
+ * timeout and socket closure do not prove the helper has finished. */
 int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid, int max_wait_ms,
                                PwDataMountResult *detail);
 int pw_data_mount_request(PwDataMountResult *detail);

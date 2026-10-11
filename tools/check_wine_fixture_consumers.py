@@ -115,6 +115,40 @@ def check_dependency_inventory(wine, out, compiler):
     assert not re.search(r'dlls/ntdll/(?:i386|x86_64)-windows/unix/creation\.o', generated), 'unexpected PE creation object'
 
 
+def check_root_abort(source, out, compiler, cflags):
+    """Execute exact fatal process/last-thread abort bodies, on and off.
+
+    OS boundaries are inert; any retained root must stay parked despite
+    callback return values, EINTR or permanent sleep errors. Child/default
+    and non-last-thread abort semantics remain unchanged.
+    """
+    thread = source["dlls/ntdll/unix/thread.c"]
+    server = source["dlls/ntdll/unix/server.c"]
+    excerpt = function(thread, "static inline int get_unix_exit_code( NTSTATUS status )")
+    excerpt += "#ifdef PW_WINE_SERVICE_FIXTURE\n"
+    excerpt += function(server, "void pw_wine_fixture_root_abort( unsigned int windows_status )")
+    excerpt += "#endif\n"
+    excerpt += function(thread, "void abort_process( int status )")
+    excerpt += function(thread, "void abort_thread( int status )")
+    (out / "root-abort.inc").write_text(excerpt)
+    test = Path(__file__).resolve().parents[1] / "tests/fixtures/wine_fixture_root_abort.c"
+    results = []
+    for enabled in (True, False):
+        binary = out / ("root-abort-enabled" if enabled else "root-abort-disabled")
+        command = shlex.split(compiler) + shlex.split(cflags) + [
+            "-D_DEFAULT_SOURCE", "-DEXPECT_GUARD=" + str(int(enabled)),
+            "-I", str(out), str(test), "-o", str(binary)]
+        if enabled:
+            command.append("-DPW_WINE_SERVICE_FIXTURE")
+        for cmd in (command, [str(binary)]):
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            results.append({"command": cmd, "exit_status": result.returncode,
+                            "output": result.stdout + result.stderr})
+            (out / "root-abort-result.json").write_text(json.dumps(results, indent=2) + "\n")
+            assert result.returncode == 0, result.stdout + result.stderr
+    return results
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--wine-source", required=True, type=Path)
@@ -157,6 +191,7 @@ def main():
     source = {n: (args.wine_source/n).read_text() for n in paths}
     (out/"source-hashes.json").write_text(json.dumps({n: hashlib.sha256((args.wine_source/n).read_bytes()).hexdigest() for n in paths}, indent=2)+"\n")
     (out/"pw_wine_fixture_provider.h").write_text(source[paths[-1]])
+    check_root_abort(source, out, args.cc, args.cflags)
     proc = source[paths[0]]
     begin = proc.index("    /* wait for the new process info to be ready */")
     end = proc.index("    /* update output attributes */", begin)

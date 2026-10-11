@@ -77,8 +77,73 @@ static void rights(const int *fds,unsigned count)
  h->cmsg_len=CMSG_LEN(count*sizeof(int));memcpy(CMSG_DATA(h),fds,count*sizeof(int));m.controls=CMSG_SPACE(count*sizeof(int));}
 static int receive(unsigned kind,int *fd)
 {PwWineChildFrame got;return pw_wine_child_wire_receive_step(&io,3,PW_WC_KIND(kind),&got,fd,&r);}
+static void progress_wire_tests(void)
+{
+    PwWineChildFrame f=boot(),decoded;unsigned char bytes[PW_WC_WIRE_BYTES];int fd=-1;
+    f.kind=PW_WC_PROGRESS;
+    for(unsigned profile=1;profile<=4;profile++)for(unsigned stage=1;stage<=PW_WC_PROGRESS_LAST;stage++){
+        f.profile=profile;f.failure_api=stage;
+        assert(!pw_wine_child_wire_encode(bytes,&f)&&!pw_wine_child_wire_decode(&decoded,bytes));
+        assert(decoded.kind==PW_WC_PROGRESS&&decoded.failure_api==stage&&pw_wine_child_wire_same_session(&f,&decoded));
+        reset(f);assert(receive(PW_WC_PROGRESS,&fd)==PW_WC_RECORD&&fd==-1&&!m.closes);
+    }
+    for(unsigned mutation=0;mutation<11;mutation++){
+        f=boot();f.kind=PW_WC_PROGRESS;f.failure_api=1;
+        if(mutation==0)f.failure_api=0;
+        if(mutation==1)f.failure_api=PW_WC_PROGRESS_LAST+1;
+        if(mutation==2)f.sequence=2;
+        if(mutation==3)f.status=-1;
+        if(mutation==4)f.native_error=EACCES;
+        if(mutation==5)f.failure_raw=1;
+        if(mutation==6)f.returned_length=1;
+        if(mutation==7)f.returned_value=1;
+        if(mutation==8)f.errno_valid=1;
+        if(mutation==9)f.target_tid=1;
+        if(mutation==10)f.signal=PW_WC_SIGNAL_QUIT;
+        assert(pw_wine_child_wire_encode(bytes,&f));
+    }
+    f=boot();f.kind=PW_WC_PROGRESS;f.failure_api=1;
+    reset(f);int descriptor=9;rights(&descriptor,1);
+    assert(receive(PW_WC_PROGRESS,&fd)==PW_WC_ERROR&&fd==-1&&m.closes==1);
+    reset(f);assert(receive(PW_WC_SIGNAL_ACK,&fd)==PW_WC_ERROR&&fd==-1);
+    reset(f);assert(!pw_wine_child_wire_try_send(3,&f,-1,&r)&&m.sends==1);
+    reset(f);assert(pw_wine_child_wire_try_send(3,&f,9,&r)<0&&!m.sends);
+}
+
+static void cancel_wire_tests(void)
+{
+    PwWineChildFrame f=boot(),decoded;unsigned char bytes[PW_WC_WIRE_BYTES];int fd=-1;
+    f.kind=PW_WC_CANCEL;
+    for(unsigned profile=1;profile<=4;profile++){
+        f.profile=profile;assert(!pw_wine_child_wire_encode(bytes,&f));
+        assert(!pw_wine_child_wire_decode(&decoded,bytes)&&decoded.kind==PW_WC_CANCEL);
+        reset(f);assert(receive(PW_WC_CANCEL,&fd)==PW_WC_RECORD&&fd==-1);
+        reset(f);assert(!pw_wine_child_wire_try_send(3,&f,-1,&r)&&m.sends==1);
+    }
+    for(unsigned field=0;field<10;field++){
+        f=boot();f.kind=PW_WC_CANCEL;
+        if(field==0)f.sequence=2;
+        if(field==1)f.status=-1;
+        if(field==2)f.native_error=1;
+        if(field==3)f.failure_api=1;
+        if(field==4)f.failure_raw=1;
+        if(field==5)f.returned_length=1;
+        if(field==6)f.returned_value=1;
+        if(field==7)f.errno_valid=1;
+        if(field==8)f.signal=3;
+        if(field==9)f.target_tid=1;
+        assert(pw_wine_child_wire_encode(bytes,&f));
+    }
+    f=boot();f.kind=PW_WC_CANCEL;reset(f);int descriptor=9;rights(&descriptor,1);
+    assert(receive(PW_WC_CANCEL,&fd)==PW_WC_ERROR&&fd==-1&&m.closes==1);
+    reset(f);assert(receive(PW_WC_SIGNAL,&fd)==PW_WC_ERROR);
+    reset(f);assert(pw_wine_child_wire_try_send(3,&f,9,&r)<0&&!m.sends);
+}
+
 int main(void)
 {
+    cancel_wire_tests();
+    progress_wire_tests();
     PwWineChildFrame f=boot(),decoded;unsigned char bytes[PW_WC_WIRE_BYTES];
     assert(!pw_wine_child_wire_encode(bytes,&f));assert(!pw_wine_child_wire_decode(&decoded,bytes));
     assert(pw_wine_child_wire_same_session(&f,&decoded));bytes[127]=1;assert(pw_wine_child_wire_decode(&decoded,bytes));

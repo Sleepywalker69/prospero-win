@@ -4,5 +4,6 @@
 #include <stdint.h>
 #include "../native/pw_wine_child_data.h"
 void data_adapter_fixture_reset(uint64_t *,unsigned);
+int data_adapter_fixture_control_refused(void);
 void data_adapter_fixture_counts(unsigned *,unsigned *,unsigned *);
 #endif

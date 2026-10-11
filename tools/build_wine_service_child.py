@@ -33,7 +33,7 @@ LAYOUT_SHA = '72ee9a1605cce2836d2290fa9a6a6fba0c3c277e78094e7f07562e92dd5b4e49'
 WRAPPER_SHA = 'c90881bd828048981da08644ae1e1730a0ef10692b6322cbd6a294de8c5c5346'
 UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'native/pw_wine_child_main.c', 'native/pw_wine_child_data.c',
          'native/pw_native_child_protocol.c', 'src/pw_wine_start.c', 'wine/ps5/pw_wine_prx.c', 'wine/ps5/pw_wine_threads.c')
-HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
+HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
            'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h', 'wine/ps5/pw_wine_creation.h')
 PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so',
@@ -418,7 +418,10 @@ def fixture_title_identity(image, title_inputs, pair):
 
 TITLE_USER_FUNCTIONS = ('pw_wine_child_title_profile', 'pw_wine_child_title_prepare')
 TITLE_USER_SOURCES = ('native/wine64_main.c', 'native/pw_wine_child_title.c', 'native/pw_wine_child_title.h',
-                      'native/pw_wine_fixture_owner.c', 'native/pw_wine_fixture_owner.h')
+                      'native/pw_wine_fixture_owner.c', 'native/pw_wine_fixture_owner.h',
+                      'native/pw_data_mount.c', 'native/pw_data_mount.h',
+                      'native/pw_lapy_elevation.c', 'native/pw_lapy_elevation.h',
+                      'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_sha256.h')
 
 
 def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=None, run_attempt=None):
