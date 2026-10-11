@@ -178,7 +178,7 @@ int dirty = 0, report_help = help_sequence[step], prior_calls = calls;
 
 def test_suite_build_requires_explicit_manual_isolation() -> None:
     build = read("tools/build_native.sh")
-    early = build[build.index("native_mode="):build.index("helper_download=")]
+    early = build[build.index("native_mode="):build.index("if [[ ! -e $foundation/.git ]]")]
     cases = (("hello", 0, "", 0, 0), ("suite", 0, "-suite", 0, 2),
              ("suite", 1, "", 0, 2), ("suite", 1, "-suite", 1, 2),
              ("suite", 1, "-suite", 0, 0), ("peer-exit", 1, "-peer", 0, 0),

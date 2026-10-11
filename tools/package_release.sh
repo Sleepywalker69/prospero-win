@@ -31,8 +31,8 @@
 #                    inputs: x86_64-windows/wow64native.dll and
 #                    ps5/wow64native.prx, the native WoW64 CPU that 32-bit
 #                    games run on by default.
-#   --lapy-release FILE  the release.json tools/build_native.sh saved for the
-#                    lapy.elf it fetched (build/native/lapy-helper-release.json).
+#   --owned-helper DIR  complete source-bound build/native/owned-helper evidence.
+#   --helper-sdk DIR    exact SDK used to build that helper; independently rechecked.
 #   --mesa-zink DIR  optional tools/build_mesa_zink.sh artifacts/ directory:
 #                    PE32/PE64 WGL/Zink, hashes and component licence texts.
 #                    Packaging does not change a game's graphics selection.
@@ -44,7 +44,7 @@
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-mesa_zink= title= wine_ps5= host_wine= cpu_dll= native_cpu= lapy_release= out= zip=0
+mesa_zink= title= wine_ps5= host_wine= cpu_dll= native_cpu= owned_helper= helper_sdk= out= zip=0
 fail() { echo "package_release: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
     case $1 in
@@ -54,7 +54,8 @@ while [ $# -gt 0 ]; do
     --host-wine) host_wine=$2; shift 2 ;;
     --cpu-dll) cpu_dll=$2; shift 2 ;;
     --native-cpu) native_cpu=$2; shift 2 ;;
-    --lapy-release) lapy_release=$2; shift 2 ;;
+    --owned-helper) owned_helper=$2; shift 2 ;;
+    --helper-sdk) helper_sdk=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
     --zip) zip=1; shift ;;
     *) fail "unknown argument $1" ;;
@@ -69,7 +70,8 @@ ls "$wine_ps5"/prx/sce_module/ntdll.prx >/dev/null 2>&1 || fail "--wine-ps5: no 
 [ -f "$cpu_dll" ] || fail "--cpu-dll: no file '$cpu_dll'"
 [ -f "$native_cpu/x86_64-windows/wow64native.dll" ] && [ -f "$native_cpu/ps5/wow64native.prx" ] ||
     fail "--native-cpu: no x86_64-windows/wow64native.dll and ps5/wow64native.prx in '$native_cpu'"
-[ -f "$lapy_release" ] || fail "--lapy-release: no file '$lapy_release'"
+[ -d "$owned_helper" ] || fail "--owned-helper: no directory '$owned_helper'"
+[ -d "$helper_sdk" ] || fail "--helper-sdk: no directory '$helper_sdk'"
 [ -f "$wine_ps5/report.json" ] || fail "--wine-ps5: no report.json in '$wine_ps5'"
 # Experimental native-AMD64 dispatcher runtimes need a separately reviewed
 # producer which checks the actual selected PE/native identities. This
@@ -100,6 +102,10 @@ python3 "$root/tools/tls_manifest.py" verify-runtime --root "$wine_ps5" ||
 if [ -n "$mesa_zink" ]; then
     python3 "$root/tools/package_mesa_zink.py" "$mesa_zink" || fail 'invalid --mesa-zink artifact directory'
 fi
+
+# Refuse stale helper/source/toolchain/title joins before replacing output.
+python3 "$root/tools/package_owned_helper.py" verify --repo "$root" --sdk "$helper_sdk" \
+    --helper "$owned_helper" --title "$title" >/dev/null || fail 'owned helper admission failed'
 
 app=$out/PPSA99995
 rm -rf "$app"
@@ -162,8 +168,11 @@ if [ "$tls" = 1 ]; then
     cp -R "$wine_ps5/prx/licenses/nettle" "$app/LICENSES/nettle"
 fi
 
+python3 "$root/tools/package_owned_helper.py" retain --repo "$root" --sdk "$helper_sdk" \
+    --helper "$owned_helper" --title "$title" --app "$app" >/dev/null || fail 'owned helper retention failed'
+
 # SOURCES.txt: the revision of each part, from the build's own records.
-python3 - "$root" "$wine_ps5/report.json" "$lapy_release" "$app" <<'PY' || exit 2
+python3 - "$root" "$wine_ps5/report.json" "$app/provenance/owned-helper-admission.json" "$app" <<'PY' || exit 2
 import hashlib, json, re, subprocess, sys
 from pathlib import Path
 root, report, lapy, app = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text()), \
@@ -176,8 +185,8 @@ git = lambda *args: subprocess.run(["git", "-C", str(root), *args], capture_outp
 sources = report.get("sources") or {}
 if not report.get("wine_commit"):
     fail("--wine-ps5: report.json names no Wine commit")
-if not lapy.get("tag_name"):
-    fail("--lapy-release: no tag_name")
+if lapy.get("toolchain_reverified") is not True or lapy.get("runtime_validated") is not False:
+    fail("owned helper admission missing")
 vulkan = (app / "win/wine/lib/wine/x86_64-unix/libvulkan.prx").exists()
 if vulkan and not sources.get("ps5_mesa"):
     fail("libvulkan.prx is not a RADV build in report.json; THIRD_PARTY.md covers RADV only")
@@ -196,8 +205,8 @@ lines = [
     f"FreeType {pin('build_wine_ps5.sh', 'FREETYPE_VERSION')}  "
     f"{pin('build_wine_ps5.sh', 'FREETYPE_URL').replace('$FREETYPE_VERSION', pin('build_wine_ps5.sh', 'FREETYPE_VERSION'))}",
     f"  SHA-256 {pin('build_wine_ps5.sh', 'FREETYPE_SHA256')}",
-    f"Lapy JB Daemon (lapy.elf)  {lapy.get('release_url') or 'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon'}"
-    f"  release {lapy['tag_name']}",
+    f"Source-bound Lapy helper  https://github.com/Sleepywalker69/prospero-win  commit {lapy['project']['commit']}"
+    f"  ELF SHA-256 {lapy['elf']['sha256']} (static evidence only; not console validated)",
 ]
 if vulkan:
     lines += [f"RADV (libvulkan.prx)  https://github.com/mpereiraesaa/PS5_Mesa  commit {sources['ps5_mesa']}",

@@ -59,6 +59,55 @@ def capability_pe(machine, payload=b'original inert data'):
     return bytes(data)
 
 
+def owned_evidence(directory, project, repo=ROOT):
+    """Original inert helper bytes with real digest links; no compiler or ELF execution."""
+    helper = package.owned_helper
+    def put(name, data):
+        path = directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data); path.chmod(0o644)
+    def save(name, value): put(name, helper.canonical(value))
+    def source_bytes(name):
+        path = repo / name
+        return path.read_bytes() if path.is_file() else (ROOT / name).read_bytes()
+    files = {name: {'bytes': len(source_bytes(name)), 'sha256': hashlib.sha256(source_bytes(name)).hexdigest()}
+             for name in (helper.DIRECTORY + '/LICENSE', helper.DIRECTORY + '/lapy_elevation_protocol.h',
+                          'native/lapy_elevation_protocol.h')}
+    source = {'schema': 'pw-owned-helper-source/1', 'repository': helper.REPOSITORY,
+              'project': project, 'upstream': {'repository': helper.UPSTREAM_URL, 'commit': helper.UPSTREAM},
+              'files': files, 'protocol_sha256': files['native/lapy_elevation_protocol.h']['sha256'],
+              'license_notes': ['Preserve the root MIT LICENSE copyright and disclaimer verbatim.',
+                  'lapy_elevation_protocol.h carries SPDX LGPL-2.1-or-later; preserve it. Do not describe the entire mixed cohort as MIT-only.']}
+    save('lapy-source.json', source)
+    put('lapy.elf', b'original inert helper bytes')
+    inputs = {'source': source, 'flags': helper.FLAGS, 'llvm': {'original': 'inert tool identity'},
+              'sdk': {'original': 'inert SDK identity'}}
+    identity = hashlib.sha256(helper.canonical(inputs)).hexdigest()
+    put('owned_identity.h', ('#define LAPY_OWNED_ID "' + identity + '"\n').encode())
+    put('lapy.map', b'original inert map')
+    for unit in helper.UNITS: put('obj/' + unit + '.o', ('original inert object ' + unit).encode())
+    build = {'schema': 'pw-owned-helper-build/1', 'project': project, 'build_id': identity,
+             'inputs': inputs, 'source': package.record(directory / 'lapy-source.json'),
+             'elf': package.record(directory / 'lapy.elf'), 'compiled_units': list(helper.UNITS),
+             'objects': {unit: package.record(directory / 'obj' / (unit + '.o')) for unit in helper.UNITS},
+             'identity_header': package.record(directory / 'owned_identity.h'),
+             'link_map': package.record(directory / 'lapy.map'), 'console_validated': False}
+    save('lapy-build.json', build)
+    manifest = {'schema': 'lapy-owned-build/1', 'mode': 'elf-helper', 'target_title': package.APP,
+                'max_requests': 1, 'service': False, 'require_client_result': False, 'console_validated': False,
+                'features': helper.FEATURES, 'protocol_version': 2, 'protocol_bytes': 32, 'build_id': identity,
+                'elf_sha256': package.digest_file(directory / 'lapy.elf'),
+                'source_sha256': package.digest_file(directory / 'lapy-source.json'),
+                'build_sha256': package.digest_file(directory / 'lapy-build.json'),
+                'protocol_sha256': source['protocol_sha256']}
+    save('lapy-manifest.json', manifest)
+    return {**{key: package.record(directory / name) for key, name in
+               zip(('elf', 'manifest', 'source', 'build'), helper.OUTPUTS)},
+            'project': project, 'source_contract_commit': helper.UPSTREAM,
+            'protocol_sha256': source['protocol_sha256'], 'source_to_binary_reproducibility_verified': False,
+            'runtime_validated': False, 'toolchain_reverified': True}
+
+
 class ArchiveControls(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='pw-child-package-controls-')
@@ -129,15 +178,16 @@ class ArchiveControls(unittest.TestCase):
             target = package.LIB + '/x86_64-unix/' + name + '.prx'
             self.put(target, (creation_root/'prx/sce_module'/f'{name}.prx').read_bytes() if name in creation.EXPORTS else ('inert ' + name).encode())
             checked[name] = {'sha256': package.digest_file(self.root / target)}
-        for name in ('lapy-helper-manifest.json', 'lapy-helper-release.json'):
-            self.put('sources/' + name, ('original inert ' + name).encode())
-        worker = {'schema': 'pw-wine-service-child/1', 'project': self.project,
+        helper = owned_evidence(self.root / 'sources/owned-helper', self.project)
+        self.put('PPSA99995/lapy.elf', (self.root / 'sources/owned-helper/lapy.elf').read_bytes())
+        self.put('PPSA99995/LICENSE', (ROOT / 'LICENSE').read_bytes())
+        for name, original in package.HELPER_NOTICES.items():
+            self.put('sources/' + name, (ROOT / original).read_bytes())
+        worker = {'schema': 'pw-wine-service-child/2', 'project': self.project,
                   'runtime': {'creation_abi':1, 'creation_protocol':962, 'abi_check': {'creation':declaration['creation']},
                               'private_dispatch_abi': 1, 'ntdll_sha256': checked['ntdll']['sha256']},
                   'worker': package.record(self.root / 'PPSA99995/native-wine-child.self'),
-                  'helper': {'elf': package.record(self.root / 'PPSA99995/lapy.elf'),
-                             'manifest': package.record(self.root / 'sources/lapy-helper-manifest.json'),
-                             'release': package.record(self.root / 'sources/lapy-helper-release.json')}}
+                  'helper': helper}
         self.json('PPSA99995/native-wine-child-build.json', worker)
         pair = {'project': self.project, 'architecture': 'x64', 'files': {
             n: package.record(self.root / package.FIXTURE / n) for n in ('parent.exe', 'child.exe')}}
@@ -150,8 +200,11 @@ class ArchiveControls(unittest.TestCase):
         self.json('provenance/wine-prx-checks.json', {'schema': 'pw-prx-ci-check/1', 'modules': checked})
         self.json('provenance/wine-build.json', {**creation_report,'wine_commit': package.prefix.WINE, 'patches': [], 'pe': built_pe})
         self.json('provenance/retained-sources.json', {'schema': 'pw-windows-child-retained-sources/1',
-                  'project': self.project, 'inventory': package.prefix.inventory(self.root / 'sources')})
-        self.json('provenance/title.json', {'schema': 'pw-windows-child-title/1', 'project': self.project,
+                  'project': self.project, 'roles': {'lapy': package.helper_role(self.project)},
+                  'inventory': package.prefix.inventory(self.root / 'sources')})
+        self.json('provenance/title.json', {'schema': 'pw-windows-child-title/2', 'project': self.project,
+                  'helper': helper, 'console_execution_verified': False,
+                  'helper_compiled_identity': {'identity': helper['elf']['sha256'], 'addresses': [512]},
                   'fixture_child_sha256': pair['files']['child.exe']['sha256'],
                   'files': {'eboot.bin': {'mode': 0o755, **package.record(self.root / 'PPSA99995/eboot.bin')}}})
         return self.finish()
@@ -532,13 +585,132 @@ class ArchiveControls(unittest.TestCase):
             package.verify_directory(self.root)
 
     def test_rehashed_retained_helper_metadata_is_rejected_by_child_binding(self):
-        for name in ('lapy-helper-manifest.json','lapy-helper-release.json'):
-            self.prepared();self.put('sources/'+name,b'changed metadata')
+        for name in ('lapy-manifest.json', 'lapy-source.json', 'lapy-build.json'):
+            self.prepared();self.put('sources/owned-helper/'+name,b'changed metadata')
             sources=package.read_json(self.root/'provenance/retained-sources.json')
             sources['inventory']=package.prefix.inventory(self.root/'sources')
             self.json('provenance/retained-sources.json',sources);self.finish()
             with self.subTest(name=name),self.assertRaisesRegex(ValueError,'retained helper metadata differs'):
                 package.verify_directory(self.root)
+
+    def refresh_source_inventory(self):
+        sources = package.read_json(self.root / 'provenance/retained-sources.json')
+        sources['inventory'] = package.prefix.inventory(self.root / 'sources')
+        self.json('provenance/retained-sources.json', sources)
+        self.finish()
+
+    def rebind_helper_metadata(self):
+        """Rehash every outer declaration; contract checks must still reject bad evidence."""
+        directory = self.root / 'sources/owned-helper'
+        source = package.read_json(directory / 'lapy-source.json')
+        build = package.read_json(directory / 'lapy-build.json')
+        manifest = package.read_json(directory / 'lapy-manifest.json')
+        build['source'] = package.record(directory / 'lapy-source.json')
+        build['inputs']['source'] = source
+        build['build_id'] = hashlib.sha256(package.owned_helper.canonical(build['inputs'])).hexdigest()
+        (directory / 'owned_identity.h').write_text('#define LAPY_OWNED_ID "' + build['build_id'] + '"\n')
+        build['identity_header'] = package.record(directory / 'owned_identity.h')
+        (directory / 'lapy-build.json').write_bytes(package.owned_helper.canonical(build))
+        manifest.update(build_id=build['build_id'], elf_sha256=package.digest_file(directory / 'lapy.elf'),
+                        source_sha256=package.digest_file(directory / 'lapy-source.json'),
+                        build_sha256=package.digest_file(directory / 'lapy-build.json'))
+        (directory / 'lapy-manifest.json').write_bytes(package.owned_helper.canonical(manifest))
+        worker = package.read_json(self.root / 'PPSA99995/native-wine-child-build.json')
+        worker['helper'].update({key: package.record(directory / name) for key, name in
+                                zip(('elf', 'manifest', 'source', 'build'), package.owned_helper.OUTPUTS)})
+        self.json('PPSA99995/native-wine-child-build.json', worker)
+        title = package.read_json(self.root / 'provenance/title.json')
+        title['helper'] = worker['helper']
+        self.json('provenance/title.json', title)
+        self.refresh_source_inventory()
+
+    def test_legacy_and_mixed_worker_title_schemas_are_rejected(self):
+        for name, schema in [('PPSA99995/native-wine-child-build.json', 'pw-wine-service-child/1'),
+                             ('provenance/title.json', 'pw-windows-child-title/1')]:
+            self.prepared()
+            value = package.read_json(self.root / name); value['schema'] = schema
+            self.json(name, value); self.finish()
+            with self.subTest(schema=schema), self.assertRaises(ValueError): package.verify_directory(self.root)
+
+    def test_legacy_helper_release_role_or_metadata_is_rejected(self):
+        self.prepared()
+        sources = package.read_json(self.root / 'provenance/retained-sources.json')
+        sources['roles']['lapy'].update(kind='release-record', revision='v-legacy', source_commit_verified=False)
+        self.json('provenance/retained-sources.json', sources); self.finish()
+        with self.assertRaisesRegex(ValueError, 'helper source role'): package.verify_directory(self.root)
+        self.prepared(); self.put('sources/lapy-helper-release.json', b'legacy release')
+        self.refresh_source_inventory()
+        with self.assertRaisesRegex(ValueError, 'legacy helper'): package.verify_directory(self.root)
+
+    def test_source_bound_helper_flags_and_project_cannot_be_rehashed(self):
+        for key, value in [('runtime_validated', True), ('toolchain_reverified', False),
+                           ('source_to_binary_reproducibility_verified', True), ('source_contract_commit', '0'*40),
+                           ('project', {'commit': '0'*40, 'tree': '0'*40}), ('release', {'sha256': '0'*64})]:
+            self.prepared()
+            worker = package.read_json(self.root / 'PPSA99995/native-wine-child-build.json')
+            worker['helper'][key] = value
+            self.json('PPSA99995/native-wine-child-build.json', worker); self.finish()
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'source-bound helper contract'):
+                package.verify_directory(self.root)
+
+    def test_rehashed_old_protocol_and_false_runtime_manifest_are_rejected(self):
+        for key, value in [('protocol_version', 1), ('protocol_bytes', 24), ('max_requests', True),
+                           ('service', True), ('features', ['root_layout_probe_retry']), ('console_validated', True)]:
+            self.prepared()
+            path = self.root / 'sources/owned-helper/lapy-manifest.json'
+            manifest = package.read_json(path); manifest[key] = value
+            path.write_bytes(package.owned_helper.canonical(manifest)); self.rebind_helper_metadata()
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'manifest contract'):
+                package.verify_directory(self.root)
+
+    def test_rehashed_source_project_protocol_and_licensing_are_rejected(self):
+        for key, value in [('project', {'commit': '0'*40, 'tree': '0'*40}), ('protocol_sha256', '0'*64),
+                           ('license_notes', ['MIT only']), ('schema', 'legacy-helper-source/1')]:
+            self.prepared()
+            path = self.root / 'sources/owned-helper/lapy-source.json'
+            source = package.read_json(path); source[key] = value
+            path.write_bytes(package.owned_helper.canonical(source)); self.rebind_helper_metadata()
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'source/protocol/licensing'):
+                package.verify_directory(self.root)
+
+    def test_rehashed_build_project_units_flags_and_execution_are_rejected(self):
+        mutations = [lambda value: value.update(project={'commit': '0'*40, 'tree': '0'*40}),
+                     lambda value: value['compiled_units'].pop(), lambda value: value.update(console_validated=True),
+                     lambda value: value['inputs']['flags'].append('-DUNREVIEWED=1')]
+        for mutate in mutations:
+            self.prepared()
+            path = self.root / 'sources/owned-helper/lapy-build.json'
+            build = package.read_json(path); mutate(build)
+            path.write_bytes(package.owned_helper.canonical(build)); self.rebind_helper_metadata()
+            with self.assertRaisesRegex(ValueError, 'build/object identity'): package.verify_directory(self.root)
+
+    def test_rehashed_missing_extra_or_changed_helper_evidence_is_rejected(self):
+        for name in ('obj/' + package.owned_helper.UNITS[0] + '.o', 'lapy.map', 'owned_identity.h'):
+            for missing in (False, True):
+                self.prepared(); path = self.root / 'sources/owned-helper' / name
+                if missing: path.unlink()
+                else: path.write_bytes(b'changed retained evidence')
+                self.refresh_source_inventory()
+                with self.subTest(name=name, missing=missing), self.assertRaises(ValueError):
+                    package.verify_directory(self.root)
+        self.prepared(); self.put('sources/owned-helper/build.log', b'untracked extra evidence')
+        self.refresh_source_inventory()
+        with self.assertRaisesRegex(ValueError, 'evidence files differ'): package.verify_directory(self.root)
+
+    def test_rehashed_helper_license_notice_is_rejected(self):
+        for name in package.HELPER_NOTICES:
+            self.prepared(); self.put('sources/' + name, b'changed license notice'); self.refresh_source_inventory()
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'helper (notice|LGPL)'):
+                package.verify_directory(self.root)
+
+    def test_title_helper_binding_identity_and_console_claim_are_rejected(self):
+        for key, value in [('helper', {}), ('console_execution_verified', True),
+                           ('helper_compiled_identity', {'identity': '0'*64, 'addresses': [512]})]:
+            self.prepared()
+            title = package.read_json(self.root / 'provenance/title.json'); title[key] = value
+            self.json('provenance/title.json', title); self.finish()
+            with self.subTest(key=key), self.assertRaises(ValueError): package.verify_directory(self.root)
+
 
     def test_rehashed_title_bound_to_another_fixture_is_rejected(self):
         self.prepared()
@@ -598,23 +770,34 @@ class SourceRetentionFlow(unittest.TestCase):
         repo = self.paths['repo']
         write(repo / 'tools/build_wine_ps5.sh', ('MODULE_EXPORTS_COMMIT=' + self.foundation +
             '\nFREETYPE_VERSION=1\nFREETYPE_URL=https://example.invalid/freetype\nFREETYPE_SHA256=' + package.digest_file(ft) + '\n').encode())
-        write(repo / 'tools/build_native.sh', ('pin=' + self.title + '\nlapy_release=v-test\nlapy_elf_sha256=' + 'b'*64 + '\n').encode())
+        write(repo / 'tools/build_native.sh', ('pin=' + self.title + '\n').encode())
         for name in ('MPL-2.0.txt', 'Lapy-MIT.txt'): write(repo / 'LICENSES' / name, b'Original inert notice')
+        for original in package.HELPER_NOTICES.values():
+            write(repo / original, (ROOT / original).read_bytes())
+        write(repo / 'native/lapy_elevation_protocol.h', (ROOT / 'native/lapy_elevation_protocol.h').read_bytes())
         commit('repo')
+        self.helper = owned_evidence(self.paths['title_build'] / 'owned-helper', package.prefix.project(repo), repo)
         wine_archive = self.base / 'wine.tar.gz'
         wine_archive.write_bytes(gzip.compress(subprocess.check_output(['git', '-C', str(self.paths['wine_source']), 'archive', self.wine]), mtime=0))
         self.paths.update(wine_archive=wine_archive, sdk_source_archive=sdk, freetype_archive=ft, zlib_archive=zlib)
         write(self.paths['wine_work'] / 'report.json', package.json_bytes({'wine_commit': self.wine,
               'sources': {'prx_foundation': self.foundation}, 'tls': {'build': tls}}))
-        write(self.paths['title_build'] / 'lapy-helper-release.json', package.json_bytes({'tag_name': 'v-test',
-              'repository': 'mpereiraesaa/PS5-Lapy-JB-Daemon',
-              'release_url': 'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/v-test'}))
-        write(self.paths['title_build'] / 'lapy-helper-manifest.json', package.json_bytes({'elf_sha256': 'b'*64}))
         self.config = {'schema': 'pw-windows-child-source-inputs/1', 'paths': {k: str(v) for k,v in self.paths.items()}}
         self.sdk_record = {'commit': 'a'*40, 'sha256': package.digest_file(sdk)}
         self.sdk_patch = patch('check_native_suite.source_archive', return_value=self.sdk_record)
         self.sdk_patch.start(); self.addCleanup(self.sdk_patch.stop)
-        tls_patch = patch.object(package.prefix, 'load_tool', return_value=SimpleNamespace(verify=lambda root: self.tls))
+        def load_tool(root, name):
+            if name == 'tls_manifest': return SimpleNamespace(verify=lambda root: self.tls)
+            self.assertEqual(name, 'build_owned_helper')
+            def validate(directory, actual_repo, project, sdk):
+                self.assertEqual(actual_repo, self.paths['repo'])
+                self.assertEqual(project, self.helper['project'])
+                self.assertEqual(sdk, self.paths['title_foundation'] / '.deps/native/ps5-payload-sdk')
+                for key, leaf in zip(('elf', 'manifest', 'source', 'build'), package.owned_helper.OUTPUTS):
+                    self.assertEqual(package.record(directory / leaf), self.helper[key])
+                return copy.deepcopy(self.helper)
+            return SimpleNamespace(validate_owned_helper=validate)
+        tls_patch = patch.object(package.prefix, 'load_tool', side_effect=load_tool)
         tls_patch.start(); self.addCleanup(tls_patch.stop)
         wine_patch = patch.object(package.prefix, 'WINE', self.wine); wine_patch.start(); self.addCleanup(wine_patch.stop)
 
@@ -624,7 +807,8 @@ class SourceRetentionFlow(unittest.TestCase):
         self.assertEqual(result, package.read_json(report))
         self.assertEqual(len(result['roles']), 11)
         self.assertEqual(result['inventory'], package.prefix.inventory(out))
-        service = {'title_foundation': self.title, 'converter_foundation': self.title, 'prx_foundation': self.foundation}
+        service = {'title_foundation': self.title, 'converter_foundation': self.title,
+                   'prx_foundation': self.foundation, 'helper': self.helper}
         self.assertEqual(package.retained_sources(self.paths['repo'], out, report, package.prefix.project(self.paths['repo']),
             self.paths['wine_archive'], service, self.paths['title_foundation'] / '.deps/native/ps5-payload-sdk',
             self.paths['foundation'], self.paths['wine_work']), result)
@@ -673,6 +857,32 @@ class SourceRetentionFlow(unittest.TestCase):
         self.assertFalse((self.paths['tls_work'] / 'new-output').exists())
         missing = self.paths['wine_archive']; missing.unlink()
         with self.assertRaises(FileNotFoundError): package.retain_sources(self.config, self.base / 'out', self.base / 'report')
+
+    def test_retention_replays_sdk_helper_and_refuses_mixed_child_or_notices(self):
+        out, report = self.base / 'retained-sources', self.base / 'retained-sources.json'
+        result = package.retain_sources(self.config, out, report)
+        self.assertEqual(result['roles']['lapy'], package.helper_role(self.helper['project']))
+        self.assertEqual(set(package.helper_inventory(out / 'owned-helper')),
+                         {'.', 'obj', *package.HELPER_FILES})
+        service = {'title_foundation': self.title, 'converter_foundation': self.title,
+                   'prx_foundation': self.foundation, 'helper': {**self.helper, 'protocol_sha256': '0'*64}}
+        args = (self.paths['repo'], out, report, self.helper['project'], self.paths['wine_archive'], service,
+                self.paths['title_foundation'] / '.deps/native/ps5-payload-sdk', self.paths['foundation'],
+                self.paths['wine_work'])
+        with self.assertRaisesRegex(ValueError, 'source/child cohort'): package.retained_sources(*args)
+        service['helper'] = self.helper
+        (out / 'notices/lapy/Lapy-MIT.txt').write_bytes(b'changed notice')
+        result['inventory'] = package.prefix.inventory(out); report.write_bytes(package.json_bytes(result))
+        with self.assertRaisesRegex(ValueError, 'notice differs'): package.retained_sources(*args)
+
+    def test_retention_rejects_legacy_title_metadata_and_incomplete_evidence(self):
+        legacy = self.paths['title_build'] / 'lapy-helper-release.json'; legacy.write_bytes(b'legacy release')
+        with self.assertRaisesRegex(ValueError, 'legacy helper'):
+            package.retain_sources(self.config, self.base / 'retained-legacy', self.base / 'legacy-report.json')
+        legacy.unlink()
+        (self.paths['title_build'] / 'owned-helper/lapy.map').unlink()
+        with self.assertRaisesRegex(ValueError, 'evidence files differ'):
+            package.retain_sources(self.config, self.base / 'retained-incomplete', self.base / 'incomplete-report.json')
 
 
 
@@ -750,10 +960,12 @@ class FullAssembleControls(unittest.TestCase):
         for n in ('title','service_work'):
             self.put(self.p[n] / 'native-wine-child.self', (self.seed / 'PPSA99995/native-wine-child.self').read_bytes(), 0o755)
             self.save(self.p[n] / 'native-wine-child-build.json', self.service)
-        self.title = {'schema':'pw-windows-child-title/1','project':self.project,
+        self.title = {'schema':'pw-windows-child-title/2','project':self.project,
             'fixture_child_sha256':self.pair['files']['child.exe']['sha256'],
             'service_manifest_sha256':package.digest_file(self.p['service_work'] / 'native-wine-child-build.json'),
             'runtime':self.service['runtime'],'compiler':self.compiler,'console_execution_verified':False,
+            'helper':self.service['helper'],
+            'helper_compiled_identity':{'identity':self.service['helper']['elf']['sha256'],'addresses':[512]},
             'files':package.title_files(package.prefix.inventory(self.p['title']))}
         self.save(self.p['title_report'],self.title)
         if battle:
@@ -794,8 +1006,13 @@ class FullAssembleControls(unittest.TestCase):
             notice='notices/'+name+'/LICENSE';self.put(self.p['sources_root']/notice,b'Original synthetic notice')
             roles[name]={'path':path,'revision':revisions.get(name,'original-test-revision'),
                          'url':'https://example.invalid/original-inert-test','notices':[notice]}
-        for name in ('lapy-helper-manifest.json','lapy-helper-release.json'):
-            self.put(self.p['sources_root']/name,(self.seed/'sources'/name).read_bytes())
+        self.materialize_inventory(self.p['sources_root'] / 'owned-helper',
+            package.prefix.inventory(self.seed / 'sources/owned-helper'), self.seed / 'sources/owned-helper')
+        for name, original in package.HELPER_NOTICES.items():
+            notice_data = (self.seed / 'sources' / name).read_bytes()
+            self.put(self.p['sources_root'] / name, notice_data)
+            self.put(self.p['repo'] / original, notice_data)
+        roles['lapy'] = package.helper_role(self.project)
         self.put(self.p['wine_archive'],data);self.put(self.p['sdk_source_archive'],data)
         self.sdk_identity={'commit':'5'*40,'tree':'6'*40,'sha256':package.digest_file(self.p['sdk_source_archive'])}
         self.sources={'schema':'pw-windows-child-retained-sources/1','project':self.project,'roles':roles,
@@ -819,7 +1036,8 @@ class FullAssembleControls(unittest.TestCase):
         prx_mock=SimpleNamespace(MODULES=MODULES,PE=PE,validate=lambda *a,**kw:copy.deepcopy(self.checked))
         def load_tool(root,name):
             self.assertEqual(root,self.p['repo'])
-            return {'check_private_dispatch_abi':abi_mock,'check_wine_prx_build':prx_mock}[name]
+            return {'check_private_dispatch_abi':abi_mock,'check_wine_prx_build':prx_mock,
+                    'build_owned_helper':SimpleNamespace(validate_owned_helper=lambda *args: copy.deepcopy(self.service['helper']))}[name]
         def git(root,*args):
             if args[:2]==('rev-parse','HEAD'):
                 return self.service['title_foundation'] if root==self.title_foundation else self.service['prx_foundation']

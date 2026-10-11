@@ -647,7 +647,9 @@ jobs:
           cp -a dist/PPSA99995 "$stage/"
           cp LICENSE NOTICE.md LICENSING.md THIRD_PARTY.md "$stage/"
           cp -a LICENSES "$stage/"
-          cp build/native/lapy-helper-release.json build/native/lapy-helper-manifest.json "$stage/provenance/"
+          cp -a build/native/owned-helper "$stage/provenance/owned-helper"
+          cp native/owned_helper/LICENSE "$stage/provenance/owned-helper/UPSTREAM-LICENSE"
+          cp native/owned_helper/lapy_elevation_protocol.h "$stage/provenance/owned-helper/PROTOCOL-LICENSE.h"
           cp build/native/PW_DYNAMIC_IMPORTS.txt "$stage/provenance/"
           cp tools/build_native.sh "$stage/provenance/"
           git archive HEAD | gzip -n > "$stage/sources/prospero-win.tar.gz"
@@ -664,7 +666,7 @@ jobs:
             printf 'Public SDK: https://github.com/ps5-payload-dev/sdk/releases/tag/v0.42\n'
             printf 'SDK source: https://github.com/ps5-payload-dev/sdk/tree/v0.42\n'
             printf 'Dependency URLs and hashes: provenance/setup-native-dependencies.sh\n'
-            printf 'Lapy source and artifact identity: provenance/lapy-helper-release.json\n'
+            printf 'Lapy source and artifact identity: provenance/owned-helper/lapy-source.json and lapy-build.json\n'
           } > "$stage/BUILD-INFO.txt"
           (cd "$stage" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
           # tar preserves executable bits that artifact ZIP extraction does not.

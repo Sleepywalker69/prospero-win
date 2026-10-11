@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,6 +147,38 @@ class NativeSuiteTests(unittest.TestCase):
         self.assertEqual(check.embedded_image(image(b"abcWORKERxyz"), b"WORKER")["address"], 0x1003)
         for value in (image(b"WORKERWORKER"), image(b"WORKER", 6), image(b"missing")):
             with self.assertRaises(ValueError): check.embedded_image(value, b"WORKER")
+
+    def test_source_bound_helper_admission_and_packaged_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); build = root / 'build'; app = root / 'app'
+            build.mkdir(); app.mkdir(); (app / 'lapy.elf').write_bytes(b'inert actual helper')
+            project = {'commit':'a'*40,'tree':'b'*40}; sdk = root / 'sdk'
+            admitted = {'elf':check.owned_helper.record(app / 'lapy.elf'), 'project':project,
+                        'runtime_validated':False,'toolchain_reverified':True}
+            with patch.object(check.owned_helper,'validate_owned_helper',return_value=admitted) as validator:
+                self.assertEqual(check.helper_input(build,app,root,project,sdk),admitted)
+                validator.assert_called_once_with(build / 'owned-helper',root,project,sdk)
+                for name in ('lapy-helper-release.json','lapy-helper-manifest.json'):
+                    (build / name).write_text('{}')
+                    with self.assertRaisesRegex(ValueError,'legacy'):
+                        check.helper_input(build,app,root,project,sdk)
+                    (build / name).unlink()
+                (app / 'lapy.elf').write_bytes(b'old release')
+                with self.assertRaisesRegex(ValueError,'actual ELF'):
+                    check.helper_input(build,app,root,project,sdk)
+            for reason in ('helper/project cohort differs','helper output digest differs',
+                           'helper lacks required one-shot cancellation contract'):
+                with patch.object(check.owned_helper,'validate_owned_helper',side_effect=ValueError(reason)):
+                    with self.assertRaisesRegex(ValueError,reason):
+                        check.helper_input(build,app,root,project,sdk)
+
+    def test_suite_rechecks_source_helper_and_compiled_digest(self):
+        source = Path(check.__file__).read_text()
+        self.assertNotIn('LAPY_SHA256', source)
+        self.assertIn('"schema": "pw-native-probe-suite/2"', source)
+        self.assertIn('compiled_identity(recovered_title, helper["elf"]["sha256"])', source)
+        self.assertEqual(source.count('helper_input(build, app, ROOT, project, sdk)'), 2)
+        self.assertIn('"console_execution_verified": False', source)
 
     def test_exact_seven_roles_modes_and_changed_identity(self):
         with tempfile.TemporaryDirectory() as directory:

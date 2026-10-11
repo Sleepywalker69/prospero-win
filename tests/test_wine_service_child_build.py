@@ -71,38 +71,83 @@ class WineServiceChildBuild(unittest.TestCase):
                      'native/pw_sha256.h'):
             self.assertIn(name, build.TITLE_USER_SOURCES)
 
-    def test_helper_inputs_bind_same_title_pin_manifest_and_retained_bytes(self):
+    def test_helper_inputs_bind_source_producer_and_reject_old_cohorts(self):
+        import importlib.util
+        import build_owned_helper as helper
+        spec = importlib.util.spec_from_file_location('owned_fixture', ROOT / 'tests/test_owned_helper.py')
+        fixture_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
+        fixture = fixture_module.Admission(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        sdk = fixture.repo.parent / 'sdk'; sdk.mkdir()
+        fixture.build['sdk_path'] = str(sdk)
+        fixture.build['command_paths']['SDK'] = str(sdk)
+        for command in fixture.build['commands']:
+            command['argv'] = [v.replace('/inert-sdk', str(sdk)) for v in command['argv']]
+        fixture.rebind()
+        args = types.SimpleNamespace(helper_directory=fixture.out)
+        with patch.object(helper, 'producer_llvm_identity', return_value=fixture.host_llvm), \
+             patch.object(helper, 'sdk_record', return_value=fixture.sdk), \
+             patch.object(helper, 'inspect_elf', return_value=fixture.build['inspection']):
+            expected = build.helper_inputs(args, fixture.repo, fixture.project, sdk)
+            self.assertTrue(expected['toolchain_reverified'])
+            self.assertFalse(expected['runtime_validated'])
+            self.assertEqual(expected['elf'], helper.record(fixture.out / 'lapy.elf'))
+            retained = fixture.repo.parent / 'retained'; retained.mkdir()
+            build.retain_helper(fixture.out, retained / 'owned-helper')
+            self.assertEqual(build.helper_inputs(types.SimpleNamespace(service_work=retained),
+                             fixture.repo, fixture.project, sdk), expected)
+            for field, value in [('protocol_version', 1), ('protocol_sha256', '0'*64),
+                                 ('elf_sha256', '0'*64), ('console_validated', True),
+                                 ('features', ['root_layout_probe_retry'])]:
+                bad = dict(fixture.manifest); bad[field] = value
+                fixture.write('lapy-manifest.json', bad)
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    build.helper_inputs(args, fixture.repo, fixture.project, sdk)
+            fixture.write('lapy-manifest.json', fixture.manifest)
+            with self.assertRaisesRegex(ValueError, 'cohort'):
+                build.helper_inputs(args, fixture.repo, {'commit':'f'*40, 'tree':'e'*40}, sdk)
+            (fixture.out / 'obj' / (helper.UNITS[0] + '.o')).write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'objects'):
+                build.helper_inputs(args, fixture.repo, fixture.project, sdk)
+        legacy = types.SimpleNamespace(helper=fixture.out / 'lapy.elf',
+            helper_manifest=fixture.out / 'lapy-manifest.json', helper_release=fixture.out / 'release.json')
+        with self.assertRaisesRegex(ValueError, 'source-bound'):
+            build.helper_inputs(legacy, fixture.repo, fixture.project, sdk)
+
+    def test_native_build_uses_verified_actual_helper_before_child_and_title(self):
+        script = (ROOT / 'tools/build_native.sh').read_text()
+        producer = script.index('tools/build_owned_helper.py" build')
+        validator = script.index('record = validate_owned_helper')
+        macro = script.index('common=(-DPW_LAPY_HELPER_SHA256')
+        child = script.index('tools/build_wine_service_child.py" --work')
+        self.assertLess(producer, validator); self.assertLess(validator, macro); self.assertLess(macro, child)
+        self.assertIn('--helper-directory "$build/owned-helper"', script)
+        self.assertNotIn('fetch_lapy_helper.py', script)
+        self.assertNotIn('43fab6d8', script)
+        self.assertIn("print(record['elf']['sha256'])", script)
+        source = Path(build.__file__).read_text()
+        self.assertIn("'pw-wine-service-child/2'", source)
+        self.assertNotIn("'pw-wine-service-child/1'", source)
+        self.assertNotIn('HELPER_SHA =', source)
+        self.assertIn("'console_execution_verified': False", source)
+
+    def test_retained_child_refuses_legacy_and_mixed_manifest_before_elf_inspection(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);(root/'tools').mkdir();(root/'native').mkdir();work=root/'child';work.mkdir()
-            (root/'native/lapy_elevation_protocol.h').write_bytes(b'original test protocol')
-            elf=b'\x7fELF'+b'original inert helper';digest=hashlib.sha256(elf).hexdigest()
-            script='lapy_release='+build.HELPER_RELEASE+'\nlapy_elf_sha256='+digest+'\n'
-            (root/'tools/build_native.sh').write_text(script)
-            manifest={'schema':'lapy-owned-build/1','mode':'elf-helper','target_title':'PPSA99995',
-                      'elf_sha256':digest,'protocol_sha256':build.sha(root/'native/lapy_elevation_protocol.h'),
-                      'features':['root_layout_probe_retry'],'max_requests':1,'service':False,'require_client_result':False}
-            release={'repository':'mpereiraesaa/PS5-Lapy-JB-Daemon','tag_name':build.HELPER_RELEASE,
-                     'release_url':'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/'+build.HELPER_RELEASE}
-            (work/'lapy.elf').write_bytes(elf);(work/'lapy-manifest.json').write_text(json.dumps(manifest))
-            (work/'lapy-release.json').write_text(json.dumps(release))
-            args=types.SimpleNamespace(service_work=work)
-            with patch.object(build,'HELPER_SHA',digest):
-                expected=build.helper_inputs(args,root)
-                explicit=types.SimpleNamespace(helper=work/'lapy.elf',helper_manifest=work/'lapy-manifest.json',helper_release=work/'lapy-release.json')
-                self.assertEqual(expected,build.helper_inputs(explicit,root))
-                for key,value in [('target_title','OTHER'),('elf_sha256','0'*64),('protocol_sha256','0'*64),
-                                  ('max_requests',2),('service',True),('require_client_result',True),('features',[])]:
-                    bad=dict(manifest);bad[key]=value;(work/'lapy-manifest.json').write_text(json.dumps(bad))
-                    with self.subTest(field=key),self.assertRaises(ValueError):build.helper_inputs(args,root)
-                (work/'lapy-manifest.json').write_text(json.dumps(manifest))
-                (work/'lapy.elf').write_bytes(elf+b'changed')
-                with self.assertRaises(ValueError):build.helper_inputs(args,root)
-                (work/'lapy.elf').write_bytes(elf)
-                (root/'tools/build_native.sh').write_text(script.replace(digest,'f'*64))
-                with self.assertRaisesRegex(ValueError,'title pin'):build.helper_inputs(args,root)
-                (root/'tools/build_native.sh').write_text(script)
-                bad=dict(release,tag_name='different');(work/'lapy-release.json').write_text(json.dumps(bad))
-                with self.assertRaisesRegex(ValueError,'release identity'):build.helper_inputs(args,root)
+            work = Path(directory)
+            bound = {'project': {'commit': 'a'*40, 'tree': 'b'*40},
+                     'helper': {'elf': {'sha256': 'ab'*32}, 'protocol_sha256': 'cd'*32}}
+            args = types.SimpleNamespace(service_work=work)
+            for schema, mutation in [('pw-wine-service-child/1', None),
+                                     ('pw-wine-service-child/2', 'helper'),
+                                     ('pw-wine-service-child/2', 'project')]:
+                manifest = {'schema': schema, **copy.deepcopy(bound)}
+                if mutation:
+                    manifest[mutation] = {'stale': True}
+                (work / 'native-wine-child-build.json').write_text(json.dumps(manifest))
+                with patch.object(build, 'inputs', return_value=(bound, (work,)*6)), \
+                     patch.object(build, 'Elf') as elf:
+                    with self.assertRaisesRegex(ValueError, 'source/runtime inputs differ'):
+                        build.verify_child(args, None)
+                    elf.assert_not_called()
 
     def test_static_net_input_policy_binds_exact_functions_and_provider(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -149,13 +194,20 @@ class WineServiceChildBuild(unittest.TestCase):
 
     def test_generated_header_requires_both_actual_capabilities(self):
         bound={'runtime': {'creation_abi':1, 'creation_protocol':962, 'private_dispatch_abi':1, 'private_dispatch_wow64_abi':1,
-                           'ntdll_sha256':'b'*64}, 'helper': {'elf': {'sha256': build.HELPER_SHA}}}
+                           'ntdll_sha256':'b'*64}, 'project': {'commit':'a'*40, 'tree':'b'*40}, 'helper': {'elf': {'sha256': 'ab'*32}, 'project': {'commit':'a'*40, 'tree':'b'*40}, 'toolchain_reverified': True, 'runtime_validated': False}}
         text=build.child_header(bound,'a'*40)
         self.assertIn('#define PW_WINE_CHILD_WOW64_ABI 1\n',text)
         self.assertIn('b'*64,text)
-        self.assertIn(build.HELPER_SHA,text)
-        wrong=copy.deepcopy(bound);wrong['helper']['elf']['sha256']='0'*64
+        self.assertIn('ab'*32,text)
+        wrong=copy.deepcopy(bound);wrong['helper']['elf']['sha256']='invalid'
         with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
+        for name, value in [('project', {'commit':'c'*40,'tree':'b'*40}),
+                            ('toolchain_reverified', False), ('runtime_validated', True)]:
+            wrong=copy.deepcopy(bound);wrong['helper'][name]=value
+            with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
+        alternate=copy.deepcopy(bound);alternate['helper']['elf']['sha256']='cd'*32
+        self.assertIn('cd'*32,build.child_header(alternate,'a'*40))
+        self.assertNotEqual(build.identity(bound),build.identity(alternate))
         for name in ('private_dispatch_abi','private_dispatch_wow64_abi','creation_abi','creation_protocol'):
             wrong=copy.deepcopy(bound);wrong['runtime'].pop(name)
             with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)

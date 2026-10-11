@@ -25,6 +25,7 @@ sys.dont_write_bytecode = True
 import prepare_windows_child_prefix as prefix
 import windows_child_user_package as user_package
 import windows_child_network_package as network_package
+import build_owned_helper as owned_helper
 
 SLUG = 'windows-child-fixture-v1'
 APP = 'PPSA99995'
@@ -47,6 +48,11 @@ MAX_FILE = 2 << 30
 MAX_TOTAL = 12 << 30
 MAX_ENTRIES = 20000
 MAX_JSON = 64 << 20
+HELPER_FILES = (*owned_helper.OUTPUTS, 'owned_identity.h', 'lapy.map',
+                *('obj/' + unit + '.o' for unit in owned_helper.UNITS))
+HELPER_NOTICES = {'notices/lapy/Lapy-MIT.txt': owned_helper.DIRECTORY + '/LICENSE',
+                  'notices/lapy/lapy_elevation_protocol.h': owned_helper.DIRECTORY + '/lapy_elevation_protocol.h',
+                  'notices/lapy/LGPL-2.1.txt': 'LICENSE'}
 require = prefix.require
 
 
@@ -535,6 +541,112 @@ def check_network_inputs(paths, project, fixture, abi, host_stamp):
             'reference_inventory': prefix.inventory(paths['network_fixture'])}
 
 
+def helper_role(project):
+    return {'path': 'owned-helper/lapy-source.json', 'revision': project['commit'],
+            'url': 'https://github.com/' + owned_helper.REPOSITORY,
+            'notices': list(HELPER_NOTICES), 'kind': 'source-bound-build-record',
+            'source_contract_commit': owned_helper.UPSTREAM,
+            'source_to_binary_reproducibility_verified': False, 'runtime_validated': False}
+
+
+def helper_inventory(directory):
+    actual = prefix.inventory(directory)
+    require({name for name, item in actual.items() if item['type'] == 'file'} == set(HELPER_FILES) and
+            {name for name, item in actual.items() if item['type'] == 'directory'} == {'.', 'obj'},
+            'owned helper evidence files differ')
+    return actual
+
+
+def check_retained_helper(helper, sources, values, read, project):
+    """Offline cross-binding only; full producer/SDK replay is required at assembly."""
+    require(set(helper) == {'elf', 'manifest', 'source', 'build', 'protocol_sha256',
+                           'source_contract_commit', 'project', 'source_to_binary_reproducibility_verified',
+                           'runtime_validated', 'toolchain_reverified'} and
+            helper.get('project') == project and helper.get('source_contract_commit') == owned_helper.UPSTREAM and
+            helper.get('source_to_binary_reproducibility_verified') is False and
+            helper.get('runtime_validated') is False and helper.get('toolchain_reverified') is True,
+            'source-bound helper contract differs')
+    require(sources.get('roles', {}).get('lapy') == helper_role(project),
+            'retained helper source role differs')
+    require(not any(name.rsplit('/', 1)[-1] in ('lapy-helper-release.json', 'lapy-helper-manifest.json')
+                    for name in values), 'legacy helper metadata refused')
+    base = 'sources/owned-helper/'
+    require({name[len(base):] for name, item in values.items()
+             if name.startswith(base) and item['type'] == 'file'} == set(HELPER_FILES),
+            'owned helper evidence files differ')
+    def evidence(name):
+        item = values.get(base + name, {})
+        require(item.get('type') == 'file', 'retained helper evidence missing: ' + name)
+        return {key: item[key] for key in ('bytes', 'sha256')}
+    for field, name in zip(('elf', 'manifest', 'source', 'build'), owned_helper.OUTPUTS):
+        require(isinstance(helper[field], dict) and set(helper[field]) == {'bytes', 'sha256'} and
+                type(helper[field]['bytes']) is int and helper[field] == evidence(name), 'retained helper metadata differs from child binding: ' + name)
+    def metadata(name):
+        data = read(base + name)
+        value = decode_json(data)
+        def types(item):
+            if isinstance(item, dict):
+                if 'bytes' in item:
+                    require(type(item['bytes']) is int and item['bytes'] > 0,
+                            'retained helper byte count differs')
+                for child in item.values(): types(child)
+            elif isinstance(item, list):
+                for child in item: types(child)
+            else:
+                require(type(item) is not float, 'retained helper floating-point metadata refused')
+        types(value)
+        require(isinstance(value, dict) and data == owned_helper.canonical(value),
+                'retained helper metadata is not canonical')
+        return value
+    source, manifest, build = (metadata(name) for name in
+                               ('lapy-source.json', 'lapy-manifest.json', 'lapy-build.json'))
+    protocol = helper['protocol_sha256']
+    require(isinstance(protocol, str) and re.fullmatch('[0-9a-f]{64}', protocol) and
+            source.get('schema') == 'pw-owned-helper-source/1' and source.get('project') == project and
+            source.get('repository') == owned_helper.REPOSITORY and
+            source.get('upstream') == {'repository': owned_helper.UPSTREAM_URL, 'commit': owned_helper.UPSTREAM} and
+            source.get('protocol_sha256') == protocol and
+            source.get('files', {}).get('native/lapy_elevation_protocol.h', {}).get('sha256') == protocol and
+            source['files'].get(owned_helper.DIRECTORY + '/lapy_elevation_protocol.h') ==
+                source['files']['native/lapy_elevation_protocol.h'] and
+            source.get('license_notes') == [
+                'Preserve the root MIT LICENSE copyright and disclaimer verbatim.',
+                'lapy_elevation_protocol.h carries SPDX LGPL-2.1-or-later; preserve it. Do not describe the entire mixed cohort as MIT-only.'],
+            'retained helper source/protocol/licensing differs')
+    for name, original in HELPER_NOTICES.items():
+        entry = values.get('sources/' + name, {})
+        require(entry.get('type') == 'file', 'retained helper notice missing')
+        if original in source['files']:
+            require({key: entry[key] for key in ('bytes', 'sha256')} == source['files'][original],
+                    'retained helper notice differs from source')
+        elif original == 'LICENSE':
+            require({key: entry[key] for key in ('bytes', 'sha256')} ==
+                    {key: values.get(APP + '/LICENSE', {}).get(key) for key in ('bytes', 'sha256')},
+                    'retained helper LGPL text differs from project license')
+    require(set(manifest) == owned_helper.MANIFEST_KEYS and
+            manifest.get('schema') == 'lapy-owned-build/1' and manifest.get('mode') == 'elf-helper' and
+            manifest.get('target_title') == APP and manifest.get('max_requests') == 1 and
+            type(manifest['max_requests']) is int and manifest.get('service') is False and
+            manifest.get('require_client_result') is False and manifest.get('console_validated') is False and
+            manifest.get('features') == owned_helper.FEATURES and manifest.get('protocol_version') == 2 and
+            type(manifest['protocol_version']) is int and manifest.get('protocol_bytes') == 32 and
+            type(manifest['protocol_bytes']) is int and manifest.get('protocol_sha256') == protocol and
+            all(manifest.get(field + '_sha256') == helper[field]['sha256'] for field in ('elf', 'source', 'build')),
+            'retained helper manifest contract differs')
+    require(build.get('schema') == 'pw-owned-helper-build/1' and build.get('project') == project and
+            build.get('console_validated') is False and build.get('elf') == helper['elf'] and
+            build.get('source') == helper['source'] and build.get('inputs', {}).get('source') == source and
+            build['inputs'].get('flags') == owned_helper.FLAGS and
+            build.get('build_id') == hashlib.sha256(owned_helper.canonical(build['inputs'])).hexdigest() ==
+                manifest.get('build_id') and build.get('compiled_units') == list(owned_helper.UNITS) and
+            set(build.get('objects', {})) == set(owned_helper.UNITS) and
+            all(build['objects'][unit] == evidence('obj/' + unit + '.o') for unit in owned_helper.UNITS),
+            'retained helper build/object identity differs')
+    require(build.get('identity_header') == evidence('owned_identity.h') and
+            read(base + 'owned_identity.h') == ('#define LAPY_OWNED_ID "' + build['build_id'] + '"\n').encode() and
+            build.get('link_map') == evidence('lapy.map'), 'retained helper identity/map differs')
+
+
 def validate_manifest(manifest, values, read):
     require(manifest.get('schema') == 'pw-windows-child-fixture/1' and
             manifest.get('fixture_executed') is False and manifest.get('console_validated') is False,
@@ -574,7 +686,7 @@ def validate_manifest(manifest, values, read):
         require(dispatcher.check_image(read(package_pe), anchor, 1) == abi['pe_identity']['modules'][name],
                 'actual packaged dispatcher ABI differs')
     worker = decode_json(read(APP + '/native-wine-child-build.json'))
-    require(worker.get('schema') == 'pw-wine-service-child/1' and worker.get('project') == project,
+    require(worker.get('schema') == 'pw-wine-service-child/2' and worker.get('project') == project,
             'worker/project identity differs')
     require(worker.get('runtime', {}).get('private_dispatch_abi') == 1 and
             worker['runtime'].get('ntdll_sha256') == values[LIB + '/x86_64-unix/ntdll.prx']['sha256'],
@@ -637,15 +749,18 @@ def validate_manifest(manifest, values, read):
     require(sources.get('schema') == 'pw-windows-child-retained-sources/1' and sources.get('project') == project,
             'packaged source provenance differs')
     copied_inventory(values, 'sources', sources['inventory'])
-    for field, name in (('manifest', 'lapy-helper-manifest.json'), ('release', 'lapy-helper-release.json')):
-        require(worker.get('helper', {}).get(field) ==
-                {k: values.get('sources/' + name, {}).get(k) for k in ('bytes', 'sha256')} and
-                values.get('sources/' + name, {}).get('type') == 'file',
-                'retained helper metadata differs from child binding: ' + name)
+    check_retained_helper(worker.get('helper', {}), sources, values, read, project)
     title = decode_json(read('provenance/title.json'))
-    require(title.get('schema') == 'pw-windows-child-title/1' and title.get('project') == project and
-            title.get('fixture_child_sha256') == pair['files']['child.exe']['sha256'],
+    require(title.get('schema') == 'pw-windows-child-title/2' and title.get('project') == project and
+            title.get('fixture_child_sha256') == pair['files']['child.exe']['sha256'] and
+            title.get('helper') == worker['helper'] and title.get('console_execution_verified') is False,
             'packaged title provenance differs')
+    identity = title.get('helper_compiled_identity', {})
+    require(set(identity) == {'identity', 'addresses'} and
+            identity.get('identity') == worker['helper']['elf']['sha256'] and
+            isinstance(identity.get('addresses'), list) and identity['addresses'] and
+            all(type(address) is int and address > 0 for address in identity['addresses']),
+            'title actual helper compiled identity differs')
     require(title.get('user_enabled', False) == manifest.get('user_enabled', False),
             'title USER admission selection differs')
     if manifest.get('user_enabled', False):
@@ -727,7 +842,9 @@ def verify_archive(path):
                 retain = retain or name == user_package.PROFILE or name == 'sources/project.tar.gz' or \
                     name.startswith(user_package.SOURCE_ROOT + '/') or name.startswith(user_package.REFERENCE_ROOT + '/') or \
                     name == network_package.PROFILE or name.startswith(network_package.SOURCE_ROOT + '/') or \
-                    name.startswith(network_package.REFERENCE_ROOT + '/')
+                    name.startswith(network_package.REFERENCE_ROOT + '/') or \
+                    name in ('sources/owned-helper/lapy-source.json', 'sources/owned-helper/lapy-manifest.json',
+                             'sources/owned-helper/lapy-build.json', 'sources/owned-helper/owned_identity.h')
                 if retain:
                     require(item.size <= MAX_JSON, 'oversized inspection input')
                     retained_total += item.size
@@ -766,6 +883,8 @@ def retained_sources(root, source_root, manifest_path, project, wine_archive, se
             'retained sources have another project identity')
     files = prefix.inventory(source_root)
     require(value.get('inventory') == files, 'retained source inventory differs')
+    require(not any(name.rsplit('/', 1)[-1] in ('lapy-helper-release.json', 'lapy-helper-manifest.json')
+                    for name in files), 'legacy helper metadata refused')
     roles = value.get('roles', {})
     required = {'project', 'wine', 'title-foundation', 'prx-foundation', 'sdk', 'freetype',
                 'gnutls', 'nettle', 'zlib', 'ca-bundle', 'lapy'}
@@ -805,6 +924,14 @@ def retained_sources(root, source_root, manifest_path, project, wine_archive, se
     for role, pins, field in (('freetype', script_pins(root / 'tools/build_wine_ps5.sh'), 'FREETYPE_SHA256'),
                               ('zlib', script_pins(foundation / 'tools/setup-native-dependencies.sh'), 'zlib_hash')):
         require(digest_file(source_root / roles[role]['path']) == pins[field], 'retained pinned source changed: ' + role)
+    helper = prefix.load_tool(root, 'build_owned_helper').validate_owned_helper(
+        source_root / 'owned-helper', root, project, sdk)
+    require(helper == service.get('helper') and roles['lapy'] == helper_role(project),
+            'retained helper source/child cohort differs')
+    helper_inventory(source_root / 'owned-helper')
+    for name, original in HELPER_NOTICES.items():
+        require(record(source_root / name) == record(root / original),
+                'retained helper notice differs from admitted source')
     return value
 
 
@@ -948,23 +1075,27 @@ def retain_sources(config, output, report):
     put(out, 'notices/ca-bundle/MPL-2.0.txt', p['repo'] / 'LICENSES/MPL-2.0.txt')
     roles['ca-bundle'] = {'path': 'ca-certificates.crt', 'revision': ca['date'], 'url': ca['url'],
                           'notices': ['notices/ca-bundle/MPL-2.0.txt'], 'kind': 'source-data'}
-    release = read_json(p['title_build'] / 'lapy-helper-release.json')
-    helper = read_json(p['title_build'] / 'lapy-helper-manifest.json')
-    require(release.get('tag_name') == title_pins['lapy_release'] and helper.get('elf_sha256') == title_pins['lapy_elf_sha256']
-            and release.get('repository') == 'mpereiraesaa/PS5-Lapy-JB-Daemon' and
-            release.get('release_url') == 'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/releases/tag/' + title_pins['lapy_release'],
-            'Lapy release provenance differs from accepted title pin')
-    for name in ('lapy-helper-release.json', 'lapy-helper-manifest.json'):
-        put(out, name, p['title_build'] / name)
-    put(out, 'notices/lapy/Lapy-MIT.txt', p['repo'] / 'LICENSES/Lapy-MIT.txt')
-    roles['lapy'] = {'path': 'lapy-helper-release.json', 'revision': release['tag_name'], 'url': release['release_url'],
-                     'notices': ['notices/lapy/Lapy-MIT.txt'], 'kind': 'release-record',
-                     'source_commit_verified': False, 'helper_manifest': 'lapy-helper-manifest.json'}
+    require(not any((p['title_build'] / name).exists() for name in
+                    ('lapy-helper-release.json', 'lapy-helper-manifest.json')), 'legacy helper metadata refused')
+    helper_root = p['title_build'] / 'owned-helper'
+    helper_builder = prefix.load_tool(p['repo'], 'build_owned_helper')
+    sdk = p['title_foundation'] / '.deps/native/ps5-payload-sdk'
+    helper = helper_builder.validate_owned_helper(helper_root, p['repo'], project, sdk)
+    require(helper.get('project') == project and helper.get('toolchain_reverified') is True and
+            helper.get('runtime_validated') is False and
+            helper.get('source_to_binary_reproducibility_verified') is False,
+            'owned helper source/compiler contract differs')
+    copy_tree(out, 'owned-helper', helper_root, expected=helper_inventory(helper_root))
+    for name, original in HELPER_NOTICES.items():
+        put(out, name, p['repo'] / original)
+    roles['lapy'] = helper_role(project)
+    require(helper_builder.validate_owned_helper(out / 'owned-helper', p['repo'], project, sdk) == helper,
+            'owned helper changed during source retention')
     require(prefix.project(p['repo']) == project, 'project changed during source retention')
     normalize_directories(out)
     result = {'schema': 'pw-windows-child-retained-sources/1', 'project': project, 'roles': roles,
               'inventory': prefix.inventory(out), 'sdk_source': sdk_source,
-              'scope': 'retained source archives and notices; Lapy retains the existing exact release record, not an inferred commit'}
+              'scope': 'retained exact project/source archives, mixed-license notices and source-bound helper build evidence; no reproducibility or target-execution claim'}
     prefix.json_out(report, result)
     return result
 
@@ -1029,10 +1160,11 @@ def assemble(config, output):
     require(read_json(wine / 'report.json')['tls']['build']['inputs']['host_llvm'] == service['host_llvm'],
             'runtime TLS and child compiler cohorts differ')
     title = read_json(p['title_report'])
-    require(title.get('schema') == 'pw-windows-child-title/1' and title.get('project') == project and
+    require(title.get('schema') == 'pw-windows-child-title/2' and title.get('project') == project and
             title.get('fixture_child_sha256') == fixture['files']['child.exe']['sha256'] and
             title.get('service_manifest_sha256') == digest_file(p['service_work'] / 'native-wine-child-build.json') and
             title.get('runtime') == service['runtime'] and title.get('compiler') == service['host_llvm'] and
+            title.get('helper') == service.get('helper') and
             title.get('console_execution_verified') is False, 'title/child/compiler cohort differs')
     require(title.get('user_enabled', False) == user_enabled, 'title USER admission selection differs')
     if user_enabled:

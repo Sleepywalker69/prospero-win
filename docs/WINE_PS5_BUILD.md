@@ -966,30 +966,25 @@ actual title hold. PS5 firmware 13.60 startup and the raw fatal operation behind
 the beta5fix1 logs still require console evidence; passing these controls does
 not establish either a target fix or installer progress.
 
-The title build fetches the helper and manifest from one pinned release of
-`mpereiraesaa/PS5-Lapy-JB-Daemon` every time: `lapy_release` in
-`tools/build_native.sh`, with the SHA-256 of its `lapy.elf` beside it
-(`lapy_elf_sha256`). A newer release is not picked up until both are bumped,
-and the build does not use a local cached ELF. The release must include
-`lapy.elf` and `lapy-manifest.json`; the build checks the ELF against the pin
-and the manifest, and the title ID and shared protocol digest, before staging
-it:
+The title build now uses the reviewed same-repository source-bound helper,
+compiled with LLVM 18 and the selected SDK by `tools/build_owned_helper.py`.
+It independently checks source/protocol v2 identity, compile/link/analyzer
+commands, objects, link map, toolchain and actual final ELF bytes. The root and
+full-CRT Wine child bind that verified digest; the build never substitutes an
+old release pin, a downloaded helper, or a placeholder digest.
 
 ~~~sh
 tools/build_native.sh
 ~~~
 
-The helper release is built from the Lapy fork with
-`PS5_PAYLOAD_SDK=<sdk> make owned-helper TARGET_TITLE=PPSA99995`. Upload the
-resulting `lapy.elf` and `manifest.json` (renamed to `lapy-manifest.json`) as
-assets on a published release, then bump `lapy_release` and `lapy_elf_sha256`
-once the helper has run on a console. The native title build stages the
-downloaded helper beside `eboot.bin`; release packaging copies it into the
-application image automatically. If the pinned release lacks either asset or
-has other hashes, the build stops instead of using other bytes.
-It also rejects manifests that do not declare `root_layout_probe_retry`, the
-bounded retry added after a counter-delta probe was obscured by concurrent
-vnode activity.
+The complete helper evidence is retained under `build/native/owned-helper`.
+The dedicated Windows-child packager, native-probe suite verifier and general
+release packager consume this evidence independently. The general packager uses
+`--owned-helper` and `--helper-sdk`. MIT and LGPL per-file notices remain intact.
+These are source/build integrity checks, not console validation or proof that a
+helper process has exited. See [matched cohort admission](matched-child-cohort.md)
+for the required target build, independent static checks, bounded no-reboot
+lifecycle gate and original launcher-child fixture sequence.
 
 ## Starting Wine in the title
 

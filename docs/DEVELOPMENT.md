@@ -199,14 +199,13 @@ tools/build_wine_ps5.sh --check-patches   # validate the Wine patch series
 tools/build_wine_ps5.sh                   # Wine's PRXs, fonts and report.json
 ```
 
-The native-title build downloads the release of
-`mpereiraesaa/PS5-Lapy-JB-Daemon` pinned in `tools/build_native.sh`
-(`lapy_release`) on each run and requires its `lapy.elf` and
-`lapy-manifest.json` assets. It checks the ELF against the pinned SHA-256
-(`lapy_elf_sha256`) and verifies the ELF and protocol digests before
-staging the helper in `dist/PPSA99995`; the manifest must also declare the
-`root_layout_probe_retry` feature. A release without it is rejected, with no
-local stale-helper fallback.
+The native-title build compiles the reviewed `native/owned_helper` source with
+LLVM 18 and the selected SDK, then independently checks its source/protocol,
+commands, objects, toolchain and actual ELF digest. It requires clean committed
+project source and retains the evidence in `build/native/owned-helper`. The root
+and full-CRT child consume the same verified helper bytes; no old release ELF or
+placeholder digest is accepted. See [matched cohort admission](matched-child-cohort.md)
+for the remaining static and no-reboot runtime gates.
 
 `tools/build_native.sh` accepts `PW_OUTPUT_SUFFIX` for an isolated
 build/dist pair, and `PW_WINE64_SCRIPT=1` with `PW_WINE64_SECONDS=<s>` for an
@@ -249,7 +248,8 @@ tools/build_wowprospero.sh             # the 32-bit CPU: wowprospero.dll
 tools/package_release.sh --title dist/PPSA99995 --wine-ps5 .deps/wine-ps5 \
     --host-wine <host Wine install>/usr \
     --cpu-dll <Wine build>/dlls/wowprospero/x86_64-windows/wowprospero.dll \
-    --lapy-release build/native/lapy-helper-release.json \
+    --owned-helper build/native/owned-helper \
+    --helper-sdk .deps/ps5-native-app-boilerplate/.deps/native/ps5-payload-sdk \
     --out release --zip
 ```
 

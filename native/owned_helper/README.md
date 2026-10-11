@@ -14,7 +14,8 @@ must come from successful verification of those actual output bytes.
 
 These records are integrity and source/build receipts, not signatures or proof of
 source-to-binary reproducibility. They confer no console or lifecycle admission.
-A dedicated initial-CANCEL title may use this producer only after its separate
-source/build review. Full Wine fixture migration is not part of this change.
+The dedicated initial-CANCEL title and the ordinary native title/full-CRT Wine
+child build consume this producer through independent source/build admission.
+The full cohort migration is documented in docs/matched-child-cohort.md.
 No target launch is allowed until a version-bound, bounded no-reboot helper exit
 and recovery route is established. HELD and CANCELLED receipts do not prove exit.

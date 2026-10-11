@@ -188,7 +188,7 @@ class EnabledPackageControls(unittest.TestCase):
         for name, data in copies.items(): self.put(network.SOURCE_ROOT + '/' + name, data)
         self.put('sources/project.tar.gz', source_archive(copies))
         sources = self.get('provenance/retained-sources.json')
-        sources['roles'] = {'project': {'path': 'project.tar.gz', 'revision': self.project['commit']}}
+        sources['roles']['project'] = {'path': 'project.tar.gz', 'revision': self.project['commit']}
         sources['inventory'] = prefix.inventory(f.root / 'sources')
         self.put_json('provenance/retained-sources.json', sources)
         # Retain the original two profiles exactly; create only the dedicated fourth scope.

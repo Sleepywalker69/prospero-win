@@ -18,6 +18,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'tools'))
 import build_wine_service_child as b
 import prepare_windows_child_prefix as prefix
+import build_owned_helper as owned_helper
 
 class TitleInputs(unittest.TestCase):
  def setUp(self):
@@ -27,6 +28,7 @@ class TitleInputs(unittest.TestCase):
   self.project={'commit':'a'*40,'tree':'b'*40};self.manifest={'project':self.project};(self.service/'native-wine-child-build.json').write_text(json.dumps(self.manifest))
   self.pair={'project':self.project,'run_id':'123','run_attempt':'2','source_sha256':b.sha(self.root/'tests/fixtures/windows_child_process.c'),'recipe_sha256':b.sha(self.root/'tools/build_windows_child_fixture.ps1'),'files':{n:{'bytes':123,'sha256':'c'*64} for n in ['parent.exe','child.exe']}}
   self.user_pair={'project':self.project,'run_id':'123','run_attempt':'2','files':{'user-parent.exe':{'bytes':234,'sha256':'d'*64,'machine':'AMD64','selector':0},'user-child.exe':{'bytes':235,'sha256':'e'*64,'machine':'AMD64','selector':1}}};(self.user/'user-source.json').write_text(json.dumps(self.user_pair))
+  p=patch.object(owned_helper,'validate_owned_helper',return_value={'elf':{'sha256':'ab'*32}});p.start();self.addCleanup(p.stop)
   self.calls=[]
   def validate(directory,project,root,run,attempt,details=None):
    self.calls.append((directory,project,root,run,attempt));return copy.deepcopy(self.user_pair)
@@ -67,7 +69,7 @@ class TitleInputs(unittest.TestCase):
   for data,flags,enabled in [(b'old\0',4,True),(b'x'+digest.encode()+b'\0',4,True),(digest.encode()+b'\0',6,True),(digest.encode()+b'\0',4,False)]:
    with self.assertRaises(ValueError):b.user_title_identity(image(data,flags),dict(record,user_enabled=enabled),self.user_pair)
  def compile_record(self,enabled=True):
-  wrapper=self.title/'tooling/prospero-clang18';wrapper.write_text('inert compiler wrapper; never executed\n');compiler=['env','PS5_PAYLOAD_SDK='+str(self.sdk),'sh',str(wrapper)];flags=['-O2','-DPW_WINE_CHILD_FIXTURE_MODE=1','-DPW_WINE_USER_PROFILE_ENABLED='+str(int(enabled))];units=[n for n in b.TITLE_USER_SOURCES if n.endswith('.c')]
+  wrapper=self.title/'tooling/prospero-clang18';wrapper.write_text('inert compiler wrapper; never executed\n');compiler=['env','PS5_PAYLOAD_SDK='+str(self.sdk),'sh',str(wrapper)];flags=['-O2','-DPW_LAPY_HELPER_SHA256="'+'ab'*32+'"','-DPW_WINE_CHILD_FIXTURE_MODE=1','-DPW_WINE_USER_PROFILE_ENABLED='+str(int(enabled))];units=[n for n in b.TITLE_USER_SOURCES if n.endswith('.c')]
   for n in units:
    p=self.build/'obj'/(n.replace('/','_')+'.o');p.parent.mkdir(exist_ok=True);p.write_bytes(b'inert object '+n.encode())
   record=b.title_compile_record(self.root,self.build,self.project,compiler,flags,units);(self.build/'wine-child-title-compile.json').write_text(json.dumps(record));return record,wrapper
@@ -84,7 +86,7 @@ class TitleInputs(unittest.TestCase):
  def test_compile_record_rejects_conflicting_flags_and_missing_functions(self):
   record,wrapper=self.compile_record();p=self.build/'wine-child-title-compile.json'
   with patch.object(b,'WRAPPER_SHA',b.sha(wrapper)):
-   for flag in ['-DPW_WINE_USER_PROFILE_ENABLED=0','-UPW_WINE_USER_PROFILE_ENABLED','-include','-D']:
+   for flag in ['-DPW_LAPY_HELPER_SHA256="'+'cd'*32+'"','-UPW_LAPY_HELPER_SHA256','-DPW_WINE_USER_PROFILE_ENABLED=0','-UPW_WINE_USER_PROFILE_ENABLED','-include','-D']:
     wrong=copy.deepcopy(record);wrong['common_flags'].append(flag);p.write_text(json.dumps(wrong))
     with self.assertRaises(ValueError):self.check_compile(True)
    wrong=copy.deepcopy(record);wrong['sources'].pop('native/pw_wine_child_title.c');p.write_text(json.dumps(wrong))

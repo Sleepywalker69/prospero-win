@@ -6,6 +6,7 @@ the PS5 build overrides, and the licences and source revisions it carries."""
 
 from pathlib import Path
 import hashlib
+import os
 import json
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "package_release.sh"
+RUN_ENV = None
 sys.path.insert(0, str(ROOT / "tools"))
 sys.dont_write_bytecode = True
 import tls_manifest
@@ -27,10 +29,11 @@ def write(path: Path, data: str = "x") -> None:
 
 
 def run(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["sh", str(SCRIPT), *args], capture_output=True, text=True)
+    return subprocess.run(["sh", str(SCRIPT), *args], capture_output=True, text=True, env=RUN_ENV)
 
 
 def main() -> int:
+    global RUN_ENV
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         title, ps5, host = root / "title", root / "wine-ps5", root / "usr"
@@ -88,12 +91,65 @@ def main() -> int:
         write(ps5 / "source" / "libs" / "uuid" / "uuid.c", "no licence file")
         write(ps5 / "freetype" / "src" / "LICENSE.TXT", "freetype licences")
         write(ps5 / "freetype" / "src" / "docs" / "FTL.TXT", "FTL")
-        lapy = root / "lapy-helper-release.json"
-        write(lapy, json.dumps({"tag_name": "v9.9.9", "release_url": "https://example.invalid/v9.9.9"}))
+        # Inert target/compiler boundary only. The real package admission,
+        # retention, source/hash checks and shell interface still execute.
+        # Full validator negative controls are in test_owned_helper.py.
+        import build_owned_helper as owned
+        helper_dir = root / 'owned-helper'; helper_dir.mkdir()
+        helper_source = {'files': {name: owned.record(ROOT / name) for name in
+            (owned.DIRECTORY + '/LICENSE', owned.DIRECTORY + '/lapy_elevation_protocol.h',
+             'native/lapy_elevation_protocol.h', 'tools/build_owned_helper.py')}}
+        (helper_dir / 'lapy-source.json').write_bytes(owned.canonical(helper_source))
+        for name in (*owned.OUTPUTS, 'owned_identity.h', 'lapy.map',
+                     *('obj/' + unit + '.o' for unit in owned.UNITS)):
+            if name == 'lapy-source.json': continue
+            write(helper_dir / name, 'helper' if name == 'lapy.elf' else 'inert ' + name)
+        admission = {'elf': owned.record(helper_dir / 'lapy.elf'),
+                     'manifest': owned.record(helper_dir / 'lapy-manifest.json'),
+                     'source': owned.record(helper_dir / 'lapy-source.json'),
+                     'build': owned.record(helper_dir / 'lapy-build.json'),
+                     'project': {'commit':'ab'*20,'tree':'cd'*20},
+                     'toolchain_reverified':True,'runtime_validated':False,
+                     'source_to_binary_reproducibility_verified':False}
+        fixture_receipt = root / 'inert-helper-admission.json'
+        fixture_receipt.write_text(json.dumps({'repo':str(ROOT),'sdk':str(sdk),'admission':admission,
+            'files':{str(p.relative_to(helper_dir)):owned.record(p) for p in helper_dir.rglob('*') if p.is_file()}}))
+        wrappers = root / 'mock-bin'; wrappers.mkdir()
+        wrapper = wrappers / 'python3'
+        wrapper.write_text('#!' + sys.executable + '\n' + r'''import json, os, pathlib, runpy, sys
+if len(sys.argv)>1 and pathlib.Path(sys.argv[1]).name == 'package_owned_helper.py':
+    fixture=json.loads(pathlib.Path(os.environ['PW_TEST_HELPER_FIXTURE']).read_text())
+    sys.path.insert(0,str(pathlib.Path(fixture['repo'])/'tools'))
+    import build_owned_helper as helper
+    def validate(directory,repo,expected_project=None,sdk=None):
+        assert str(repo)==fixture['repo'] and str(sdk)==fixture['sdk']
+        assert expected_project is None
+        for name,record in fixture['files'].items():
+            helper.require(helper.record(directory/name)==record,'inert helper evidence changed')
+        return fixture['admission']
+    helper.validate_owned_helper=validate
+    # This layout test supplies inert title bytes; parser/SELF semantics are
+    # independently covered by test_native_suite and full-CRT builder tests.
+    import native_probe_elf
+    from types import SimpleNamespace
+    def extract(data):
+        helper.require(data==b'eboot','inert title changed')
+        return b'\0'+fixture['admission']['project']['commit'].encode()+b'\0'+fixture['admission']['elf']['sha256'].encode()+b'\0'
+    native_probe_elf.extract_self=extract
+    native_probe_elf.Elf=lambda data:SimpleNamespace(data=data,programs=[(1,4,0,0x1000,0,len(data))],
+        offset=lambda address,size,flags:address-0x1000)
+    sys.argv=sys.argv[1:]
+    runpy.run_path(sys.argv[0],run_name='__main__')
+else:
+    os.execv(sys.executable,[sys.executable,*sys.argv[1:]])
+''')
+        wrapper.chmod(0o755)
+        RUN_ENV={**os.environ,'PATH':str(wrappers)+os.pathsep+os.environ.get('PATH',''),
+                 'PW_TEST_HELPER_FIXTURE':str(fixture_receipt)}
         out = root / "out"
         inputs = ("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
                   "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native),
-                  "--lapy-release", str(lapy))
+                  "--owned-helper", str(helper_dir), "--helper-sdk", str(sdk))
 
         # Experimental ABI declarations are refused before any output change.
         refused = root / "refused"; write(refused / "preserve.txt", "existing operator data")
@@ -133,7 +189,17 @@ def main() -> int:
             ["libgnutls.prx", "libvulkan.prx", "ntdll.prx", "secur32.prx", "win32u.prx", "wow64native.prx"]
         assert (share / "nls" / "locale.nls").exists() and (share / "fonts" / "tahoma.ttf").exists()
         assert (share / "ca-certificates.crt").read_text() == "roots"
-        assert "PPSA99995: 45 files" in result.stdout, result.stdout
+        assert "PPSA99995:" in result.stdout, result.stdout
+        assert (app / "provenance/owned-helper/lapy.elf").read_bytes() == (title / "lapy.elf").read_bytes()
+        assert json.loads((app / "provenance/owned-helper-admission.json").read_text()) == admission
+        for path in helper_dir.rglob('*'):
+            if path.is_file():
+                assert (app / 'provenance/owned-helper' / path.relative_to(helper_dir)).read_bytes() == path.read_bytes()
+        for name in helper_source['files']:
+            assert (app / 'provenance/owned-helper-source' / name).read_bytes() == (ROOT / name).read_bytes()
+        assert (app / "LICENSES/owned-helper/protocol.h").read_bytes() == (ROOT / owned.DIRECTORY / "lapy_elevation_protocol.h").read_bytes()
+        assert (app / "LICENSES/owned-helper/MIT.txt").read_bytes() == (ROOT / owned.DIRECTORY / "LICENSE").read_bytes()
+        assert (app / "LICENSES/owned-helper/LGPL-2.1.txt").read_bytes() == (ROOT / "LICENSE").read_bytes()
         # The licences: the project's own texts verbatim, Wine's and its
         # libraries' from the built source, FreeType's.
         for name in ("LICENSE", "THIRD_PARTY.md"):
@@ -167,7 +233,8 @@ def main() -> int:
                          "FreeType 2.13.3  https://download.savannah.gnu.org/releases/freetype/"
                          "freetype-2.13.3.tar.xz",
                          "SHA-256 0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289",
-                         "https://example.invalid/v9.9.9  release v9.9.9",
+                         "Source-bound Lapy helper  https://github.com/Sleepywalker69/prospero-win  commit " + "ab"*20,
+                         "ELF SHA-256 " + admission["elf"]["sha256"],
                          f"PS5_Mesa  commit {'c' * 40}", f"PS5_Vulkan  commit {'d' * 40}",
                          f"PS5_PayloadSDK  commit {'9' * 40}",
                          "OpenGL  not included",
@@ -191,6 +258,26 @@ def main() -> int:
             assert (app / name).stat().st_mode & 0o777 == 0o755, name
         assert not (app / "sce_sys" / "param.json").stat().st_mode & 0o111
         assert not (lib / "x86_64-windows" / "wowprospero.dll").stat().st_mode & 0o111
+
+        # Legacy interface and mismatched/stale actual helper fail before output mutation.
+        sentinel = app / 'preserve.txt'; sentinel.write_text('preserve')
+        for target in (title / 'lapy.elf', title / 'eboot.bin', helper_dir / 'obj' / (owned.UNITS[0]+'.o')):
+            original=target.read_bytes(); target.write_bytes(original+b'changed')
+            bad=run(*inputs,'--out',str(out)); assert bad.returncode != 0 and 'owned helper' in bad.stderr
+            assert sentinel.read_text() == 'preserve'
+            target.write_bytes(original)
+        fixture_original=fixture_receipt.read_text()
+        for field,value in (('toolchain_reverified',False),('runtime_validated',True),
+                            ('source_to_binary_reproducibility_verified',True)):
+            changed=json.loads(fixture_original);changed['admission'][field]=value
+            fixture_receipt.write_text(json.dumps(changed))
+            bad=run(*inputs,'--out',str(out))
+            assert bad.returncode != 0 and 'owned helper' in bad.stderr
+            assert sentinel.read_text() == 'preserve'
+        fixture_receipt.write_text(fixture_original)
+        bad=run(*inputs,'--lapy-release',str(fixture_receipt),'--out',str(out))
+        assert bad.returncode != 0 and 'unknown argument' in bad.stderr
+        assert sentinel.read_text() == 'preserve'
 
         # A second run replaces the folder rather than merging into it.
         write(app / "stale.txt")
@@ -258,10 +345,10 @@ def main() -> int:
                   "--cpu-dll", str(root / "wowprospero.dll"), "--out", str(out))
         assert bad.returncode == 2 and "--title" in bad.stderr
         bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
-                  "--cpu-dll", str(root / "missing.dll"), "--lapy-release", str(lapy), "--out", str(out))
+                  "--cpu-dll", str(root / "missing.dll"), "--owned-helper", str(helper_dir), "--helper-sdk", str(sdk), "--out", str(out))
         assert bad.returncode == 2 and "--cpu-dll" in bad.stderr
         bad = run(*inputs[:-2], "--out", str(out))
-        assert bad.returncode == 2 and "--lapy-release" in bad.stderr, bad.stderr
+        assert bad.returncode == 2 and "--helper-sdk" in bad.stderr, bad.stderr
         (native / "ps5" / "wow64native.prx").unlink()
         bad = run(*inputs, "--out", str(out))
         assert bad.returncode == 2 and "--native-cpu" in bad.stderr, bad.stderr
