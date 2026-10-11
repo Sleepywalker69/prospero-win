@@ -217,7 +217,7 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         steps = runtime['steps']
         joins = [i for i, step in enumerate(steps)
                  if 'tools/wine_workflow_join.py' in step.get('run', '')
-                 and '--job original-user-x64-reference' not in step.get('run', '')]
+                 and '--job ' not in step.get('run', '')]
         self.assertEqual([steps[i].get('id') for i in joins],
                          ['early-reference-join', 'reference-join'])
         early_index, join_index = joins
@@ -234,7 +234,8 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         host_index = next(i for i, step in enumerate(steps)
                           if '--stage host-runtime --' in step.get('run', ''))
         self.assertLess(target_index, early_index)
-        self.assertEqual(early_index + 2, host_index)
+        self.assertEqual(early_index + 3, host_index)
+        self.assertIn('--job original-network-x64-reference', steps[early_index + 2]['run'])
         self.assertIn('--job original-user-x64-reference', steps[early_index + 1]['run'])
         join_source = (ROOT / 'tools/wine_workflow_join.py').read_text()
         for variable in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_REPOSITORY'):
@@ -273,7 +274,7 @@ class WorkflowPerformanceContracts(unittest.TestCase):
                      if 'tools/wine_workflow_join.py' in step.get('run', '')]
         user_joins = [i for i in all_joins
                       if '--job original-user-x64-reference' in steps[i]['run']]
-        self.assertEqual(len(all_joins), 4)
+        self.assertEqual(len(all_joins), 6)
         self.assertEqual(len(user_joins), 2)
         early, final = user_joins
         for index, output in zip(user_joins, ('early-user-reference-join', 'user-reference-join')):
@@ -287,11 +288,12 @@ class WorkflowPerformanceContracts(unittest.TestCase):
                              '"$RUNNER_TEMP/fixture-evidence/' + output + '.json"')
         host = next(i for i, step in enumerate(steps)
                     if '--stage host-runtime --' in step.get('run', ''))
-        self.assertEqual(early + 1, host)
+        self.assertEqual(early + 2, host)
+        self.assertIn('--job original-network-x64-reference', steps[early + 1]['run'])
         self.assertEqual(steps[early - 1]['id'], 'early-reference-join')
         downloads = [i for i, step in enumerate(steps)
                      if step.get('uses', '').startswith('actions/download-artifact@')]
-        self.assertEqual(len(downloads), 2)
+        self.assertEqual(len(downloads), 3)
         download = steps[final + 1]
         self.assertIn(final + 1, downloads)
         self.assertNotIn('if', download)

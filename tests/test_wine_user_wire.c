@@ -13,7 +13,7 @@ int main(int argc,char **argv)
  T(pw_wine_child_wire_same_session(&f,&got));got.profile=1;T(!pw_wine_child_wire_same_session(&f,&got));got=f;got.machine=0x14c;T(!pw_wine_child_wire_same_session(&f,&got));
  for(unsigned i=0;i<3;i++){uint32_t machine[]={0,0x14c,0xaa64};f.machine=machine[i];T(pw_wine_child_wire_encode(bytes,&f));}
  f=boot();f.profile=3;T(!pw_wine_child_wire_encode(bytes,&f));bytes[132]=0x4c;bytes[133]=1;T(pw_wine_child_wire_decode(&got,bytes));
- for(unsigned p=4;p<8;p++){f=boot();f.profile=p;T(pw_wine_child_wire_encode(bytes,&f));f.profile=3;T(!pw_wine_child_wire_encode(bytes,&f));bytes[128]=(unsigned char)p;T(pw_wine_child_wire_decode(&got,bytes));}
+ for(unsigned p=5;p<8;p++){f=boot();f.profile=p;T(pw_wine_child_wire_encode(bytes,&f));f.profile=3;T(!pw_wine_child_wire_encode(bytes,&f));bytes[128]=(unsigned char)p;T(pw_wine_child_wire_decode(&got,bytes));}
  f=hello();f.profile=3;T(pw_wine_child_wire_encode(bytes,&f));
  f=boot();f.profile=3;reset(f);int descriptors[]={9},fd=-1;rights(descriptors,1);T(receive(PW_WC_BOOTSTRAP,&fd)==PW_WC_RECORD&&fd==9&&!m.closes);pw_wine_child_wire_close(&fd,&r);T(fd==-1&&m.closes==1);
  reset(f);int duplicate[]={9,9};rights(duplicate,2);T(receive(PW_WC_BOOTSTRAP,&fd)<0&&m.closes==1&&r.ownership_uncertain);

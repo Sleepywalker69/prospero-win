@@ -34,12 +34,12 @@ int main(int argc,char **argv)
  T(!strcmp(b.config.prefix,uprefix)&&!strcmp(b.argv[1],uimage)&&b.config.extra_env_count==15);T(m.bindings==1&&m.cwds==1&&m.sinks==1);
  T(!pw_wine_child_bootstrap_start(&b,&io,&ops)&&b.started&&m.threads==1);m.entry(m.arg);T(pw_wine_child_bootstrap_start(&b,&io,&ops));
  for(int n=1;n<=18;n++){user_reset();m.env_fail=n;T(prepare()&&!m.loads&&!m.threads);}
- user_reset();m.machine=0x14c;T(prepare()&&!m.envs&&!m.loads);user_reset();m.profile=4;T(prepare()&&!m.envs&&!m.loads);
+ user_reset();m.machine=0x14c;T(prepare()&&!m.envs&&!m.loads);user_reset();m.profile=5;T(prepare()&&!m.envs&&!m.loads);
  user_reset();path_error=1;T(prepare()&&!m.envs&&!m.loads);user_reset();m.wrong_path=1;T(prepare()&&!m.envs&&!m.loads);
  user_reset();m.cancel=1;T(prepare()&&!m.envs&&!m.loads);user_reset();late_env=1;T(prepare()&&!m.loads&&!m.threads&&io.stage_end==500);
  user_reset();strcpy(module.names[9],"translated-capability-not-required");T(!prepare());
  for(unsigned i=0;i<EXPORTS;i++){if(i==9)continue;user_reset();strcpy(module.names[i],"missing");T(prepare()&&!m.threads);}
  user_reset();m.abi=0;T(prepare()&&!m.bindings);user_reset();m.cwd_fail=-1;T(prepare()&&!m.bindings);user_reset();m.register_fail=-1;T(prepare()&&!m.threads);
  user_reset();T(!prepare());m.thread_fail=-7;T(pw_wine_child_bootstrap_start(&b,&io,&ops)&&!b.started);
- T(!legacy_bootstrap_main());printf("mode3 bootstrap: %u additive assertions; legacy modes retained with unknown4 sentinel\n",user_checks);return 0;
+ T(!legacy_bootstrap_main());printf("mode3 bootstrap: %u additive assertions; legacy modes retained with unknown5 sentinel\n",user_checks);return 0;
 }

@@ -107,6 +107,36 @@ jobs:
           path: ${{ runner.temp }}/user-x64/
           retention-days: 7
           if-no-files-found: error
+  original-network-x64-reference:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+           github.event.deleted == false) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Build and test the separate original network pair with installed MSVC
+        shell: pwsh
+        run: ./tools/build_windows_child_network.ps1 -ProjectRoot "$env:GITHUB_WORKSPACE" -Out "$env:RUNNER_TEMP/network-x64" -RunReference
+      - name: Preserve exact network images and Windows reference evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: original-network-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/network-x64/
+          retention-days: 7
+          if-no-files-found: error
   matched-runtime:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
@@ -335,6 +365,12 @@ jobs:
         run: |
           python3 tools/wine_workflow_join.py --job original-user-x64-reference \
             --output "$RUNNER_TEMP/fixture-evidence/early-user-reference-join.json"
+      - name: Require separate network reference success before the expensive host runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/wine_workflow_join.py --job original-network-x64-reference \
+            --output "$RUNNER_TEMP/fixture-evidence/early-network-reference-join.json"
       - name: Build complete matching host Wine
         env:
           PW_CACHE_RESTORE_HIT: ${{ steps.host-cache.outputs.cache-hit }}
@@ -477,11 +513,38 @@ jobs:
             --fixture "$RUNNER_TEMP/user-x64" --cpu-output "$RUNNER_TEMP/fixture-cpu" \
             --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --out "$RUNNER_TEMP/user-console" \
             --report "$RUNNER_TEMP/user-prefix.json" > "$RUNNER_TEMP/user-prefix-export.log" 2>&1
+      - name: Join the separate original network reference from this run attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/wine_workflow_join.py --job original-network-x64-reference \
+            --output "$RUNNER_TEMP/fixture-evidence/network-reference-join.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: original-network-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/network-x64
+      - name: Verify the original network pair before first use
+        run: |
+          python3 tools/windows_child_network_contract.py --directory "$RUNNER_TEMP/network-x64" \
+            --repo "$GITHUB_WORKSPACE" --report "$RUNNER_TEMP/fixture-evidence/network-preflight.json" \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Prepare the separate fresh original network prefix
+        run: |
+          timeout --kill-after=15s 5m xvfb-run -a python3 tools/prepare_windows_child_prefix.py initialize-network \
+            --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" --cohort "$COHORT" \
+            --work "$RUNNER_TEMP/network-prefix-work" > "$RUNNER_TEMP/network-initialization.log" 2>&1
+          python3 tools/prepare_windows_child_prefix.py export-network --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" \
+            --cohort "$COHORT" --work "$RUNNER_TEMP/network-prefix-work" --wine-work "$WINE_WORK" \
+            --wine-source "$WINE_SOURCE" --wine-archive "$RUNNER_TEMP/wine-source.tar.gz" \
+            --fixture "$RUNNER_TEMP/network-x64" --cpu-output "$RUNNER_TEMP/fixture-cpu" \
+            --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --out "$RUNNER_TEMP/network-console" \
+            --report "$RUNNER_TEMP/network-prefix.json" > "$RUNNER_TEMP/network-prefix-export.log" 2>&1
       - name: Build the full-CRT child once and the matched title
         env:
           PW_WINE_CHILD_FIXTURE_MODE: "1"
           PW_WINDOWS_CHILD_FIXTURE_DIR: ${{ runner.temp }}/fixture-x64
           PW_WINDOWS_CHILD_USER_DIR: ${{ runner.temp }}/user-x64
+          PW_WINDOWS_CHILD_NETWORK_DIR: ${{ runner.temp }}/network-x64
           PW_OUTPUT_SUFFIX: -windows-child-fixture
           PW_FOUNDATION_READY: "1"
           PW_WINE64_SCRIPT: "0"
@@ -497,7 +560,7 @@ jobs:
             --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --build "$GITHUB_WORKSPACE/build/native-windows-child-fixture" \
             --app "$GITHUB_WORKSPACE/dist/PPSA99995-windows-child-fixture" \
             --service-work "$GITHUB_WORKSPACE/build/native-windows-child-fixture/wine-child" --fixture "$RUNNER_TEMP/fixture-x64" \
-            --user-fixture "$RUNNER_TEMP/user-x64" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --user-fixture "$RUNNER_TEMP/user-x64" --network-fixture "$RUNNER_TEMP/network-x64" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --sdk-source-archive "$RUNNER_TEMP/sdk-source.tar.gz" --out "$RUNNER_TEMP/fixture-evidence/title-inspection" \
             2>&1 | tee "$RUNNER_TEMP/fixture-evidence/title-check.log"
       - name: Retain corresponding sources and assemble the exact matched package
@@ -526,6 +589,8 @@ jobs:
               'cpu_output': temp / 'fixture-cpu',
               'user_prefix': temp / 'user-console', 'user_prefix_report': temp / 'user-prefix.json',
               'user_fixture': temp / 'user-x64',
+              'network_prefix': temp / 'network-console', 'network_prefix_report': temp / 'network-prefix.json',
+              'network_fixture': temp / 'network-x64',
               'service_work': repo / 'build/native-windows-child-fixture/wine-child',
               'title': repo / 'dist/PPSA99995-windows-child-fixture',
               'title_build': repo / 'build/native-windows-child-fixture',
@@ -535,7 +600,7 @@ jobs:
               'wine_archive': temp / 'wine-source.tar.gz', 'sdk': Path(os.environ['PS5_PAYLOAD_SDK']),
               'foundation': foundation, 'llvm_bindir': Path('/usr/lib/llvm-18/bin')}
           (temp / 'package-inputs.json').write_text(json.dumps({'schema': 'pw-windows-child-package-inputs/1', 'battlenet_enabled': True,
-              'user_enabled': True, 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'user_enabled': True, 'network_enabled': True, 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
               'run_url': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
               'paths': {k: str(v) for k, v in package_paths.items()}}, indent=2) + '\n')
           PY
@@ -575,7 +640,7 @@ jobs:
                   shutil.copyfile(path, destination)
           # The prefix auditor emits only bounded path/hash/classification metadata.
           # Raw initialization/export logs and raw registry/prefix files stay local.
-          for kind in ('fixture', 'battlenet', 'user'):
+          for kind in ('fixture', 'battlenet', 'user', 'network'):
               prefix = Path(os.environ['RUNNER_TEMP']) / (kind + '-prefix-work')
               for name in ('UNAPPROVED-FILES.json', 'TEXT-AUDIT.json'):
                   path = prefix / name

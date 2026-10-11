@@ -1116,6 +1116,9 @@ int main(int argc, char **argv)
     if (child_profile == 3)
         pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_user=experimental child_presentation=unverified child_input=unverified",
                                  pw_wine_child_title_marker, child_profile, game->app.id);
+    else if (child_profile == 4)
+        pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_network=observation child_gui=unsupported",
+                                 pw_wine_child_title_marker, child_profile, game->app.id);
     else
         pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_gui=unsupported",
                                  pw_wine_child_title_marker, child_profile, game->app.id);
@@ -1375,6 +1378,9 @@ int main(int argc, char **argv)
             const char *child_hash = child_profile == 1 ? PW_WINE_FIXTURE_CHILD_SHA256 : NULL;
 #if PW_WINE_USER_PROFILE_ENABLED
             if (child_profile == 3) child_hash = PW_WINE_USER_CHILD_SHA256;
+#endif
+#if PW_WINE_NET_PROFILE_ENABLED
+            if (child_profile == 4) child_hash = PW_WINE_NET_CHILD_SHA256;
 #endif
             status = pw_wine_child_title_prepare(child_profile, child_hash);
             pw_diagnostics_log_local("PW_WINE_CHILD owner_prepare status=%d", status);

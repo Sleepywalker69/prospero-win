@@ -17,9 +17,9 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
     if(!b||!io||!o||!o->runtime||!o->directory||!o->register_thread||!o->unregister_thread||
        !o->output||!o->socket_sink||!o->context||!o->wine.load_start||!o->wine.module_info||!o->wine.set_env||
        !o->wine.start_thread||fd<0||!hash||abi!=1||strlen(hash)!=64)return -1;
-    if((profile!=PW_WC_PROFILE_FIXTURE&&profile!=PW_WC_PROFILE_BATTLENET&&profile!=PW_WC_PROFILE_USER)||
+    if((profile!=PW_WC_PROFILE_FIXTURE&&profile!=PW_WC_PROFILE_BATTLENET&&profile!=PW_WC_PROFILE_USER&&profile!=PW_WC_PROFILE_NET)||
        (machine!=PW_WC_MACHINE_AMD64&&machine!=PW_WC_MACHINE_I386)||
-       ((profile==PW_WC_PROFILE_FIXTURE||profile==PW_WC_PROFILE_USER)&&machine!=PW_WC_MACHINE_AMD64))return -1;
+       ((profile==PW_WC_PROFILE_FIXTURE||profile==PW_WC_PROFILE_USER||profile==PW_WC_PROFILE_NET)&&machine!=PW_WC_MACHINE_AMD64))return -1;
     if(o->child.abi!=PW_WINE_CREATION_ABI||o->child.bytes!=sizeof(o->child)||
        !o->child.generation||!o->child.wine_pid||!o->child.wine_tid||
        o->child.profile!=profile||o->child.machine!=machine)return -1;
@@ -31,6 +31,8 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
         prefix=PW_WINE_CHILD_BATTLENET_PREFIX;logical_cwd=PW_WINE_CHILD_BATTLENET_CWD;placeholder=PW_WINE_CHILD_BATTLENET_IMAGE;break;
     case PW_WC_PROFILE_USER:
         prefix=PW_WINE_CHILD_USER_PREFIX;logical_cwd=PW_WINE_CHILD_USER_CWD;placeholder=PW_WINE_CHILD_USER_IMAGE;break;
+    case PW_WC_PROFILE_NET:
+        prefix=PW_WINE_CHILD_NET_PREFIX;logical_cwd=PW_WINE_CHILD_NET_CWD;placeholder=PW_WINE_CHILD_NET_IMAGE;break;
     default:return -1;
     }
     for(unsigned i=0;i<64;i++)if(!((hash[i]>='0'&&hash[i]<='9')||(hash[i]>='a'&&hash[i]<='f')))return -1;

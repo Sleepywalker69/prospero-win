@@ -34,6 +34,6 @@ int main(int argc,char **argv)
  for(unsigned i=0;i<7;i++){if(i==1)continue;reset();T(!pw_wine_child_title_prepare(3,hash));descriptor.exports[i].name="missing";T(pw_wine_child_title_install(desc())<0&&!sink_calls&&!provider_calls&&!pw_wine_child_title_restart_ready());}
  const char *bad_hashes[]={NULL,"bad","ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFAB"};
  for(unsigned i=0;i<3;i++){reset();T(pw_wine_child_title_prepare(3,bad_hashes[i])<0&&!created_entry);}
- reset();T(pw_wine_child_title_prepare(4,hash)<0&&!created_entry);
+ reset();T(pw_wine_child_title_prepare(5,hash)<0&&!created_entry);
  T(!legacy_title_main());printf("mode3 title: %u additive assertions; unchanged legacy suite also passed\n",user_checks);return 0;
 }

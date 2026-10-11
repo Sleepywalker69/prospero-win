@@ -58,9 +58,9 @@ int pw_wine_creation_child_install(const PwWineCreationChild *p)
     unsigned empty=0;
     if(!p||p->abi!=PW_WINE_CREATION_ABI||p->bytes!=sizeof(*p)||!p->generation||
        !p->wine_pid||!p->wine_tid||atomic_load(&ready)||atomic_load(&creation_ready)||
-       (p->profile!=1&&p->profile!=2&&p->profile!=3)||
+       (p->profile!=1&&p->profile!=2&&p->profile!=3&&p->profile!=4)||
        (p->machine!=PW_WINE_FIXTURE_AMD64&&p->machine!=PW_WINE_FIXTURE_I386)||
-       ((p->profile==1||p->profile==3)&&p->machine!=PW_WINE_FIXTURE_AMD64))return -1;
+       ((p->profile==1||p->profile==3||p->profile==4)&&p->machine!=PW_WINE_FIXTURE_AMD64))return -1;
     if(!atomic_compare_exchange_strong(&process_role,&empty,2))return -1;
     empty=0;
     if(!atomic_compare_exchange_strong_explicit(&child_ready,&empty,1,

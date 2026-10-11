@@ -11,7 +11,9 @@ probe or a Windows reference pass does not establish those boundaries.
 An explicitly enabled third profile provides a separate original AMD64
 worker-first-USER control. It has its own source, MSVC recipe, fresh Windows
 reference, prefix and child hash. The original headless pair remains mandatory;
-the third control does not establish vendor GUI or input compatibility.
+the third control does not establish vendor GUI or input compatibility. A separately
+enabled fourth profile runs an original AMD64 network observation program with
+its own reference, prefix, consumed contract header and child hash.
 
 The ordinary release packager continues to refuse private-dispatch runtimes.
 This separate producer checks the actual private-ABI ntdll/win32u PE thunks and
@@ -208,9 +210,11 @@ the observed boundary rather than borrowing success from an earlier cohort.
 
 ## Selecting and stopping this candidate
 
-This experimental title lists only the two exact prepared profiles. Select
-the original fixture or `battlenet-experimental-v1` with the controller; retained
-ordinary game profiles and a command-line executable override are refused.
+This experimental title lists the exact prepared headless and Battle profiles,
+plus the USER and network controls only when their separate capabilities were
+enabled and bound during this build. Select the required profile with the
+controller; retained ordinary game profiles and a command-line executable
+override are refused.
 The original headless fixture requires no keyboard or mouse. The installer
 uses the normal root-title USB keyboard/mouse route; this candidate does not
 add controller mouse bindings or forward child windows and input.
@@ -626,3 +630,59 @@ The original worker-first-USER reference, actual target compilation/imports,
 service startup, guest behavior and native retirement still require their own
 results. Child presentation, physical input, focus transfer, arbitrary vendor
 GUI behavior and descendant acceptance are not established by this control.
+
+
+## Optional original network observation control
+
+The fourth profile uses `tests/fixtures/windows_child_network.c` and its consumed
+`windows_child_network_contract.h`, built by
+`tools/build_windows_child_network.ps1`. Its separate fresh Windows job produces
+`net-parent.exe`, `net-child.exe`, source/tool/dependency receipts and bounded
+logs. The parent starts one exact sibling, observes Windows exit 37 and then
+exits 0. The child runs the measured operations synchronously on its main thread,
+with a watchdog; this does not add a network backend or change resolver policy.
+
+Mandatory observations cover Winsock 2.2 startup/version and cleanup, numeric
+IPv4 address lookup with caller-owned result cleanup, refusal of a nonnumeric
+name under the numeric-only option, and creation/close of one unconnected UDP
+socket. Optional observations report the existing DNSAPI numeric-query and
+server-list outcomes and one ordinary name lookup. Backend-unavailable and name
+lookup failures remain explicit results. The program does not bind, connect,
+send, run HTTP/TLS, retry an operation, replace missing DNS records or reinterpret
+an optional result as permission to launch another process. The child accounting
+budget is 45 seconds with a 50-second watchdog; the parent budgets are 90 and 95
+seconds. Resolver-internal behavior is not claimed to be preemptible.
+
+Native mode 4 is default-off. The enabled title must receive the exact checked
+network child digest through `PW_WINE_NET_CHILD_SHA256` together with
+`PW_WINE_NET_PROFILE_ENABLED=1`. Admission requires `windows-child-net-v1`,
+AMD64/default CPU, exact parent and CWD under `C:\windows-child-net`, empty
+arguments and the separate prefix. There is one direct generation, including
+retired generations, with the existing 120-second child and 180-second attempt
+endpoints. The child retains the ordinary bootstrap environment; no USER
+presentation variables or new descriptor authority are added. Descendant
+creation remains restricted to the existing Battle profile.
+
+The workflow joins the original, USER and network reference jobs independently
+before expensive host work and again before downloading each reference. Each
+reference must match the actual project, run and attempt. The network validator
+binds the C source, consumed header, recipe and validator to the MSVC receipt,
+actual AMD64 PE structure and ordered original logs. Its optional resolver
+observations cannot become a general networking or console-success claim.
+
+The fourth prefix retains the same 24 patched PE DLLs, 14 native modules, CPU
+DLL, private/creation ABI and seven-call Net provider checks. The package copies
+and replays the exact network source/header/reference, prefix, capability and
+raw title-compile receipt. Enabled and disabled USER/network selections are
+checked independently; an omitted capability cannot carry its profile or prefix.
+The worker declares all four supported fixed profiles while the title admits
+only the optional profiles selected and validated for that artifact.
+
+Seven additional native suites exercise enabled/default-off title selection,
+wire, installer, owner, bootstrap and main through actual sources with inert
+platform boundaries. Their strict and UBSan runner is
+`tools/check_wine_network_profile.py`; the normal and sanitizer aggregates also
+register each suite. Host and synthetic PE/package controls do not establish
+service startup, a Windows result on PS5, actual DNS/Internet/TLS behavior,
+child presentation/input, or Battle.net installation. The separate matched
+Windows reference and exact console result remain required.

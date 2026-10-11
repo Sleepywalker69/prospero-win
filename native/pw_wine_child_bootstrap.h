@@ -15,6 +15,9 @@
 #define PW_WINE_CHILD_USER_PREFIX "/data/prospero-win/prefixes/windows-child-user-v1"
 #define PW_WINE_CHILD_USER_CWD PW_WINE_CHILD_USER_PREFIX "/drive_c/windows-child-user"
 #define PW_WINE_CHILD_USER_IMAGE "C:\\windows-child-user\\user-child.exe"
+#define PW_WINE_CHILD_NET_PREFIX "/data/prospero-win/prefixes/windows-child-net-v1"
+#define PW_WINE_CHILD_NET_CWD PW_WINE_CHILD_NET_PREFIX "/drive_c/windows-child-net"
+#define PW_WINE_CHILD_NET_IMAGE "C:\\windows-child-net\\net-child.exe"
 #define PW_WINE_CHILD_RUNTIME "/app0/win/wine/lib/wine/x86_64-unix"
 #define PW_WINE_CHILD_RUNTIME_ALIAS "/mnt/sandbox/PPSA99995_000/app0/win/wine/lib/wine/x86_64-unix"
 enum { PW_WCB_INITIAL, PW_WCB_PATHS, PW_WCB_ENVIRONMENT, PW_WCB_LOAD,

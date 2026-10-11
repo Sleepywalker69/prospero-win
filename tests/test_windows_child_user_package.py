@@ -213,7 +213,8 @@ class EnabledPackageControls(unittest.TestCase):
         worker['candidate_capabilities'] = [
             {'mode':1,'prefix':package.SLUG,'guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False},
             {'mode':2,'prefix':package.BATTLE_SLUG,'guest_machine':'I386','backend':'wowprospero','runtime_validated':False},
-            {'mode':3,'prefix':user.SLUG,'guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False}]
+            {'mode':3,'prefix':user.SLUG,'guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False},
+            {'mode':4,'prefix':'windows-child-net-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False}]
         self.put_json('PPSA99995/native-wine-child-build.json', worker)
         self.put_json(user.CAPABILITY, user.capability(self.project,PROFILE,
             (f.root/user.REPORT).read_bytes(),self.files['user-source.json'],worker['worker']['build_id'],
@@ -378,14 +379,15 @@ class EnabledPackageControls(unittest.TestCase):
         self.put('provenance/title-compile.json',saved)
         self.finish();self.verify()
 
-    def test_exact_three_worker_capabilities_no_claim_inflation(self):
+    def test_exact_four_worker_capabilities_no_claim_inflation(self):
         self.prepare();baseline=self.get('PPSA99995/native-wine-child-build.json')
         mutations=[]
-        for count in (0,2):
+        for count in (0,2,3):
             x=copy.deepcopy(baseline);x['candidate_capabilities']=x['candidate_capabilities'][:count];mutations.append(x)
         x=copy.deepcopy(baseline);x['candidate_capabilities'].append(dict(x['candidate_capabilities'][-1]));mutations.append(x)
-        for field,value in [('guest_machine','I386'),('backend','wowprospero'),('prefix',package.SLUG),('mode',4),('runtime_validated',True)]:
-            x=copy.deepcopy(baseline);x['candidate_capabilities'][-1][field]=value;mutations.append(x)
+        for field,value in [('guest_machine','I386'),('backend','wowprospero'),('prefix',package.SLUG),('mode',5),('runtime_validated',True)]:
+            for index in (2,3):
+                x=copy.deepcopy(baseline);x['candidate_capabilities'][index][field]=value;mutations.append(x)
         for x in mutations:
             with self.subTest(capabilities=x['candidate_capabilities']):
                 self.put_json('PPSA99995/native-wine-child-build.json',x);self.reject('worker capability cohort differs')

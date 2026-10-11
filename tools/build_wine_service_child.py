@@ -218,6 +218,8 @@ def inputs(args, commands):
                   {'mode': 2, 'prefix': 'battlenet-experimental-v1', 'guest_machine': 'I386',
                    'backend': 'wowprospero', 'runtime_validated': False},
                   {'mode': 3, 'prefix': 'windows-child-user-v1', 'guest_machine': 'AMD64',
+                   'backend': 'native-amd64', 'runtime_validated': False},
+                  {'mode': 4, 'prefix': 'windows-child-net-v1', 'guest_machine': 'AMD64',
                    'backend': 'native-amd64', 'runtime_validated': False}],
               'title_foundation': TITLE_FOUNDATION, 'converter_foundation': TITLE_FOUNDATION,
               'prx_foundation': FOUNDATION,
@@ -458,6 +460,51 @@ def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=
     return result, header, pair, user_pair
 
 
+
+def title_profiles_input_contract(root, service_work, fixture, user_fixture=None,
+                                  run_id=None, run_attempt=None, network_fixture=None):
+    """Keep leaf/USER admission independent; optional network needs its own original pair."""
+    result, header, pair, user_pair = title_input_contract(root, service_work, fixture,
+                                                         user_fixture, run_id, run_attempt)
+    network_pair = None
+    if network_fixture is not None:
+        require(isinstance(run_id, str) and re.fullmatch('[1-9][0-9]*', run_id) and
+                isinstance(run_attempt, str) and re.fullmatch('[1-9][0-9]*', run_attempt),
+                'enabled network title requires explicit expected run/attempt')
+        require(pair.get('run_id') == run_id and pair.get('run_attempt') == run_attempt,
+                'original fixture is not the expected network title run/attempt')
+        import windows_child_network_contract as network_contract
+        require(Path(network_contract.__file__).resolve() ==
+                (root / 'tools/windows_child_network_contract.py').resolve(),
+                'network validator loaded from another project')
+        details = {}
+        network_pair = network_contract.validate_pair(network_fixture.resolve(strict=True), result['project'], root,
+                                                      run_id, run_attempt, details=details)
+        require(network_pair.get('project') == result['project'] and network_pair.get('run_id') == run_id and
+                network_pair.get('run_attempt') == run_attempt, 'network validator identity differs')
+        require(network_pair.get('header_sha256') == sha(root / 'tests/fixtures/windows_child_network_contract.h'),
+                'network original contract header differs')
+        result.update({'network_enabled': True, 'network_child_sha256': network_pair['files']['net-child.exe']['sha256'],
+                       'network_reference_sha256': sha(network_fixture / 'network-source.json'),
+                       'network_validator_sha256': sha(root / 'tools/windows_child_network_contract.py'),
+                       'network_header_sha256': network_pair['header_sha256'],
+                       'run_id': run_id, 'run_attempt': run_attempt})
+        header += '#define PW_WINE_NET_PROFILE_ENABLED 1\n'
+        header += '#define PW_WINE_NET_CHILD_SHA256 "' + result['network_child_sha256'] + '"\n'
+    return result, header, pair, user_pair, network_pair
+
+
+def network_title_identity(image, title_inputs, pair):
+    digest = pair['files']['net-child.exe']['sha256']
+    require(title_inputs.get('network_enabled') is True and title_inputs.get('network_child_sha256') == digest,
+            'network title hash differs from validated actual child')
+    result = compiled_identity(image, digest)
+    for address in result['addresses']:
+        offset = image.offset(address, 65, 4)
+        require(any(p[0] == 1 and p[3] == address for p in image.programs) or
+                (offset > 0 and image.data[offset - 1] == 0), 'network child hash is not a standalone title literal')
+    return result
+
 def user_title_identity(image, title_inputs, pair):
     digest = pair['files']['user-child.exe']['sha256']
     require(title_inputs.get('user_enabled') is True and title_inputs.get('user_child_sha256') == digest,
@@ -486,7 +533,7 @@ def title_compile_record(root, build, project, compiler, common, units):
             'native_source_inputs': {name: record(root / name) for name in TITLE_USER_SOURCES}}
 
 
-def verify_title_compile_record(root, build, project, enabled, sdk, title):
+def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False):
     path = build / 'wine-child-title-compile.json'
     actual = json.loads(path.read_text())
     require(actual.get('schema') == 'pw-windows-child-title-compile/1' and actual.get('project') == project,
@@ -499,35 +546,43 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title):
             Path(compiler[3]).resolve() == (title / 'tooling/prospero-clang18').resolve() and
             sha(Path(compiler[3])) == WRAPPER_SHA, 'title compiler launcher/wrapper differs')
     require(not any(v in ('-D', '-U', '-include', '-imacros', '-undef') or
-                    v.startswith('-UPW_WINE_USER_PROFILE_ENABLED') for v in common), 'ambiguous title preprocessor flags')
+                    v.startswith(('-UPW_WINE_USER_PROFILE_ENABLED', '-UPW_WINE_NET_PROFILE_ENABLED')) for v in common), 'ambiguous title preprocessor flags')
     require([v for v in common if v.startswith('-DPW_WINE_USER_PROFILE_ENABLED')] ==
             ['-DPW_WINE_USER_PROFILE_ENABLED=' + str(int(enabled))] and
             [v for v in common if v.startswith('-DPW_WINE_CHILD_FIXTURE_MODE')] == ['-DPW_WINE_CHILD_FIXTURE_MODE=1'],
             'title compile enable flags differ')
+    require(type(network_enabled) is bool and
+            [v for v in common if v.startswith('-DPW_WINE_NET_PROFILE_ENABLED')] ==
+            (['-DPW_WINE_NET_PROFILE_ENABLED=1'] if network_enabled else []),
+            'title network compile enable flags differ')
+    require(not any(v.startswith(('-DPW_WINE_NET_CHILD_SHA256', '-UPW_WINE_NET_CHILD_SHA256')) for v in common),
+            'network child hash must come only from the validated generated header')
     units = actual.get('sources', {})
     require(isinstance(units, dict) and all(n in units for n in TITLE_USER_SOURCES if n.endswith('.c')),
             'title compile source cohort incomplete')
     require(actual == title_compile_record(root, build, project, compiler, common, list(units)),
             'title actual source/object/command record differs')
-    return {**record(path), 'user_enabled': bool(enabled), 'record': actual,
+    return {**record(path), 'user_enabled': bool(enabled), 'network_enabled': network_enabled,
+            'network_hash_source': 'validated-generated-header' if network_enabled else None, 'record': actual,
             'source_to_binary_reproducibility_verified': False}
 
 
 def check_title(args):
     user_fixture = getattr(args, 'user_fixture', None)
+    network_fixture = getattr(args, 'network_fixture', None)
     inputs = (args.app, args.build, args.service_work, args.sdk, args.runtime, args.fixture)
-    out = output_directory(args.out, inputs + ((user_fixture,) if user_fixture is not None else ()))
+    out = output_directory(args.out, inputs + tuple(p for p in (user_fixture, network_fixture) if p is not None))
     commands = Commands(out / 'inspection')
     manifest, paths = verify_child(args, commands)
     root, sdk, foundation, runtime, bindir, title = paths
     app, build = args.app.resolve(strict=True), args.build.resolve(strict=True)
     title_inputs = json.loads((build / 'wine-child-title-inputs.json').read_text())
-    expected_inputs, header, pair, user_pair = title_input_contract(root, args.service_work, args.fixture,
-        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None))
+    expected_inputs, header, pair, user_pair, network_pair = title_profiles_input_contract(root, args.service_work, args.fixture,
+        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture)
     fixture_sha = pair['files']['child.exe']['sha256']
     require(title_inputs == expected_inputs and (build / 'wine-child-title-config.h').read_text() == header,
             'title fixture/USER macro/source input record differs')
-    compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title)
+    compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None)
     # Retain actual bytes before parser/analyzer refusal for independent review.
     for name, original in (('title.linked.elf', build / 'llvm-pie.elf'), ('title.converted.elf', build / 'eboot.elf'),
                             ('title.self', app / 'eboot.bin')):
@@ -556,10 +611,13 @@ def check_title(args):
     compiled = compiled_identity(image, manifest['project']['commit'])
     fixture_identity = fixture_title_identity(image, title_inputs, pair)
     user_identity = user_title_identity(image, title_inputs, user_pair) if user_pair is not None else None
+    network_identity = network_title_identity(image, title_inputs, network_pair) if network_pair is not None else None
     embedded = embedded_image(image, (app / 'native-wine-child.self').read_bytes())
     route = check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'))
     user_route = {**check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'), TITLE_USER_FUNCTIONS),
                   'mode': 3, 'enabled': user_pair is not None}
+    network_route = {**check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'), TITLE_USER_FUNCTIONS),
+                     'mode': 4, 'enabled': network_pair is not None}
     sdk_source = source_archive(args.sdk_source_archive)
     for name in linked.needed:
         destination = out / 'providers' / (name + '.elf')
@@ -573,10 +631,10 @@ def check_title(args):
             require(name != 'dev.conf', 'private dev.conf must never be packaged')
             files[name] = {**record(path), 'mode': path.stat().st_mode & 0o777}
     require(source_identity(root, commands)[0] == manifest['project'], 'project changed during title inspection')
-    require(title_input_contract(root, args.service_work, args.fixture, user_fixture,
-        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None)) == (expected_inputs, header, pair, user_pair),
-        'original/USER fixture changed during title inspection')
-    require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title) == compile_inputs,
+    require(title_profiles_input_contract(root, args.service_work, args.fixture, user_fixture,
+        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture) ==
+        (expected_inputs, header, pair, user_pair, network_pair), 'original/USER/network fixture changed during title inspection')
+    require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None) == compile_inputs,
             'title compile inputs changed during inspection')
     report = {'schema': 'pw-windows-child-title/1', 'project': manifest['project'],
               'build_id': manifest['project']['commit'], 'compiler': manifest['host_llvm'],
@@ -586,7 +644,11 @@ def check_title(args):
               'fixture_child_sha256': fixture_sha, 'fixture_child_identity': fixture_identity,
               'user_enabled': user_pair is not None, 'user_child_sha256': title_inputs.get('user_child_sha256'),
               'user_reference_sha256': title_inputs.get('user_reference_sha256'), 'user_child_identity': user_identity,
-              'user_route': user_route, 'title_compile_inputs': compile_inputs,
+              'user_route': user_route, 'network_enabled': network_pair is not None,
+              'network_child_sha256': title_inputs.get('network_child_sha256'),
+              'network_reference_sha256': title_inputs.get('network_reference_sha256'),
+              'network_child_identity': network_identity, 'network_route': network_route,
+              'title_compile_inputs': compile_inputs,
               'title_compile_receipt': record(build / 'wine-child-title-compile.json'),
               'service_manifest_sha256': sha(args.service_work / 'native-wine-child-build.json'),
               'runtime': manifest['runtime'], 'imports': graph, 'reconstruction': reconstruction,
@@ -601,7 +663,7 @@ def main():
     parser.add_argument('--check-title', action='store_true')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'helper', 'helper-manifest', 'helper-release'):
+    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper', 'helper-manifest', 'helper-release'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--run-id')
     parser.add_argument('--run-attempt')

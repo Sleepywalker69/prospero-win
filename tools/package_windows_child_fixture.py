@@ -24,6 +24,7 @@ import tarfile
 sys.dont_write_bytecode = True
 import prepare_windows_child_prefix as prefix
 import windows_child_user_package as user_package
+import windows_child_network_package as network_package
 
 SLUG = 'windows-child-fixture-v1'
 APP = 'PPSA99995'
@@ -334,24 +335,38 @@ def validate_battle(manifest, values, read, prepared, abi, build):
     return combined
 
 
+def validate_optional_roles(manifest):
+    roles = {}
+    if manifest.get('battlenet_enabled'):
+        roles.update(battlenet_profile=BATTLE_PROFILE, battlenet_capability=BATTLE_CAPABILITY)
+    for name, module in (('user', user_package), ('network', network_package)):
+        enabled = manifest.get(name + '_enabled', False)
+        require(type(enabled) is bool, name + ' capability selection must be boolean')
+        if enabled:
+            roles.update(module.ROLES)
+    require(manifest.get('optional_roles', {}) == roles, 'unreviewed optional consumer roles')
+
+
+def expected_worker_capabilities():
+    return [
+        {'mode': 1, 'prefix': SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False},
+        {'mode': 2, 'prefix': BATTLE_SLUG, 'guest_machine': 'I386', 'backend': 'wowprospero', 'runtime_validated': False},
+        {'mode': 3, 'prefix': user_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False},
+        {'mode': 4, 'prefix': network_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False}]
+
+
 def validate_user(manifest, values, read, prepared, abi, build, worker, combined):
     enabled = manifest.get('user_enabled', False)
     require(type(enabled) is bool, 'USER capability selection must be boolean')
-    roles = dict(user_package.ROLES) if enabled else {}
-    if manifest.get('battlenet_enabled'):
-        roles.update(battlenet_profile=BATTLE_PROFILE, battlenet_capability=BATTLE_CAPABILITY)
-    require(manifest.get('optional_roles', {}) == roles, 'unreviewed optional consumer roles')
+    validate_optional_roles(manifest)
     if not enabled:
         require(not any(name == user_package.PROFILE or name == user_package.PREFIX or
                 name.startswith(user_package.PREFIX + '/') or
                 name.startswith('provenance/windows-child-user') for name in values),
                 'disabled USER package contains USER payload')
         return combined
-    require(worker.get('candidate_capabilities') == [
-        {'mode': 1, 'prefix': SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False},
-        {'mode': 2, 'prefix': BATTLE_SLUG, 'guest_machine': 'I386', 'backend': 'wowprospero', 'runtime_validated': False},
-        {'mode': 3, 'prefix': user_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False}],
-        'USER worker capability cohort differs')
+    require(worker.get('candidate_capabilities') == expected_worker_capabilities(),
+            'USER worker capability cohort differs')
     required = (user_package.PROFILE, user_package.REPORT, user_package.REFERENCE, user_package.CAPABILITY)
     require(all(values.get(name, {}).get('type') == 'file' for name in required),
             'USER package inputs missing')
@@ -428,6 +443,96 @@ def check_user_inputs(paths, project, fixture, abi, host_stamp):
                 {k: pair['files'][name][k] for k in ('bytes', 'sha256')}, 'USER prefix image differs')
     return {'pair': pair, 'prefix': prepared, 'profile': actual,
             'reference_inventory': prefix.inventory(paths['user_fixture'])}
+
+
+def validate_network(manifest, values, read, prepared, abi, build, worker, combined):
+    enabled = manifest.get('network_enabled', False)
+    require(type(enabled) is bool, 'network capability selection must be boolean')
+    validate_optional_roles(manifest)
+    if not enabled:
+        require(not any(name == network_package.PROFILE or name == network_package.PREFIX or
+                name.startswith(network_package.PREFIX + '/') or
+                name.startswith('provenance/windows-child-network') for name in values),
+                'disabled network package contains network payload')
+        return combined
+    require(worker.get('candidate_capabilities') == expected_worker_capabilities(),
+            'network worker capability cohort differs')
+    required = (network_package.PROFILE, network_package.REPORT, network_package.REFERENCE, network_package.CAPABILITY)
+    require(all(values.get(name, {}).get('type') == 'file' for name in required),
+            'network package inputs missing')
+    source_hashes = {}
+    for field, relative in network_package.SOURCE_FILES.items():
+        name = network_package.SOURCE_ROOT + '/' + relative
+        require(values.get(name, {}).get('type') == 'file', 'network source copy absent')
+        source_hashes[field] = hashlib.sha256(read(name)).hexdigest()
+    sources = decode_json(read('provenance/retained-sources.json'))
+    project_source = sources.get('roles', {}).get('project', {})
+    require(project_source.get('revision') == manifest['project']['commit'], 'network retained source revision differs')
+    require(project_source.get('path') == 'project.tar.gz', 'network project source archive path differs')
+    project_path = 'sources/' + safe_name(project_source.get('path'))
+    require(source_hashes == network_package.source_copies(read(project_path),
+        {relative: read(network_package.SOURCE_ROOT + '/' + relative)
+         for relative in network_package.SOURCE_FILES.values()}), 'network copied source bindings differ')
+    reference_inventory = manifest.get('network_reference_inventory')
+    require(isinstance(reference_inventory, dict), 'network reference inventory absent')
+    copied_inventory(values, network_package.REFERENCE_ROOT, reference_inventory)
+    from windows_child_network_contract import validate_contents
+    receipt = decode_json(read(network_package.REFERENCE))
+    pair = validate_contents(lambda name: read(network_package.REFERENCE_ROOT + '/' + name),
+        {name for name, entry in reference_inventory.items() if entry.get('type') == 'file'},
+        manifest['project'], manifest['run_url'].rsplit('/', 1)[-1], manifest.get('run_attempt'), source_hashes)
+    prepared_network = decode_json(read(network_package.REPORT))
+    require(prepared_network.get('schema') == 'pw-windows-child-network-prefix/1' and
+            prepared_network.get('project') == manifest['project'] and
+            prepared_network.get('wine_commit') == prefix.WINE and
+            prepared_network.get('patches') == manifest['patches'] and
+            prepared_network.get('private_dispatcher') == abi and
+            prepared_network.get('cpu') == prepared.get('cpu') and
+            prepared_network.get('fixture') == pair and prepared_network.get('fixture_executed') is False and
+            prepared_network.get('console_execution_verified') is False and
+            prepared_network.get('child_presentation') is False and prepared_network.get('child_input') is False and prepared_network.get('network_validated') is False,
+            'network prefix/source/ABI/reference differs')
+    combined = network_package.merge_inventory(combined, prepared_network['inventory'])
+    for name in network_package.IMAGES:
+        require({k: values.get(network_package.APP + '/' + name, {}).get(k) for k in ('bytes', 'sha256')} ==
+                {k: pair['files'][name][k] for k in ('bytes', 'sha256')}, 'network packaged role image differs')
+    for name, digest in build['pe'].items():
+        arch, leaf = name.split('/')
+        relative = 'drive_c/windows/' + ('system32' if arch == 'x86_64-windows' else 'syswow64') + '/' + leaf
+        require(values.get(network_package.PREFIX + '/' + relative, {}).get('sha256') == digest and
+                prepared_network.get('patched_pe_delta', {}).get(relative, {}).get('after', {}).get('sha256') == digest,
+                'network matched PE overlay differs')
+    require(len(prepared_network.get('patched_pe_delta', {})) == 24, 'network complete PE overlay absent')
+    cpu = prepared['cpu']['outputs']['x86_64-windows/wowprospero.dll']
+    require(cpu == {k: values.get(network_package.PREFIX + '/drive_c/windows/system32/wowprospero.dll', {}).get(k)
+                   for k in ('bytes', 'sha256')}, 'network CPU PE differs')
+    require(decode_json(read(network_package.CAPABILITY)) == network_package.capability(
+        manifest['project'], read(network_package.PROFILE), read(network_package.REPORT), read(network_package.REFERENCE),
+        worker['worker']['build_id'], pair['files']['net-child.exe']['sha256']), 'network capability differs')
+    return combined
+
+
+def check_network_inputs(paths, project, fixture, abi, host_stamp):
+    from windows_child_network_contract import validate_pair
+    pair = validate_pair(paths['network_fixture'], project, paths['repo'],
+                         os.environ.get('GITHUB_RUN_ID'), os.environ.get('GITHUB_RUN_ATTEMPT'))
+    prepared = read_json(paths['network_prefix_report'])
+    require(prepared.get('schema') == 'pw-windows-child-network-prefix/1' and prepared.get('project') == project and
+            prepared.get('wine_commit') == prefix.WINE and prepared.get('patches') == fixture['patches'] and
+            prepared.get('host_stamp') == host_stamp and prepared.get('private_dispatcher') == abi and
+            prepared.get('cpu') == fixture.get('cpu') and prepared.get('fixture') == pair and
+            prepared.get('fixture_executed') is False and prepared.get('console_execution_verified') is False and
+            prepared.get('child_presentation') is False and prepared.get('child_input') is False and prepared.get('network_validated') is False,
+            'network prepared prefix source/reference differs')
+    require(prefix.inventory(paths['network_prefix']) == prepared.get('inventory'), 'network prefix bytes changed')
+    network_package.merge_inventory(fixture['inventory'], prepared['inventory'])
+    actual = (paths['network_prefix'] / network_package.PROFILE.removeprefix('console/')).read_bytes()
+    network_package.profile_fields(actual)
+    for name in network_package.IMAGES:
+        require(record(paths['network_prefix'] / network_package.APP.removeprefix('console/') / name) ==
+                {k: pair['files'][name][k] for k in ('bytes', 'sha256')}, 'network prefix image differs')
+    return {'pair': pair, 'prefix': prepared, 'profile': actual,
+            'reference_inventory': prefix.inventory(paths['network_fixture'])}
 
 
 def validate_manifest(manifest, values, read):
@@ -520,6 +625,7 @@ def validate_manifest(manifest, values, read):
                     for k in ('bytes', 'sha256')}, 'source-built CPU DLL binding differs')
     combined = validate_battle(manifest, values, read, prepared, abi, build)
     combined = validate_user(manifest, values, read, prepared, abi, build, worker, combined)
+    combined = validate_network(manifest, values, read, prepared, abi, build, worker, combined)
     copied_inventory(values, 'console', combined)
     pair = decode_json(read('provenance/fixture-source.json'))
     require(pair.get('project') == project and pair == prepared['fixture'] and pair.get('architecture') == 'x64',
@@ -551,6 +657,17 @@ def validate_manifest(manifest, values, read):
         require(title.get('user_child_sha256') == user['files']['user-child.exe']['sha256'] and
                 title.get('user_reference_sha256') == values[user_package.REFERENCE]['sha256'],
                 'title original USER child/reference differs')
+    require(type(title.get('network_enabled', False)) is bool and title.get('network_enabled', False) == manifest.get('network_enabled', False),
+            'title network admission selection differs')
+    if manifest.get('network_enabled', False):
+        require(title.get('title_compile_receipt') ==
+                {k: values.get('provenance/title-compile.json', {}).get(k) for k in ('bytes', 'sha256')} and
+                values.get('provenance/title-compile.json', {}).get('type') == 'file',
+                'network raw title compiler receipt differs')
+        network = decode_json(read(network_package.REFERENCE))
+        require(title.get('network_child_sha256') == network['files']['net-child.exe']['sha256'] and
+                title.get('network_reference_sha256') == values[network_package.REFERENCE]['sha256'],
+                'title original network child/reference differs')
     copied_inventory(values, APP, title_inventory(title['files']), exact=False)
     return manifest
 
@@ -608,7 +725,9 @@ def verify_archive(path):
                              LIB + '/i386-windows/win32u.dll', LIB + '/x86_64-unix/ntdll.prx',
                              LIB + '/x86_64-unix/wineserver.prx')
                 retain = retain or name == user_package.PROFILE or name == 'sources/project.tar.gz' or \
-                    name.startswith(user_package.SOURCE_ROOT + '/') or name.startswith(user_package.REFERENCE_ROOT + '/')
+                    name.startswith(user_package.SOURCE_ROOT + '/') or name.startswith(user_package.REFERENCE_ROOT + '/') or \
+                    name == network_package.PROFILE or name.startswith(network_package.SOURCE_ROOT + '/') or \
+                    name.startswith(network_package.REFERENCE_ROOT + '/')
                 if retain:
                     require(item.size <= MAX_JSON, 'oversized inspection input')
                     retained_total += item.size
@@ -696,6 +815,7 @@ def validate_title(paths, expected, inspection, run_id=None, run_attempt=None):
                               service_work=paths['service_work'], app=paths['title'], build=paths['title_build'],
                               sdk_source_archive=paths['sdk_source_archive'], fixture=paths['fixture'], out=inspection)
     args.user_fixture = paths.get('user_fixture')
+    args.network_fixture = paths.get('network_fixture')
     args.run_id, args.run_attempt = run_id, run_attempt
     actual = builder.check_title(args)
     require(actual == expected, 'replayed title import/compiled/embedded identity differs')
@@ -857,23 +977,26 @@ def assemble(config, output):
     require(type(enabled) is bool, 'Battle capability selection must be boolean')
     user_enabled = config.get('user_enabled', False)
     require(type(user_enabled) is bool, 'USER capability selection must be boolean')
+    network_enabled = config.get('network_enabled', False)
+    require(type(network_enabled) is bool, 'network capability selection must be boolean')
     run_id = config['run_url'].rsplit('/', 1)[-1]
     run_attempt = config.get('run_attempt')
-    if user_enabled:
+    if user_enabled or network_enabled:
         require(isinstance(run_attempt, str) and re.fullmatch('[1-9][0-9]*', run_attempt) and
                 os.environ.get('GITHUB_RUN_ID') == run_id and
                 os.environ.get('GITHUB_RUN_ATTEMPT') == run_attempt,
-                'USER requires externally supplied matching run and attempt')
+                'optional original profiles require externally supplied matching run and attempt')
     names = {'repo', 'host_work', 'wine_work', 'cohort', 'prefix', 'prefix_report', 'fixture', 'service_work',
              'title', 'title_build', 'title_report', 'sources_root', 'sources_manifest', 'wine_archive',
              'sdk_source_archive', 'sdk', 'foundation', 'llvm_bindir'}
     if enabled: names |= {'battlenet_prefix', 'battlenet_prefix_report', 'cpu_output'}
     if user_enabled: names |= {'user_prefix', 'user_prefix_report', 'user_fixture'}
+    if network_enabled: names |= {'network_prefix', 'network_prefix_report', 'network_fixture'}
     require(set(config.get('paths', {})) == names, 'incomplete/unexpected assembler paths')
     p = {name: Path(config['paths'][name]).absolute() for name in names}
     for name, path in p.items():
         prefix.ordinary(path, name not in {'cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive',
-                                         'sdk_source_archive', 'battlenet_prefix_report', 'user_prefix_report'})
+                                         'sdk_source_archive', 'battlenet_prefix_report', 'user_prefix_report', 'network_prefix_report'})
     repo, wine, host = p['repo'], p['wine_work'], p['host_work']
     project = prefix.project(repo)
     out = prefix.absent(output, tuple(p.values())); out.mkdir(mode=0o755)
@@ -900,6 +1023,7 @@ def assemble(config, output):
     require(prepared['private_dispatcher'] == abi, 'prefix/runtime private ABI cohort differs')
     battle = check_battle_inputs(p, project, prepared, abi, host_identity['stamp']) if enabled else None
     user = check_user_inputs(p, project, prepared, abi, host_identity['stamp']) if user_enabled else None
+    network = check_network_inputs(p, project, prepared, abi, host_identity['stamp']) if network_enabled else None
     service = validate_service(repo, p['service_work'], project, wine, abi, p['sdk'], p['foundation'],
                                p['llvm_bindir'], inspection / 'service-before')
     require(read_json(wine / 'report.json')['tls']['build']['inputs']['host_llvm'] == service['host_llvm'],
@@ -915,14 +1039,20 @@ def assemble(config, output):
         require(title.get('user_child_sha256') == user['pair']['files']['user-child.exe']['sha256'] and
                 title.get('user_reference_sha256') == record(p['user_fixture'] / 'user-source.json')['sha256'],
                 'title USER original image/receipt differs')
+    require(type(title.get('network_enabled', False)) is bool and title.get('network_enabled', False) == network_enabled, 'title network admission selection differs')
+    if network_enabled:
+        require(title.get('network_child_sha256') == network['pair']['files']['net-child.exe']['sha256'] and
+                title.get('network_reference_sha256') == record(p['network_fixture'] / 'network-source.json')['sha256'],
+                'title network original image/receipt differs')
     title_tree = prefix.inventory(p['title'])
     require(title.get('files') == title_files(title_tree), 'title bytes changed after inspection')
-    validate_title(p, title, inspection / 'title-before', run_id if user_enabled else None, run_attempt)
+    validate_title(p, title, inspection / 'title-before', run_id if user_enabled or network_enabled else None, run_attempt)
     source_record = retained_sources(repo, p['sources_root'], p['sources_manifest'], project,
                                      p['wine_archive'], service, p['sdk'], p['foundation'], wine)
     before = {n: record(p[n]) for n in ('cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive', 'sdk_source_archive')}
     if enabled: before['battlenet_prefix_report'] = record(p['battlenet_prefix_report'])
     if user_enabled: before['user_prefix_report'] = record(p['user_prefix_report'])
+    if network_enabled: before['network_prefix_report'] = record(p['network_prefix_report'])
     checker = prefix.load_tool(repo, 'check_wine_prx_build')
     script = (repo / 'tools/build_wine_ps5.sh').read_text()
     pin = re.search(r'^MODULE_EXPORTS_COMMIT=([0-9a-f]{40})$', script, re.M)
@@ -982,9 +1112,10 @@ def assemble(config, output):
         put_bytes(stage, BATTLE_CAPABILITY,
                   json_bytes(battle_capability(project, battle[2], json_bytes(battle[0]), battle[1])))
         put(stage, BATTLE_CPU, p['cpu_output'] / 'cpu-build.json')
-    if user_enabled:
+    if user_enabled or network_enabled:
         put(stage, 'provenance/title-compile.json', p['title_build'] / 'wine-child-title-compile.json',
             title['title_compile_receipt'])
+    if user_enabled:
         copy_tree(stage, 'console', p['user_prefix'], expected=user['prefix']['inventory'])
         copy_tree(stage, user_package.REFERENCE_ROOT, p['user_fixture'], expected=user['reference_inventory'])
         put_bytes(stage, user_package.REPORT, json_bytes(user['prefix']))
@@ -994,6 +1125,16 @@ def assemble(config, output):
             project, user['profile'], json_bytes(user['prefix']),
             (p['user_fixture'] / 'user-source.json').read_bytes(),
             service['worker']['build_id'], user['pair']['files']['user-child.exe']['sha256'])))
+    if network_enabled:
+        copy_tree(stage, 'console', p['network_prefix'], expected=network['prefix']['inventory'])
+        copy_tree(stage, network_package.REFERENCE_ROOT, p['network_fixture'], expected=network['reference_inventory'])
+        put_bytes(stage, network_package.REPORT, json_bytes(network['prefix']))
+        for relative in network_package.SOURCE_FILES.values():
+            put(stage, network_package.SOURCE_ROOT + '/' + relative, repo / relative)
+        put_bytes(stage, network_package.CAPABILITY, json_bytes(network_package.capability(
+            project, network['profile'], json_bytes(network['prefix']),
+            (p['network_fixture'] / 'network-source.json').read_bytes(),
+            service['worker']['build_id'], network['pair']['files']['net-child.exe']['sha256'])))
     cpu = stage / CONSOLE_PREFIX / 'drive_c/windows/system32/wowprospero.dll'
     put(stage, LIB + '/x86_64-windows/wowprospero.dll', cpu,
         prepared['cpu']['outputs']['x86_64-windows/wowprospero.dll'])
@@ -1029,13 +1170,16 @@ def assemble(config, output):
             abi_checker.check_build(wine, 1, p['llvm_bindir'] / 'llvm-readelf') == abi and
             validate_service(repo, p['service_work'], project, wine, abi, p['sdk'], p['foundation'],
                              p['llvm_bindir'], inspection / 'service-after') == service, 'runtime/worker inputs changed')
-    validate_title(p, title, inspection / 'title-after', run_id if user_enabled else None, run_attempt)
+    validate_title(p, title, inspection / 'title-after', run_id if user_enabled or network_enabled else None, run_attempt)
     if enabled:
         require(check_battle_inputs(p, project, prepared, abi, host_identity['stamp']) == battle,
                 'Battle source/runtime/profile changed during assembly')
     if user_enabled:
         require(check_user_inputs(p, project, prepared, abi, host_identity['stamp']) == user,
                 'USER reference/prefix/profile changed during assembly')
+    if network_enabled:
+        require(check_network_inputs(p, project, prepared, abi, host_identity['stamp']) == network,
+                'network reference/prefix/profile changed during assembly')
     normalize_directories(stage)
     values = inventory(stage)
     manifest = {'schema': 'pw-windows-child-fixture/1', 'project': project, 'wine_commit': prefix.WINE,
@@ -1050,6 +1194,11 @@ def assemble(config, output):
         manifest['run_attempt'] = run_attempt
         manifest['user_reference_inventory'] = user['reference_inventory']
         manifest['optional_roles'] = {**manifest.get('optional_roles', {}), **user_package.ROLES}
+    if network_enabled:
+        manifest['network_enabled'] = True
+        manifest['run_attempt'] = run_attempt
+        manifest['network_reference_inventory'] = network['reference_inventory']
+        manifest['optional_roles'] = {**manifest.get('optional_roles', {}), **network_package.ROLES}
     put_bytes(stage, MANIFEST, json_bytes(manifest))
     put_bytes(stage, SUMS, checksums(inventory(stage)))
     verify_directory(stage)

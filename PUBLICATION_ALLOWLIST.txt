@@ -992,3 +992,22 @@ tests/test_wine_user_title_build.py
 tests/test_windows_child_user_package.py
 tools/windows_child_user_package.py
 tests/test_user_workflow_join.py
+
+# Separate original child-network observation profile.
+tests/fixtures/windows_child_network.c
+tests/fixtures/windows_child_network_contract.h
+tools/build_windows_child_network.ps1
+tools/windows_child_network_contract.py
+tools/windows_child_network_package.py
+tests/test_windows_child_network_contract.py
+tests/test_wine_net_bootstrap.c
+tests/test_wine_net_disabled.c
+tests/test_wine_net_installer.c
+tests/test_wine_net_main.c
+tests/test_wine_net_owner.c
+tests/test_wine_net_title.c
+tests/test_wine_net_wire.c
+tools/check_wine_network_profile.py
+tests/test_wine_network_title_build.py
+tests/test_network_workflow.py
+tests/test_windows_child_network_package.py

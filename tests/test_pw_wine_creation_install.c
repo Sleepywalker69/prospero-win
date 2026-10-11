@@ -101,7 +101,7 @@ static void child_controls(void)
         switch(n){
         case 0:bad.abi=0;break;case 1:bad.abi++;break;case 2:bad.bytes--;break;
         case 3:bad.bytes++;break;case 4:bad.generation=0;break;case 5:bad.wine_pid=0;break;
-        case 6:bad.wine_tid=0;break;case 7:bad.profile=0;break;case 8:bad.profile=4;break;
+        case 6:bad.wine_tid=0;break;case 7:bad.profile=0;break;case 8:bad.profile=5;break;
         case 9:bad.machine=0;break;case 10:bad.machine=0xaa64;break;
         default:bad.profile=1;bad.machine=PW_WINE_FIXTURE_I386;break;
         }

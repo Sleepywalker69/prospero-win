@@ -18,7 +18,7 @@ def wait_for_reference(repository, run_id, attempt, output, *, request_json,
         raise ValueError('invalid run identity')
     if not 0 < timeout <= 900:
         raise ValueError('invalid join timeout')
-    if job_name not in ('original-x64-reference', 'original-user-x64-reference'):
+    if job_name not in ('original-x64-reference', 'original-user-x64-reference', 'original-network-x64-reference'):
         raise ValueError('unreviewed original reference job')
     endpoint = f'https://api.github.com/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100'
     started = last = monotonic()
@@ -78,7 +78,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--job', choices=('original-x64-reference', 'original-user-x64-reference'),
+    parser.add_argument('--job', choices=('original-x64-reference', 'original-user-x64-reference', 'original-network-x64-reference'),
                         default='original-x64-reference')
     args = parser.parse_args()
     token = os.environ['GH_TOKEN']

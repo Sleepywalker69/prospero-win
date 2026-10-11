@@ -89,7 +89,7 @@ class TitleInputs(unittest.TestCase):
     with self.assertRaises(ValueError):self.check_compile(True)
    wrong=copy.deepcopy(record);wrong['sources'].pop('native/pw_wine_child_title.c');p.write_text(json.dumps(wrong))
    with self.assertRaises(ValueError):self.check_compile(True)
- def test_worker_metadata_declares_exact_three_compiled_capabilities(self):
+ def test_worker_metadata_declares_exact_four_compiled_capabilities(self):
   tree=ast.parse((ROOT/'tools/build_wine_service_child.py').read_text())
   function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='inputs')
   result=next(n.value for n in function.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='result' for t in n.targets))
@@ -97,7 +97,8 @@ class TitleInputs(unittest.TestCase):
   self.assertEqual(ast.literal_eval(value),[
    {'mode':1,'prefix':'windows-child-fixture-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False},
    {'mode':2,'prefix':'battlenet-experimental-v1','guest_machine':'I386','backend':'wowprospero','runtime_validated':False},
-   {'mode':3,'prefix':'windows-child-user-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False}])
+   {'mode':3,'prefix':'windows-child-user-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False},
+   {'mode':4,'prefix':'windows-child-net-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False}])
  def test_actual_user_function_mapping_refuses_old_only_missing_or_changed_code(self):
   class Image:
    def __init__(self):
@@ -144,8 +145,8 @@ class TitleInputs(unittest.TestCase):
   self.assertEqual(ast.dump(pairs['title_compile_receipt']),ast.dump(ast.parse("record(build / 'wine-child-title-compile.json')",mode='eval').body))
  def test_enabled_source_flow_and_preserved_original_reference(self):
   native=(ROOT/'tools/build_native.sh').read_text();source=(ROOT/'tools/build_wine_service_child.py').read_text()
-  self.assertIn('PW_WINDOWS_CHILD_FIXTURE_DIR:?',native);self.assertIn('PW_WINDOWS_CHILD_USER_DIR:-',native);self.assertIn('user_title_args=(--user-fixture',native);self.assertIn('--run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"',native);self.assertIn('-DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled"',native);self.assertIn('"${#cc[@]}" "${#common[@]}" "${cc[@]}" "${common[@]}" "${sources[@]}"',native)
-  self.assertLess(source.index('title_input_contract(root, args.service_work'),source.index('fixture_identity = fixture_title_identity'))
+  self.assertIn('PW_WINDOWS_CHILD_FIXTURE_DIR:?',native);self.assertIn('PW_WINDOWS_CHILD_USER_DIR:-',native);self.assertIn('user_title_args+=(--user-fixture',native);self.assertIn('--run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"',native);self.assertIn('-DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled"',native);self.assertIn('"${#cc[@]}" "${#common[@]}" "${cc[@]}" "${common[@]}" "${sources[@]}"',native)
+  self.assertLess(source.index('title_profiles_input_contract(root, args.service_work'),source.index('fixture_identity = fixture_title_identity'))
   self.assertIn("'user_reference_sha256': title_inputs.get('user_reference_sha256')",source)
 
 if __name__=='__main__':unittest.main()
