@@ -7,8 +7,8 @@ from pathlib import Path
 import stat
 import sys
 
-EXPECTED_BYTES = 753755672
-EXPECTED_SHA256 = '1c359aea306d7c029e4532f5aeaa65abf076a22ad04530908a4090093c5fe921'
+EXPECTED_BYTES = 753752815
+EXPECTED_SHA256 = 'f9329dceb8037d8aafbac782c6e525e4f2fbb013f0a9380a0522c51943e021b7'
 PART_BYTES = 200 * 1024 * 1024
 
 
@@ -51,10 +51,10 @@ def split_verified(source, destination, size, digest, part_bytes=PART_BYTES):
             raise ValueError('input changed during read')
     if whole.hexdigest() != digest:
         raise ValueError('whole archive SHA256 mismatch; retained parts are not admitted')
-    report = {'schema': 'exact-archive-byte-parts/1', 'source_artifact_id': 11698782540,
-              'source_run_id': 38128144584, 'source_run_attempt': 1,
-              'source_candidate_commit': '305bae8546ab52cca97b50fdf3eebe1a9f4f1627',
-              'source_compiled_commit': '259cfdbc6f6ff4ef1dcedd32a6a02c4b4c97332e',
+    report = {'schema': 'exact-archive-byte-parts/1', 'source_artifact_id': 11708847047,
+              'source_run_id': 38154132915, 'source_run_attempt': 1,
+              'source_candidate_commit': '3144a113de87d003c6747c4530abd435d4c9781a',
+              'source_compiled_commit': '2d4854e06f904366be6a78cffd38b23deb9e8c2e',
               'transport': {'run_id': os.environ.get('GITHUB_RUN_ID'),
                             'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
                             'commit': os.environ.get('GITHUB_SHA')},
