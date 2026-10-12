@@ -165,6 +165,7 @@ def deployment_inventory(values):
         profile = 'console/data/prospero-win/profiles/' + slug + '.profile'
         expected = [profile, prefix + '/system.reg', prefix + '/user.reg', prefix + '/userdef.reg']
         expected += [prefix + '/drive_c/' + n for n in pe_names[slug]]
+        expected += [prefix + '/drive_c/windows/system32/' + n for n in ('ntdll.dll', 'win32u.dll', 'wowprospero.dll')]
         for name in expected:
             require(included.get(name, {}).get('type') == 'file', 'matched fixture file absent')
         for name, value in included.items():

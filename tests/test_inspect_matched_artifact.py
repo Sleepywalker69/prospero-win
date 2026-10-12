@@ -101,7 +101,8 @@ class ArchiveEvidence(unittest.TestCase):
         leaf = ('windows-child-fixture', 'windows-child-user', 'windows-child-net')
         for slug, programs, directory in zip(m.FIXTURES, pe, leaf):
             root = 'console/data/prospero-win/prefixes/' + slug
-            for name in ('system.reg', 'user.reg', 'userdef.reg', *('drive_c/' + directory + '/' + n for n in programs)):
+            for name in ('system.reg', 'user.reg', 'userdef.reg', *('drive_c/' + directory + '/' + n for n in programs),
+                         *('drive_c/windows/system32/' + n for n in ('ntdll.dll', 'win32u.dll', 'wowprospero.dll'))):
                 values[root + '/' + name] = {'type': 'file', 'bytes': 1, 'sha256': 'a' * 64}
             values['console/data/prospero-win/profiles/' + slug + '.profile'] = {'type': 'file', 'bytes': 1}
         return values
@@ -112,7 +113,7 @@ class ArchiveEvidence(unittest.TestCase):
         self.assertTrue(result['partial_deployment'])
         self.assertFalse(result['battle_launch_allowed'])
         self.assertEqual(set(omitted), {m.BATTLE, m.BATTLE_PROFILE})
-        self.assertEqual(len(included), 18)
+        self.assertEqual(len(included), 27)
         for name in ('PPSA99995/battlenet-experimental-v1', 'PPSA99995/BATTLENET-EXPERIMENTAL-V1.PROFILE'):
             bad = copy.deepcopy(values)
             bad[name] = {'type': 'file', 'bytes': 1}
