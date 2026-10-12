@@ -23,6 +23,10 @@
  *                          ; when nothing is bound, keyboard otherwise
  *   mouse = right_stick    ; a stick moves the pointer: left_stick, right_stick, none
  *   mouse_speed = 1200     ; pointer pixels per second at full tilt
+ *   mouse_deadzone = 20    ; raw stick units around 128: 0..120 (default 20)
+ *   touch_speed = 100      ; touch motion percent: 25..400 (default 100)
+ *   start_mode = profile   ; profile or mouse: initial L3+R3 routing mode
+ *   ui_cross = mouse_left  ; optional mouse/UI-only overrides, ui_<button>
  *   cross = space          ; <button> = <key> | mouse_left | mouse_right |
  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
  *
@@ -70,6 +74,9 @@ enum {
     PW_GAME_DESKTOP_MIN_W = 320, PW_GAME_DESKTOP_MIN_H = 200,
     PW_GAME_DESKTOP_MAX_W = 3840, PW_GAME_DESKTOP_MAX_H = 2160,
     PW_GAME_MOUSE_SPEED_DEFAULT = 1200, PW_GAME_MOUSE_SPEED_MAX = 20000,
+    PW_GAME_MOUSE_DEADZONE_DEFAULT = 20, PW_GAME_MOUSE_DEADZONE_MAX = 120,
+    PW_GAME_TOUCH_SPEED_DEFAULT = 100, PW_GAME_TOUCH_SPEED_MIN = 25,
+    PW_GAME_TOUCH_SPEED_MAX = 400, PW_GAME_BIND_LABEL_CAPACITY = 32,
     PW_GAME_WINEDEBUG_CAPACITY = 128,
     PW_GAME_DEBUG_ENV_MAX = 4, PW_GAME_DEBUG_ENV_NAME = 48, PW_GAME_DEBUG_ENV_VALUE = 96,
 };
@@ -78,6 +85,7 @@ typedef enum PwGameScaling { PW_GAME_SCALING_FIT = 0, PW_GAME_SCALING_INTEGER,
                              PW_GAME_SCALING_STRETCH } PwGameScaling;
 typedef enum PwGameView { PW_GAME_VIEW_WINDOW = 0, PW_GAME_VIEW_DESKTOP } PwGameView;
 typedef enum PwGameInputMode { PW_GAME_INPUT_KEYBOARD = 0, PW_GAME_INPUT_XINPUT } PwGameInputMode;
+typedef enum PwGameStartMode { PW_GAME_START_PROFILE = 0, PW_GAME_START_MOUSE } PwGameStartMode;
 typedef enum PwGameStick { PW_GAME_STICK_NONE = 0, PW_GAME_STICK_LEFT, PW_GAME_STICK_RIGHT } PwGameStick;
 typedef enum PwGameBindKind { PW_GAME_BIND_UNSET = 0, PW_GAME_BIND_NONE, PW_GAME_BIND_KEY,
                               PW_GAME_BIND_MOUSE } PwGameBindKind;
@@ -92,9 +100,12 @@ typedef struct PwGameInput {
     PwGameInputMode mode;
     PwGameStick mouse;
     uint32_t mouse_speed;
+    uint32_t mouse_deadzone, touch_speed;  /* raw stick units; touch percent */
+    PwGameStartMode start_mode;           /* initial routing, not the game's API */
     PwGameBinding bindings[PW_GAME_BUTTON_COUNT];   /* in PW_GAME_BUTTON order */
+    PwGameBinding ui_bindings[PW_GAME_BUTTON_COUNT]; /* unset uses the UI default */
     char preset[PW_APP_ID_CAPACITY];
-    uint32_t set;       /* which of mode/mouse/mouse_speed a file set (overlay) */
+    uint32_t set;       /* which scalar input settings a file set (overlay) */
 } PwGameInput;
 
 typedef struct PwGameDisplay {
@@ -183,4 +194,14 @@ void pw_game_input_overlay(PwGameInput *base, const PwGameInput *overrides);
 void pw_game_input_default_mode(PwGameInput *input);
 /* The DualSense bit of button index i (PW_GAME_BUTTON order), 0 if none. */
 uint32_t pw_game_button_mask(size_t index);
+/* Stable INI button name, or NULL for an invalid index. */
+const char *pw_game_button_name(size_t index);
+/* Effective mouse/UI bindings, including defaults. Reserved mode-switch and
+ * close/window-cycle controls cannot be rebound. Returns PW_ERR_MALFORMED for
+ * duplicate output keys/buttons, avoiding premature releases when one of two
+ * identically bound controls is released. */
+int pw_game_input_ui_bindings(const PwGameInput *input, PwGameBinding *out);
+/* Human-readable effective binding for help/logging. PW_ERR_LIMIT when the
+ * buffer is too small (always NUL-terminated when capacity is nonzero). */
+int pw_game_binding_label(const PwGameBinding *binding, char *text, size_t capacity);
 #endif

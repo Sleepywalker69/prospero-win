@@ -1,5 +1,8 @@
 # Controls
 
+For persistent pointer sensitivity, deadzone, startup routing and mouse/UI
+button overrides, see [Controller settings](CONTROLLER_SETTINGS.md).
+
 A game can be played with the DualSense, with a USB keyboard and mouse, or
 both at once. How the DualSense behaves is set per game by an input preset.
 
@@ -117,3 +120,12 @@ and change parts of it: any line in the profile's own `[input]` section wins
 over the preset's. Put new presets in `/data/prospero-win/input/`, and
 consider sharing them in
 [prospero-win-profiles](https://github.com/mpereiraesaa/prospero-win-profiles).
+
+### Launcher controller settings
+
+Select an available profile and press Square (keyboard F2) to edit startup
+mode, deadzone, stick speed and touch sensitivity. Use up/down to select,
+left/right to adjust, and Cross/Enter on Apply or Cancel. L1/R1 makes larger
+adjustments; Circle/Escape discards the edit. Apply affects the profile's next
+launch. See [controller settings](CONTROLLER_SETTINGS.md#launcher-editor)
+for persistence and preset behavior.

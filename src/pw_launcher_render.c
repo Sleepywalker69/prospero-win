@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "pw_launcher_render.h"
+#include "pw_controller_settings.h"
 #include <string.h>
 
 enum { W=PW_LAUNCHER_RENDER_WIDTH,H=PW_LAUNCHER_RENDER_HEIGHT,
@@ -62,7 +63,7 @@ static const Glyph glyphs[]={
     {'_',{0x00,0x00,0x00,0x00,0x00,0x00,0x1f}},
 };
 
-typedef struct Canvas { uint8_t *pixels;uint32_t stride; } Canvas;
+typedef struct Canvas { uint8_t *pixels;uint32_t stride,width,height; } Canvas;
 
 static uint32_t rgb(uint32_t r,uint32_t g,uint32_t b){return r<<16|g<<8|b;}
 static uint32_t mix(uint32_t a,uint32_t b,uint32_t n,uint32_t d)
@@ -76,7 +77,7 @@ static uint32_t mix(uint32_t a,uint32_t b,uint32_t n,uint32_t d)
 }
 static void put(const Canvas *c,int32_t x,int32_t y,uint32_t color)
 {
-    if(x<0 || y<0 || x>=W || y>=H)return;
+    if(x<0 || y<0 || (uint32_t)x>=c->width || (uint32_t)y>=c->height)return;
     uint8_t *p=c->pixels+(size_t)y*c->stride+(size_t)x*4u;
     p[0]=(uint8_t)color;p[1]=(uint8_t)(color>>8);p[2]=(uint8_t)(color>>16);p[3]=0xff;
 }
@@ -142,131 +143,49 @@ static int32_t fit(const char *s,int32_t preferred,int32_t minimum,int32_t max_w
     while(scale>minimum && text_width(s,scale)>max_width)scale--;
     return scale;
 }
-static uint32_t get(const Canvas *c,int32_t x,int32_t y)
-{
-    const uint8_t *p=c->pixels+(size_t)y*c->stride+(size_t)x*4u;
-    return rgb(p[2],p[1],p[0]);
-}
-/* Three-stop ramp: a at 0, b at mid, c at end. */
-static uint32_t mix3(uint32_t a,uint32_t b,uint32_t c,uint32_t n,uint32_t mid,uint32_t end)
-{
-    return n<mid?mix(a,b,n,mid):mix(b,c,n-mid<end-mid?n-mid:end-mid,end-mid?end-mid:1u);
-}
-/* Crest of the near hill: low on the left, highest a little right of the
- * centre, easing down to the right edge. */
-static int32_t near_crest(int32_t x)
-{
-    int32_t d=x-W*62/100;
-    return 610+(int32_t)((int64_t)d*d*300/((int64_t)W*W))+(x<W*62/100?(W*62/100-x)/14:0);
-}
-/* A distant hill behind the right half. */
-static int32_t far_crest(int32_t x)
-{
-    int32_t d=x-W*88/100;
-    return 585+(int32_t)((int64_t)d*d*520/((int64_t)W*W));
-}
-/* One soft cloud puff: an ellipse whose edge fades out. */
-static void puff(const Canvas *c,int32_t cx,int32_t cy,int32_t rx,int32_t ry)
-{
-    for(int32_t y=cy-ry;y<=cy+ry;y++)for(int32_t x=cx-rx;x<=cx+rx;x++) {
-        if(x<0 || y<0 || x>=W || y>=H)continue;
-        int64_t dx=x-cx,dy=y-cy;
-        int64_t d=(dx*dx*1024)/((int64_t)rx*rx)+(dy*dy*1024)/((int64_t)ry*ry);
-        if(d>=1024)continue;
-        uint32_t a=(uint32_t)((1024-d)*(1024-d)>>12);    /* 0..256, soft edge */
-        if(a>220)a=220;
-        uint32_t white=y>cy?mix(rgb(0xff,0xff,0xff),rgb(0xd6,0xe4,0xf6),(uint32_t)(y-cy),(uint32_t)ry):
-                            rgb(0xff,0xff,0xff);
-        put(c,x,y,mix(get(c,x,y),white,a,256));
-    }
-}
 static void background(const Canvas *c)
 {
-    /* Deep cobalt overhead, bright azure, then a pale horizon haze; a little
-     * warmer light on the upper left, where the sun would be. */
-    for(int32_t y=0;y<H;y++)for(int32_t x=0;x<W;x++) {
-        uint32_t sky=mix3(rgb(0x0f,0x4a,0xc6),rgb(0x3b,0x86,0xe8),rgb(0xb8,0xdc,0xf8),
-                          (uint32_t)(y<660?y:660),330,660);
-        uint32_t glow=(uint32_t)((x<W/2?W/2-x:0)*(y<500?500-y:0)/(W/2*10));
-        put(c,x,y,mix(sky,rgb(0xd8,0xec,0xff),glow>60?60:glow,256));
-    }
-    static const int16_t clouds[][4]={
-        {300,235,190,62},{420,196,170,74},{560,228,180,58},{470,262,250,44},{230,268,150,34},
-        {1050,158,140,46},{1160,138,160,58},{1280,162,150,42},{1170,184,210,30},
-        {1540,300,130,36},{1650,284,150,46},{1760,306,120,30},
-        {700,430,200,30},{840,414,170,40},{980,436,160,28},
-        {160,470,150,26},{290,462,140,32},{1400,470,170,24},{1520,462,120,26},
-    };
-    for(size_t i=0;i<sizeof(clouds)/sizeof(clouds[0]);i++)
-        puff(c,clouds[i][0],clouds[i][1],clouds[i][2],clouds[i][3]);
-    for(int32_t x=0;x<W;x++) {
-        int32_t far=far_crest(x),near=near_crest(x);
-        for(int32_t y=far;y<near && y<H;y++)
-            put(c,x,y,mix(rgb(0x5c,0xa8,0x5c),rgb(0x3a,0x86,0x40),(uint32_t)(y-far),
-                          (uint32_t)(H-far)));
-        for(int32_t y=near;y<H;y++) {
-            /* Sunlit yellow-green along the crest, saturated grass, then a
-             * deeper green toward the bottom and the left. */
-            uint32_t depth=(uint32_t)(y-near);
-            uint32_t grass=mix3(rgb(0x9c,0xd8,0x4c),rgb(0x4c,0xaa,0x2a),rgb(0x22,0x70,0x18),
-                                depth,90,(uint32_t)(H-near>91?H-near:91));
-            uint32_t shade=(uint32_t)(x<W*62/100?(W*62/100-x)*40/(W*62/100):0);
-            put(c,x,y,mix(grass,rgb(0x14,0x4c,0x10),shade,256));
-        }
-    }
+    ramp(c,0,0,W,H,rgb(0x0e,0x19,0x30),rgb(0x24,0x39,0x59));
+    /* Original layered panels, no external desktop artwork or branding. */
+    rounded(c,104,136,1712,688,32,0x304866,0x293d59);
+    rounded(c,112,144,1696,672,26,0x18283f,0x1b2b43);
 }
 static void title_bar(const Canvas *c)
 {
-    ramp(c,0,0,W,BAR,rgb(0x3a,0x86,0xf2),rgb(0x0a,0x44,0xc0));
-    fill(c,0,0,W,3,rgb(0x8c,0xbc,0xff));
-    fill(c,0,BAR-3,W,3,rgb(0x06,0x2e,0x8a));
-    text(c,48,27,"Prospero Win",6,rgb(0xff,0xff,0xff),W);
-    text(c,W-48-text_width("Library",5),31,"Library",5,rgb(0xdc,0xea,0xff),W);
+    text(c,140,48,"Prospero Win",5,0xf4f7ff,W-280);
+    text(c,W-140-text_width("Your library",3),58,"Your library",3,0xaebfd8,W);
 }
 static void tile(const Canvas *c,int32_t x,int32_t y,const PwLauncherItem *item,int selected)
 {
-    /* The selection frame is the familiar Microsoft blue. */
-    if(selected)rounded(c,x-8,y-8,TILE_W+16,TILE_H+16,20,rgb(0x3a,0x9b,0xf0),rgb(0x00,0x78,0xd4));
-    uint32_t edge=item->available?rgb(0x6e,0x96,0xd8):rgb(0x98,0x9c,0xa6);
-    rounded(c,x,y,TILE_W,TILE_H,14,edge,edge);
-    uint32_t top=item->available?rgb(0xff,0xff,0xff):rgb(0xe6,0xe8,0xec);
-    uint32_t bottom=item->available?rgb(0xdc,0xe8,0xfa):rgb(0xc8,0xcc,0xd4);
-    rounded(c,x+4,y+4,TILE_W-8,TILE_H-8,11,top,bottom);
-    /* Header strip carrying the title. */
-    ramp(c,x+4,y+16,TILE_W-8,66,item->available?rgb(0x4a,0x8e,0xee):rgb(0x9a,0xa0,0xac),
-         item->available?rgb(0x22,0x5e,0xcc):rgb(0x74,0x7a,0x86));
+    if(selected)rounded(c,x-8,y-8,TILE_W+16,TILE_H+16,24,0x79bcff,0x79bcff);
+    uint32_t edge=item->available?0x506581:0x454e60;
+    rounded(c,x,y,TILE_W,TILE_H,18,edge,edge);
+    rounded(c,x+2,y+2,TILE_W-4,TILE_H-4,16,
+            item->available?0x334966:0x2b3445,item->available?0x293d59:0x252e3d);
     int32_t title_scale=fit(item->title,5,3,TILE_W-48);
-    text(c,x+24,y+49-7*title_scale/2,item->title,title_scale,rgb(0xff,0xff,0xff),TILE_W-48);
-    if(item->detail)text(c,x+24,y+108,item->detail,fit(item->detail,3,2,TILE_W-48),
-                         rgb(0x2c,0x3a,0x5c),TILE_W-48);
+    text(c,x+24,y+32,item->title,title_scale,0xf4f7ff,TILE_W-48);
+    if(item->detail)text(c,x+24,y+100,item->detail,fit(item->detail,3,2,TILE_W-48),
+                         0xc1cfe2,TILE_W-48);
     if(item->available) {
-        rounded(c,x+24,y+TILE_H-66,168,44,22,rgb(0x5c,0xc4,0x4c),rgb(0x2e,0x8c,0x28));
-        text(c,x+24+(168-text_width("Ready",4))/2,y+TILE_H-58,"Ready",4,rgb(0xff,0xff,0xff),168);
-    } else {
-        text(c,x+24,y+TILE_H-56,"Not available yet",4,rgb(0xb4,0x3c,0x1c),TILE_W-48);
-    }
+        rounded(c,x+24,y+TILE_H-64,240,40,12,selected?0x79bcff:0x435f7d,selected?0x79bcff:0x435f7d);
+        text(c,x+40,y+TILE_H-54,selected?"Cross: open":"Ready",3,selected?0x10233b:0xf4f7ff,216);
+    } else text(c,x+24,y+TILE_H-54,"Unavailable",3,0xf5c49b,TILE_W-48);
 }
 static void taskbar(const Canvas *c,const char *status)
 {
-    ramp(c,0,TASKBAR_Y,W,H-TASKBAR_Y,rgb(0x3c,0x80,0xf0),rgb(0x14,0x4a,0xc4));
-    fill(c,0,TASKBAR_Y,W,3,rgb(0x92,0xbe,0xff));
-    /* Green start-like button with a rounded right edge. */
-    int32_t bw=236,bh=H-TASKBAR_Y-6;
-    for(int32_t j=0;j<bh;j++) {
-        uint32_t color=mix(rgb(0x62,0xc0,0x52),rgb(0x2a,0x88,0x26),(uint32_t)j,(uint32_t)(bh-1));
-        for(int32_t i=0;i<bw;i++)if(!cut(i+30,j,bw+30,bh,30))put(c,i,TASKBAR_Y+6+j,color);
-    }
-    text(c,(bw-text_width("Play",6))/2,TASKBAR_Y+6+(bh-42)/2,"Play",6,rgb(0xff,0xff,0xff),bw);
-    int32_t hints=text(c,bw+48,TASKBAR_Y+30,"Cross: launch   Options+Create (hold): close",3,
-                       rgb(0xff,0xff,0xff),W-bw-96);
-    if(status && *status) {
-        int32_t tray=W-(bw+48+hints+48);
-        int32_t width=text_width(status,3);if(width>tray-48)width=tray-48;
-        if(width>0) {
-            fill(c,W-width-48,TASKBAR_Y+3,width+48,H-TASKBAR_Y-3,rgb(0x0e,0x8c,0xea));
-            text(c,W-width-24,TASKBAR_Y+30,status,3,rgb(0xff,0xff,0xff),width);
-        }
-    }
+    if(status && *status)text(c,140,886,status,fit(status,3,2,W-280),0xc1cfe2,W-280);
+    rounded(c,140,TASKBAR_Y-28,W-280,84,22,0x3d536e,0x354b65);
+    text(c,180,TASKBAR_Y,"D-pad: move   Cross: open   L1/R1: page   Options: controls",3,0xf4f7ff,W-360);
+}
+
+/* Decimal page labels without adding libc formatting to the portable core. */
+static char *decimal(char *out,uint32_t value)
+{
+    char digits[10];unsigned count=0;
+    do { digits[count++]=(char)('0'+value%10);value/=10; } while(value);
+    while(count)*out++=digits[--count];
+    *out=0;
+    return out;
 }
 
 int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *target)
@@ -278,7 +197,7 @@ int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *targe
     if(scene->selected!=PW_LAUNCHER_RENDER_NONE && scene->selected>=scene->count)
         return PW_ERR_PRECONDITION;
     for(uint32_t i=0;i<scene->count;i++)if(!scene->items[i].title)return PW_ERR_PRECONDITION;
-    const Canvas canvas={target->pixels,target->stride};
+    const Canvas canvas={target->pixels,target->stride,target->width,target->height};
     background(&canvas);title_bar(&canvas);
     if(!scene->count) {
         const char *empty="No application profiles found";
@@ -286,16 +205,17 @@ int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *targe
     }
     uint32_t first=scene->selected==PW_LAUNCHER_RENDER_NONE?0:
         scene->selected/PW_LAUNCHER_RENDER_PAGE*PW_LAUNCHER_RENDER_PAGE;
-    for(uint32_t i=first;i<scene->count && i<first+PW_LAUNCHER_RENDER_PAGE;i++) {
+    for(uint32_t i=first;i<scene->count && i-first<PW_LAUNCHER_RENDER_PAGE;i++) {
         uint32_t slot=i-first;
         int32_t x=TILES_X+(int32_t)(slot%3u)*(TILE_W+TILE_GAP);
         int32_t y=TILES_Y+(int32_t)(slot/3u)*(TILE_H+TILE_GAP+24);
         tile(&canvas,x,y,&scene->items[i],i==scene->selected);
     }
     if(scene->count>PW_LAUNCHER_RENDER_PAGE) {
-        char page[]="Page 0/0";
-        page[5]=(char)('1'+first/PW_LAUNCHER_RENDER_PAGE);
-        page[7]=(char)('0'+(scene->count+PW_LAUNCHER_RENDER_PAGE-1)/PW_LAUNCHER_RENDER_PAGE);
+        char page[32]="Page ";
+        char *next=decimal(page+5,first/PW_LAUNCHER_RENDER_PAGE+1);
+        *next++='/';
+        decimal(next,scene->count/PW_LAUNCHER_RENDER_PAGE+!!(scene->count%PW_LAUNCHER_RENDER_PAGE));
         text(&canvas,W-48-text_width(page,3),TILES_Y+2*(TILE_H+TILE_GAP+24),page,3,
              rgb(0xff,0xff,0xff),W);
     }
@@ -306,6 +226,11 @@ int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *targe
 PwLauncherAction pw_launcher_key_action(uint32_t vk)
 {
     switch(vk) {
+    case 0x70:return PW_LAUNCHER_ACTION_HELP; /* F1 */
+    case 0x71:return PW_LAUNCHER_ACTION_SETTINGS; /* F2 */
+    case 0x1b:return PW_LAUNCHER_ACTION_BACK; /* Escape */
+    case 0x21:return PW_LAUNCHER_ACTION_PAGE_PREVIOUS;
+    case 0x22:return PW_LAUNCHER_ACTION_PAGE_NEXT;
     case 0x25:return PW_LAUNCHER_ACTION_LEFT;     /* VK_LEFT */
     case 0x26:return PW_LAUNCHER_ACTION_UP;       /* VK_UP */
     case 0x27:return PW_LAUNCHER_ACTION_RIGHT;    /* VK_RIGHT */
@@ -321,10 +246,158 @@ int pw_launcher_navigate(PwLauncherScene *scene,PwLauncherAction action,uint32_t
     switch(action) {
     case PW_LAUNCHER_ACTION_RIGHT:if(scene->selected+1<scene->count)scene->selected++;break;
     case PW_LAUNCHER_ACTION_LEFT:if(scene->selected)scene->selected--;break;
-    case PW_LAUNCHER_ACTION_DOWN:if(scene->selected+3<scene->count)scene->selected+=3;break;
+    case PW_LAUNCHER_ACTION_DOWN:if(scene->count-1-scene->selected>=3)scene->selected+=3;break;
     case PW_LAUNCHER_ACTION_UP:if(scene->selected>=3)scene->selected-=3;break;
-    case PW_LAUNCHER_ACTION_CHOOSE:return scene->selected<choosable;
+    case PW_LAUNCHER_ACTION_PAGE_PREVIOUS:
+        scene->selected=scene->selected>=PW_LAUNCHER_RENDER_PAGE?scene->selected-PW_LAUNCHER_RENDER_PAGE:0;break;
+    case PW_LAUNCHER_ACTION_PAGE_NEXT:
+        if(scene->count-1-scene->selected<PW_LAUNCHER_RENDER_PAGE)scene->selected=scene->count-1;
+        else scene->selected+=PW_LAUNCHER_RENDER_PAGE;
+        break;
+    case PW_LAUNCHER_ACTION_CHOOSE:
+        return scene->selected<choosable && scene->items && scene->items[scene->selected].available;
     default:break;
     }
     return 0;
+}
+
+PwLauncherAction pw_launcher_pad_action(uint32_t edges)
+{
+    if(edges&0x2000u)return PW_LAUNCHER_ACTION_BACK; /* Circle */
+    if(edges&0x8u)return PW_LAUNCHER_ACTION_HELP; /* Options */
+    if(edges&0x8000u)return PW_LAUNCHER_ACTION_SETTINGS; /* Square */
+    if(edges&0x400u)return PW_LAUNCHER_ACTION_PAGE_PREVIOUS;
+    if(edges&0x800u)return PW_LAUNCHER_ACTION_PAGE_NEXT;
+    if(edges&0x80u)return PW_LAUNCHER_ACTION_LEFT;
+    if(edges&0x20u)return PW_LAUNCHER_ACTION_RIGHT;
+    if(edges&0x10u)return PW_LAUNCHER_ACTION_UP;
+    if(edges&0x40u)return PW_LAUNCHER_ACTION_DOWN;
+    if(edges&0x4000u)return PW_LAUNCHER_ACTION_CHOOSE;
+    return PW_LAUNCHER_ACTION_NONE;
+}
+int pw_launcher_control(PwLauncherScene *scene,PwLauncherAction action,uint32_t choosable,int *help)
+{
+    if(!help)return 0;
+    if(action==PW_LAUNCHER_ACTION_BACK){*help=0;return 0;}
+    if(action==PW_LAUNCHER_ACTION_HELP){*help=!*help;return 0;}
+    return *help?0:pw_launcher_navigate(scene,action,choosable);
+}
+int pw_launcher_render_controls(const PwLauncherScene *scene,int help,const PwPresentTarget *target)
+{
+    int result=pw_launcher_render(scene,target);
+    if(result!=PW_OK || !help)return result;
+    const Canvas canvas={target->pixels,target->stride,target->width,target->height};
+    const Canvas *c=&canvas;
+    rounded(c,226,174,1468,664,30,0x79bcff,0x79bcff);
+    rounded(c,230,178,1460,656,26,0x20344f,0x1a2b43);
+    text(c,286,224,"Controls",5,0xf4f7ff,1300);
+    static const char *lines[]={
+        "LIBRARY",
+        "D-pad / arrows       Move between applications",
+        "Cross / Enter        Open the selected application",
+        "L1/R1 or PgUp/PgDn    Previous / next library page",
+        "Options / F1         Show or hide this guide",
+        "Circle / Escape      Back to library",
+        "IN AN APPLICATION (default bindings)",
+        "L3 + R3              Switch profile / mouse mode",
+        "Touchpad / left stick  Move pointer in mouse mode",
+        "Cross / Circle       Left / right click in mouse mode",
+        "D-pad                Arrow keys in mouse mode",
+        "Square / Triangle    Escape / Enter in mouse mode",
+        "R1 / L1 + R1         Tab / Shift+Tab in mouse mode",
+        "Options (release)    Next GDI window (mouse, same process)",
+        "Options + Create held 1 second asks the app to close.",
+        "Gamepad uses Xbox-compatible input, not native Sony HID.",
+        "Release held controls after changing input mode."
+    };
+    for(size_t i=0;i<sizeof(lines)/sizeof(lines[0]);i++)
+        text(c,286,304+(int32_t)i*30,lines[i],3,i==0 || i==6?0x79bcff:0xe2ebf8,1320);
+    return PW_OK;
+}
+
+int pw_launcher_input_badge(const char *mode,const PwPresentTarget *target)
+{
+    if(!mode || !target || !target->pixels)return PW_ERR_PRECONDITION;
+    if(target->width<160 || target->height<48 || target->width>INT32_MAX || target->height>INT32_MAX ||
+       (uint64_t)target->width*4>target->stride || target->stride%4 ||
+       (uint64_t)target->stride*target->height>target->bytes)return PW_ERR_MALFORMED;
+    const Canvas canvas={target->pixels,target->stride,target->width,target->height};
+    const Canvas *c=&canvas;
+    int32_t scale=target->width>=1000?3:target->width>=640?2:1;
+    int32_t width=scale*128,height=scale*20+12;
+    int32_t margin=target->height>=96?12:4;
+    if(height+2*margin>(int32_t)target->height){scale=1;height=32;width=128;}
+    int32_t x=margin,y=(int32_t)target->height-height-margin;
+    /* Fixed extent for every mode: replacing text never leaves an old suffix. */
+    fill(c,x,y,width,height,0x10233b);
+    fill(c,x,y,3,height,0x79bcff);
+    text(c,x+10,y+5,mode,scale,0xf4f7ff,width-20);
+    text(c,x+10,y+8+8*scale,"L3+R3: switch mode",scale,0x9ac9ff,width-20);
+    return PW_OK;
+}
+
+
+int pw_launcher_render_settings(const PwLauncherScene *scene,int help,
+                                const PwControllerSettings *settings,const char *profile_title,
+                                int preset_refused,const PwPresentTarget *target)
+{
+    if(!settings || (settings->active && (!profile_title || settings->selected>=PW_CONTROLLER_ROWS)))
+        return PW_ERR_PRECONDITION;
+    int status=pw_launcher_render_controls(scene,help && !settings->active,target);
+    if(status!=PW_OK)return status;
+    const Canvas canvas={target->pixels,target->stride,target->width,target->height};
+    const Canvas *c=&canvas;
+    if(!settings->active) {
+        if(help)text(c,286,856,"Square / F2: edit controller settings after closing this guide",3,0xf4f7ff,1320);
+        else {
+            rounded(c,140,TASKBAR_Y-28,W-280,84,22,0x3d536e,0x354b65);
+            text(c,180,TASKBAR_Y-7,"D-pad: move   Cross: open   L1/R1: page",3,0xf4f7ff,W-360);
+            text(c,180,TASKBAR_Y+25,"Square / F2: controller settings   Options / F1: controls",3,0xf4f7ff,W-360);
+        }
+        return PW_OK;
+    }
+    rounded(c,140,TASKBAR_Y-28,W-280,84,22,0x3d536e,0x354b65);
+    text(c,180,TASKBAR_Y,"D-pad: select / adjust   Cross: confirm   Circle: cancel",3,0xf4f7ff,W-360);
+    rounded(c,220,146,1480,794,30,0x79bcff,0x79bcff);
+    rounded(c,224,150,1472,786,26,0x20344f,0x1a2b43);
+    text(c,280,194,"Controller settings",5,0xf4f7ff,1360);
+    text(c,280,248,profile_title,fit(profile_title,3,2,1360),0x9ac9ff,1360);
+    text(c,280,292,"For this profile. Changes take effect on its next launch.",3,0xc1cfe2,1360);
+    static const char *const labels[]={"Startup mode","Stick deadzone","Stick speed",
+                                      "Touch sensitivity","Apply","Cancel"};
+    const char *const hints[]={"PROFILE or MOUSE/UI","0-120 raw units","1-20000 pixels/second",
+                              "25-400 percent","Save changed values","Discard this edit"};
+    for(unsigned row=0;row<PW_CONTROLLER_ROWS;row++) {
+        int32_t y=342+(int32_t)row*72;
+        int selected=row==settings->selected;
+        rounded(c,270,y-12,1380,60,12,selected?0x79bcff:0x2c415e,selected?0x79bcff:0x2c415e);
+        uint32_t color=selected?0x10233b:0xf4f7ff;
+        text(c,296,y,labels[row],3,color,460);
+        if(row<PW_CONTROLLER_APPLY) {
+            char number[16];const char *value=number;
+            if(row==0)value=settings->draft.start_mode==PW_GAME_START_MOUSE?"MOUSE/UI":"PROFILE";
+            else decimal(number,row==1?settings->draft.mouse_deadzone:row==2?settings->draft.mouse_speed:settings->draft.touch_speed);
+            text(c,792,y,value,3,color,300);
+        }
+        text(c,1120,y,hints[row],2,selected?0x213e5c:0xc1cfe2,500);
+    }
+    const char *message=preset_refused?"Preset unavailable or refused. Showing profile fallback values.":
+                                      "Left/right: adjust. L1/R1 or PgUp/PgDn: larger steps.";
+    uint32_t color=preset_refused?0xf5c49b:0xc1cfe2;
+    if(settings->error!=PW_OK) {
+        message=settings->error==PW_ERR_STATE?"Profile changed on disk. Cancel and reopen before saving.":
+            settings->error==PW_ERR_MALFORMED?"Invalid settings. Changes were not saved; cancel to reload.":
+            settings->error==PW_ERR_LIMIT?"Profile is too large. Changes were not saved.":
+            "Could not save. No changes saved. Retry Apply or Cancel.";
+        color=0xf5c49b;
+    }
+    text(c,280,802,message,3,color,1360);
+    text(c,280,852,"Up/down: select   Cross / Enter: confirm   Circle / Escape: cancel",3,0xf4f7ff,1360);
+    int changed=settings->original.start_mode!=settings->draft.start_mode ||
+        settings->original.mouse_deadzone!=settings->draft.mouse_deadzone ||
+        settings->original.mouse_speed!=settings->draft.mouse_speed ||
+        settings->original.touch_speed!=settings->draft.touch_speed;
+    text(c,280,894,changed?"UNSAVED CHANGES. Apply saves for the next launch.":
+                           "Current saved values. Only edits are written on Apply.",2,0xaebfd8,1360);
+    return PW_OK;
 }

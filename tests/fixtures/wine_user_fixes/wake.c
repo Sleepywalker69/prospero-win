@@ -18,9 +18,24 @@ static unsigned checks;
 struct peek_message_filter {int internal;};
 static struct {uintptr_t current_token,global_token;int service,selected,fd;int read_count,read_positive,read_terminal,fd_calls,next_calls,events;unsigned event_type,event_code;int event_down;int sent,mouse,moved,focus,locks;unsigned bits;int queue_calls,poll,wake,changed,peek,signals;int masks;} m;
 static int screen_lock;
+#ifdef HAS_WINDOW_SWITCHER
+static int input_lock;
+static HWND input_owner;
+static UINT64 input_generation;
+static UINT64 window_input_generation(HWND h){return h?1:0;}
+static BYTE held_keys[256],held_buttons[3];
+static int pthread_mutex_trylock(int *p){CHECK(p==&input_lock);return 0;}
+static BOOL is_window(HWND h){return h!=NULL;}
+static void release_window_input(void){input_owner=NULL;}
+static HWND cycle_window(HWND h,INT direction){return h;}
+#endif
 static uintptr_t bridge_token;
 static int pthread_mutex_lock(int*x){(void)x;CHECK(!m.locks);m.locks++;return 0;}
-static int pthread_mutex_unlock(int*x){(void)x;CHECK(m.locks==1);m.locks--;return 0;}
+static int pthread_mutex_unlock(int*x){
+#ifdef HAS_WINDOW_SWITCHER
+ if(x==&input_lock)return 0;
+#endif
+ (void)x;CHECK(m.locks==1);m.locks--;return 0;}
 static uintptr_t bridge_current_token(void){return m.current_token;}
 static int bridge_service_window(HWND h){(void)h;return m.service;}
 static HWND bridge_input_window(HWND h){(void)h;return (HWND)(uintptr_t)m.selected;}
@@ -49,7 +64,11 @@ struct request {int poll_events;UINT wake_mask,changed_mask;};
 #define SERVER_END_REQ }while(0)
 static int wine_server_call(struct request*r){CHECK(!m.locks);m.queue_calls++;m.poll=r->poll_events;m.wake=r->wake_mask;m.changed=r->changed_mask;return 0;}
 /* ACTUAL_FUNCTIONS */
-static void reset(void){memset(&m,0,sizeof(m));bridge_token=0;m.fd=7;m.read_terminal=-1;m.selected=12;m.bits=QS_DRIVER;m.masks=1;input_fd=fake_fd;next_input=fake_next;}
+static void reset(void){
+#ifdef HAS_WINDOW_SWITCHER
+ input_owner=NULL;input_generation=0;memset(held_keys,0,sizeof(held_keys));memset(held_buttons,0,sizeof(held_buttons));
+#endif
+ memset(&m,0,sizeof(m));bridge_token=0;m.fd=7;m.read_terminal=-1;m.selected=12;m.bits=QS_DRIVER;m.masks=1;input_fd=fake_fd;next_input=fake_next;}
 int main(int argc,char**argv){
  const char*which=argc>1?argv[1]:"all";
  if(!strcmp(which,"all")||!strcmp(which,"wake-empty")){

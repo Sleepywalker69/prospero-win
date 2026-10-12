@@ -55,6 +55,7 @@ def main():
         if name=='wake':
             declaration=function(code['ps5drv.c'],'struct ps5_input\n')+';\n';batch=re.findall(r'enum \{ PS5_MAX_WINDOWS = [0-9]+, PS5_INPUT_BATCH = [0-9]+ \};',code['ps5drv.c']);assert len(batch)==1
             text=text.replace('/* INPUT_DECLARATIONS */',declaration+batch[0])
+            if 'static pthread_mutex_t input_lock' in code['ps5drv.c']:text='#define HAS_WINDOW_SWITCHER 1\n'+text
         source.write_text(text)
         binary=a.out/name;flags=['-std=gnu11','-D_GNU_SOURCE','-D__WINESRC__','-fshort-wchar','-O0','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unused-function','-Wno-unused-but-set-variable','-Wno-missing-field-initializers','-Wno-format','-I'+str(a.wine_headers.resolve())]
         if a.case=='desktop-nonps5':flags+=['-DOMIT_PS5_DRIVER=1']

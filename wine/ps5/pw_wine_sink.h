@@ -24,12 +24,13 @@ typedef int (*PwWinePresentSink)(void *context,const void *bgra,uint32_t width,u
                                  uint32_t stride);
 
 enum { PW_WINE_INPUT_KEY=1,PW_WINE_INPUT_MOUSE_MOVE,PW_WINE_INPUT_MOUSE_BUTTON,
+       PW_WINE_INPUT_WINDOW_CYCLE,
        PW_WINE_INPUT_QUEUE=256 };
 typedef struct PwWineInput {
     uint32_t type;
     uint32_t code;      /* KEY: Windows virtual key; MOUSE_BUTTON: 0 left, 1 right, 2 middle */
-    int32_t x,y;        /* MOUSE_MOVE: relative motion in desktop pixels */
-    uint32_t down;      /* KEY, MOUSE_BUTTON: 1 pressed, 0 released */
+    int32_t x,y;        /* MOUSE_MOVE: relative pixels; WINDOW_CYCLE: x=+1/-1, y=0 */
+    uint32_t down;      /* KEY, MOUSE_BUTTON: 1 pressed, 0 released; WINDOW_CYCLE: 1 */
 } PwWineInput;
 
 /* The console's output format: interleaved left,right 16-bit frames at
@@ -64,6 +65,8 @@ typedef struct PwWinePad {
 void pw_wine_set_present_sink(PwWinePresentSink sink,void *context);
 void pw_wine_set_audio_sink(PwWineAudioSink sink,void *context);
 void pw_wine_set_display_release(PwWineDisplayRelease release,void *context);
+/* WINDOW_CYCLE uses code=0, x=+1 (next) or -1 (previous), y=0, down=1.
+ * Selects a visible process-local Wine app family; no cross-process UI claim. */
 /* 0, or -1 when the queue is full or the event is invalid. */
 int pw_wine_post_input(const PwWineInput *event);
 void pw_wine_sink_stats(PwWineSinkStats *stats);

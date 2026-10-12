@@ -73,6 +73,31 @@ static void test_load(void)
     assert(pw_wine_library_input(NULL, root, &input) == PW_ERR_PRECONDITION);
     assert(pw_wine_library_load(NULL, root) == PW_ERR_PRECONDITION);
 
+    /* Persistent controller settings survive preset/profile reloads. A merge
+     * collision refuses the whole preset, retaining only the profile lines. */
+    {
+        PwGameProfile settings;
+        PwGameBinding ui[PW_GAME_BUTTON_COUNT];
+        const char *profile_text = APP("settings", "Settings")
+            "[input]\npreset = settings\ntouch_speed = 200\nui_circle = q\n";
+        assert(pw_game_profile_parse((const uint8_t *)profile_text, strlen(profile_text), &settings) == PW_OK);
+        write_file("input/settings.input", "[input]\nstart_mode = mouse\nmouse_deadzone = 12\n"
+                   "touch_speed = 50\nui_cross = f2\n");
+        for (unsigned reload = 0; reload < 2; reload++) {
+            assert(pw_wine_library_input(&settings, root, &input) == PW_OK);
+            assert(input.start_mode == PW_GAME_START_MOUSE && input.mouse_deadzone == 12 && input.touch_speed == 200);
+            assert(pw_game_input_ui_bindings(&input, ui) == PW_OK && ui[0].code == 0x71 && ui[1].code == 'Q');
+        }
+        write_file("input/settings.input", "[input]\nstart_mode = mouse\nmouse_deadzone = 12\nui_cross = q\n");
+        assert(pw_wine_library_input(&settings, root, &input) == PW_ERR_MALFORMED);
+        assert(input.start_mode == PW_GAME_START_PROFILE && input.mouse_deadzone == 20 && input.touch_speed == 200);
+        assert(pw_game_input_ui_bindings(&input, ui) == PW_OK);
+        assert(ui[0].kind == PW_GAME_BIND_MOUSE && ui[0].code == 0 && ui[1].code == 'Q');
+        write_file("input/settings.input", "[input]\nstart_mode = mouse\ntouch_speed = 401\n");
+        assert(pw_wine_library_input(&settings, root, &input) == PW_ERR_MALFORMED);
+        assert(input.start_mode == PW_GAME_START_PROFILE && input.touch_speed == 200);
+    }
+
     /* A file larger than any valid profile is refused as too large. */
     {
         static char big[PW_APP_PROFILE_MAX_BYTES + 64];

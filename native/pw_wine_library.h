@@ -45,7 +45,8 @@ int pw_wine_library_load(PwWineLibrary *library, const char *root);
 const PwGameProfile *pw_wine_library_find(const PwWineLibrary *library, const char *id);
 /* A profile's input: its preset from <root>/input, then its own lines. A
  * missing or refused preset leaves only the profile's lines; the status
- * says why. */
+ * says why. Conflicting mouse/UI bindings after the preset/profile merge
+ * also refuse the preset and retain the profile's own lines. */
 int pw_wine_library_input(const PwGameProfile *profile, const char *root, PwGameInput *input);
 
 /* The names in a buffer of FreeBSD 11 directory records (struct dirent:

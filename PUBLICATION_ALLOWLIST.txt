@@ -4,6 +4,7 @@ tests/test_ci_builds.py
 CONTRIBUTING.md
 docs/ARCHITECTURE.md
 docs/CASE_STUDY_PINBALL.md
+docs/CONTROLLER_SETTINGS.md
 docs/DEVELOPMENT.md
 docs/DEBUGGING_GUIDE.md
 docs/HARDWARE_VALIDATION.md
@@ -1057,3 +1058,18 @@ tests/test_initial_cancel_workflow.py
 tests/test_owned_helper_control_nonprogress.c
 docs/matched-child-cohort.md
 tools/package_owned_helper.py
+docs/PS5_WINDOW_SWITCHER.md
+tests/fixtures/ps5_window_switcher.c
+tests/test_ps5_window_switcher.py
+wine/patches/0922-win32u-ps5-window-switcher.patch
+native/pw_wine_child_ui.c
+native/pw_wine_child_ui.h
+tests/test_pw_wine_child_ui.c
+docs/CHILD_UI_TRANSPORT.md
+src/pw_controller_settings.c
+src/pw_controller_settings.h
+native/pw_wine_controller_settings.c
+native/pw_wine_controller_settings.h
+tests/test_pw_controller_settings.c
+tests/test_pw_wine_controller_settings.c
+tests/test_controller_settings_launcher.py

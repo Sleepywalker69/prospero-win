@@ -478,8 +478,101 @@ static void test_debug_env(void)
     assert(PW_GAME_DEBUG_ENV_MAX == 4);
 }
 
+static void test_controller_settings(void)
+{
+    PwGameInput input, before;
+    PwGameProfile profile;
+    PwGameBinding ui[PW_GAME_BUTTON_COUNT], untouched[PW_GAME_BUTTON_COUNT];
+    char label[PW_GAME_BIND_LABEL_CAPACITY];
+    pw_game_input_init(&input);
+    assert(input.start_mode == PW_GAME_START_PROFILE);
+    assert(input.mouse_deadzone == 20 && input.touch_speed == 100);
+    assert(pw_game_input_ui_bindings(&input, ui) == PW_OK);
+    assert(ui[CROSS].kind == PW_GAME_BIND_MOUSE && ui[CROSS].code == 0);
+    assert(ui[UP].mask == pw_game_button_mask(UP) && ui[UP].code == 0x26);
+    assert(ui[L3].kind == PW_GAME_BIND_NONE && ui[OPTIONS].kind == PW_GAME_BIND_NONE);
+    assert(preset("[input]\nstart_mode = Mouse\nmouse_deadzone = 0\ntouch_speed = 25\n"
+                  "ui_cross = mouse_right\nui_circle = mouse_left\nui_l2 = q\n", &input) == PW_OK);
+    assert(input.start_mode == PW_GAME_START_MOUSE && input.mouse_deadzone == 0 && input.touch_speed == 25);
+    assert(pw_game_input_ui_bindings(&input, ui) == PW_OK);
+    assert(ui[CROSS].code == 1 && ui[CIRCLE].code == 0 && ui[L2].code == 'Q');
+    /* Only UI settings do not change the game's automatic XInput default. */
+    pw_game_input_default_mode(&input);
+    assert(input.mode == PW_GAME_INPUT_XINPUT);
+    assert(parse(APP "[input]\nstart_mode = profile\nmouse_deadzone = 120\ntouch_speed = 400\n"
+                 "ui_l2 = none\n", &profile) == PW_OK);
+    pw_game_input_overlay(&input, &profile.input);
+    assert(input.start_mode == PW_GAME_START_PROFILE && input.mouse_deadzone == 120 && input.touch_speed == 400);
+    assert(pw_game_input_ui_bindings(&input, ui) == PW_OK);
+    assert(ui[L2].kind == PW_GAME_BIND_NONE && ui[CROSS].code == 1 && ui[CIRCLE].code == 0);
+    assert(parse(APP "[input]\nmouse_deadzone = 17\n", &profile) == PW_OK);
+    pw_game_input_overlay(&input, &profile.input);
+    assert(input.mouse_deadzone == 17 && input.touch_speed == 400 && input.start_mode == PW_GAME_START_PROFILE);
+
+    static const char *bad[] = {
+        "start_mode = xinput\n", "start_mode = mouse\nstart_mode = profile\n",
+        "mouse_deadzone = -1\n", "mouse_deadzone = 121\n", "mouse_deadzone = 9999999999\n",
+        "mouse_deadzone = 1.5\n", "mouse_deadzone = 0\nmouse_deadzone = 0\n",
+        "touch_speed = 0\n", "touch_speed = 24\n", "touch_speed = 401\n",
+        "touch_speed = 100%\n", "touch_speed = 50\ntouch_speed = 60\n",
+        "ui_l3 = none\n", "ui_r3 = q\n", "ui_options = q\n", "ui_create = q\n",
+        "ui_cross = q\nui_cross = q\n", "ui_cross = f25\n", "ui_unknown = q\n",
+        "ui_cross = enter\n", /* default Triangle already sends Enter */
+        "ui_cross = q\nui_circle = q\n", /* duplicate outputs are refused */
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char text[1024];
+        pw_game_input_init(&input);
+        before = input;
+        snprintf(text, sizeof(text), "[input]\nmouse_speed = 800\n%s", bad[i]);
+        assert(preset(text, &input) != PW_OK);
+        assert(!memcmp(&input, &before, sizeof(input))); /* atomic refusal */
+        memset(&profile, 0x5a, sizeof(profile));
+        PwGameProfile profile_before = profile;
+        snprintf(text, sizeof(text), APP "[input]\n%s", bad[i]);
+        assert(parse(text, &profile) != PW_OK);
+        assert(!memcmp(&profile, &profile_before, sizeof(profile)));
+    }
+    /* Every nonreserved button can be rebound, including triggers/touch click. */
+    for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) {
+        char text[128];
+        pw_game_input_init(&input);
+        snprintf(text, sizeof(text), "[input]\nui_%s = q\n", pw_game_button_name(i));
+        assert((preset(text, &input) == PW_OK) == !(pw_game_button_mask(i) & 0xfu));
+    }
+    assert(!pw_game_button_name(PW_GAME_BUTTON_COUNT));
+    assert(pw_game_input_ui_bindings(NULL, ui) == PW_ERR_PRECONDITION);
+    assert(pw_game_input_ui_bindings(&input, NULL) == PW_ERR_PRECONDITION);
+    memset(ui, 0x5a, sizeof(ui));
+    memcpy(untouched, ui, sizeof(ui));
+    input.ui_bindings[CROSS] = (PwGameBinding){ 1, PW_GAME_BIND_KEY, 'Q' };
+    assert(pw_game_input_ui_bindings(&input, ui) == PW_ERR_MALFORMED);
+    assert(!memcmp(ui, untouched, sizeof(ui)));
+
+    const struct { PwGameBinding binding; const char *label; } labels[] = {
+        { { 0, PW_GAME_BIND_MOUSE, 0 }, "mouse left" },
+        { { 0, PW_GAME_BIND_MOUSE, 1 }, "mouse right" },
+        { { 0, PW_GAME_BIND_MOUSE, 2 }, "mouse middle" },
+        { { 0, PW_GAME_BIND_KEY, 0x1b }, "escape" },
+        { { 0, PW_GAME_BIND_KEY, 'Q' }, "Q" },
+        { { 0, PW_GAME_BIND_KEY, '7' }, "7" },
+        { { 0, PW_GAME_BIND_KEY, 0x87 }, "F24" },
+        { { 0, PW_GAME_BIND_KEY, 0x5b }, "VK 0x5B" },
+        { { 0, PW_GAME_BIND_NONE, 0 }, "none" },
+    };
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        assert(pw_game_binding_label(&labels[i].binding, label, sizeof(label)) == PW_OK);
+        assert(!strcmp(label, labels[i].label));
+        assert(pw_game_binding_label(&labels[i].binding, label, 1) == PW_ERR_LIMIT && !label[0]);
+    }
+    assert(pw_game_binding_label(NULL, label, sizeof(label)) == PW_ERR_PRECONDITION);
+    PwGameBinding invalid = { 0, PW_GAME_BIND_MOUSE, 3 };
+    assert(pw_game_binding_label(&invalid, label, sizeof(label)) == PW_ERR_MALFORMED && !label[0]);
+}
+
 int main(void)
 {
+    test_controller_settings();
     test_graphics_env();
     test_published_forms();
     test_profile();

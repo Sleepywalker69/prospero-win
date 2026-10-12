@@ -187,6 +187,13 @@ def main():
                         "--fixtures", str(keys.parent / "fixtures"), "--cc", args.cc,
                         "--out", str(out / ("extended-keys-" + suffix)),
                         *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
+    # Actual window registry, cycle, clipping and input ownership with the real
+    # title sink queue. USER calls remain inert boundaries, not target proof.
+    switcher = keys.with_name("test_ps5_window_switcher.py")
+    for suffix in ("strict", "ubsan"):
+        subprocess.run([sys.executable, str(switcher), "--wine-source", str(args.wine_source),
+                        "--cc", args.cc, "--out", str(out / ("window-switcher-" + suffix)),
+                        *(["--ubsan"] if suffix == "ubsan" else [])], check=True)
     paths = ["dlls/ntdll/unix/process.c", "dlls/ntdll/unix/server.c", "server/process.c", "server/ptrace.c", "dlls/ntdll/unix/thread.c", "include/wine/pw_wine_fixture_provider.h"]
     source = {n: (args.wine_source/n).read_text() for n in paths}
     (out/"source-hashes.json").write_text(json.dumps({n: hashlib.sha256((args.wine_source/n).read_bytes()).hexdigest() for n in paths}, indent=2)+"\n")
