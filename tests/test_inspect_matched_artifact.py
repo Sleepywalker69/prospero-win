@@ -137,9 +137,14 @@ class ArchiveEvidence(unittest.TestCase):
                  'console_execution_verified': False, 'windows_process_support': False,
                  'platform_authentication_verified': False,
                  'net_target_observation': {'schema': 'pw-wine-child-net-target-observation/1',
-                     'stage': 5, 'wire_bytes': 136, 'functions': {}, 'got_slots': {},
-                     'observation_instructions': {}, 'anchor_instruction': 1,
-                     'original_call_instructions': {}, 'focused_disassembly': [],
+                     'stage': 5, 'wire_bytes': 136,
+                     'functions': {'observe_net_targets': {'address': 4096, 'bytes': 64, 'sha256': 'd' * 64},
+                                   'pw_wine_child_data_prepare': {'address': 8192, 'bytes': 128, 'sha256': 'e' * 64}},
+                     'got_slots': {'sceNetSocket': 12288, 'sceNetErrnoLoc': 12296},
+                     'observation_instructions': {'sceNetSocket': [4100], 'sceNetErrnoLoc': [4107]},
+                     'anchor_instruction': 4114,
+                     'original_call_instructions': {'sceNetSocket': [8200], 'sceNetErrnoLoc': [8210]},
+                     'focused_disassembly': ['0x1004: movq (%rip), %rax'],
                      'target_executed': False, 'runtime_validated': False}}
         return value, {m.SELF: {'bytes': 8, 'sha256': 'b' * 64}}
 
@@ -148,7 +153,8 @@ class ArchiveEvidence(unittest.TestCase):
         result = m.selected_native(value, files)
         self.assertNotEqual(result['worker']['build_id'], result['project']['commit'])
         for field, replacement in [('console_execution_verified', True),
-                                   ('schema', 'wrong')]:
+                                   ('windows_process_support', True),
+                                   ('platform_authentication_verified', True), ('schema', 'wrong')]:
             bad = copy.deepcopy(value)
             bad[field] = replacement
             with self.assertRaises(ValueError):
@@ -167,6 +173,26 @@ class ArchiveEvidence(unittest.TestCase):
             bad['net_target_observation'][field] = replacement
             with self.assertRaises(ValueError):
                 m.selected_native(bad, files)
+
+    def test_native_missing_extra_fields_and_log_bound(self):
+        value, files = self.native()
+        for missing in ('functions', 'stage'):
+            bad = copy.deepcopy(value)
+            del bad['net_target_observation'][missing]
+            with self.assertRaises((ValueError, KeyError)):
+                m.selected_native(bad, files)
+        bad = copy.deepcopy(value)
+        bad['net_target_observation']['extra'] = 'not selected'
+        with self.assertRaises(ValueError):
+            m.selected_native(bad, files)
+        bad = copy.deepcopy(value)
+        bad['net_target_observation']['focused_disassembly'] = ['x' * (129 << 10)]
+        with self.assertRaises(ValueError):
+            m.selected_native(bad, files)
+        bad = copy.deepcopy(value)
+        bad['framing'] = {'oversized': 'x' * (193 << 10)}
+        with self.assertRaises(ValueError):
+            m.selected_native(bad, files)
 
 if __name__ == '__main__':
     unittest.main()
