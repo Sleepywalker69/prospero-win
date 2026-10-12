@@ -64,6 +64,29 @@ int main(void)
                       pad.core.released_edges==CREATE && !pad.core.previous_buttons &&
                       pad.right_stick.x==0x80);
     read_rc=0;
+    /* Touch transport uses the existing native ABI, and duplicates cannot
+     * replay a delta or refresh a stalled stream. Interception still wins. */
+    fixture[0]=(PwPadPs5Data){.connected=1,.timestamp=4000,.connected_count=1,
+        .touch_data={.fingers=1,.touch={{321,654,9,{0}}}}};
+    fixture_count=1;assert(pw_pad_ps5_read(&pad)==PW_OK);
+    assert(pad.touch_data.fingers==1 && pad.touch_data.touch[0].x==321);
+    uint64_t serial=pad.sample_serial;
+    fixture[0].touch_data.touch[0].x=555;
+    assert(pw_pad_ps5_read(&pad)==PW_OK && pad.sample_serial==serial && pad.touch_data.touch[0].x==321);
+    fixture[0].timestamp=3999;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.sample_serial==serial);
+    fixture[0].buttons=0x80000000u;
+    assert(pw_pad_ps5_read(&pad)==PW_OK && !pad.touch_data.fingers && pad.discontinuities);
+    fixture[0].buttons=0;fixture[0].timestamp=1;fixture[0].connected_count=2;
+    assert(pw_pad_ps5_read(&pad)==PW_OK && pad.touch_data.touch[0].x==555);
+    fixture[0].timestamp=2;fixture[0].touch_data.fingers=3;
+    assert(pw_pad_ps5_read(&pad)==PW_OK && !pad.touch_data.fingers);
+    fixture[0].timestamp=3;fixture[0].touch_data.fingers=1;
+    assert(pw_pad_ps5_read(&pad)==PW_OK);
+    uint64_t epoch=pad.touch_epoch;
+    fixture[1]=fixture[0];fixture[0].timestamp=4;fixture[0].touch_data.fingers=0;
+    fixture[1].timestamp=5;fixture[1].touch_data.touch[0].x=700;fixture_count=2;
+    assert(pw_pad_ps5_read(&pad)==PW_OK && pad.touch_epoch>epoch &&
+           pad.touch_data.fingers==1 && pad.touch_data.touch[0].x==700);
     /* Vibration: both motors in order, a failure kept, nothing without the op. */
     assert(pw_pad_ps5_vibrate(&pad,200,10)==PW_OK && vibration_calls==1 &&
            motors_seen[0]==200 && motors_seen[1]==10 && !pad.vibration_rc);

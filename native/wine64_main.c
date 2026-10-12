@@ -38,6 +38,7 @@
 #include "pw_hid_ps5.h"
 #include "pw_videoout_ps5.h"
 #include "pw_wine_library.h"
+#include "pw_wine_controller_settings.h"
 #include "pw_wine_prefix.h"
 #include "../src/pw_present.h"
 #include "../src/pw_spinner.h"
@@ -832,6 +833,47 @@ static unsigned long long cpu_ms(void)
 
 /* ---- launcher ----------------------------------------------------------- */
 
+#if !PW_NATIVE_CHILD_PROBE
+/* This modal is launcher-only: it never changes the active game's router. */
+static int launcher_controller_control(PwLauncherScene *scene, PwLauncherAction action,
+                                       uint32_t selectable, int *help, PwWineControllerEdit *edit,
+                                       const char **feedback)
+{
+    if (edit->screen.active) {
+        int result = pw_controller_settings_control(&edit->screen, action,
+                                                     pw_wine_controller_edit_save, edit);
+        if (result == PW_CONTROLLER_APPLIED) *feedback = "CONTROLLER SETTINGS SAVED FOR NEXT LAUNCH";
+        else if (result == PW_CONTROLLER_CANCELED) *feedback = "CONTROLLER SETTINGS CANCELED";
+        if (result != PW_CONTROLLER_CONTINUE ||
+            (action == PW_LAUNCHER_ACTION_CHOOSE && edit->screen.selected == PW_CONTROLLER_APPLY))
+            PS5LOG_LOG("PW_WINE64 controller-settings result=%d status=%s profile=%s",
+                       result, pw_result_name(edit->screen.error), edit->profile.app.id);
+        return 0;
+    }
+    if (*help) return pw_launcher_control(scene, action, selectable, help);
+    if (action == PW_LAUNCHER_ACTION_SETTINGS) {
+        *feedback = "SELECT AN AVAILABLE PROFILE TO EDIT ITS CONTROLLER SETTINGS";
+        if (scene->selected >= selectable || scene->selected >= catalog_count ||
+            scene->selected >= scene->count || !scene->items || !scene->items[scene->selected].available) return 0;
+        const char *id = catalog[scene->selected].id;
+        for (uint32_t i = 0; i < library.count; i++) {
+            const PwWineLibraryEntry *entry = &library.entries[i];
+            if (entry->status != PW_OK || strcmp(entry->profile.app.id, id)) continue;
+            int status = pw_wine_controller_edit_open(edit, library_root, entry->file);
+            if (status == PW_OK && strcmp(edit->profile.app.id, id)) {
+                edit->screen.active = 0; status = PW_ERR_STATE;
+            }
+            *feedback = status == PW_OK ? NULL : "CANNOT OPEN SETTINGS: PROFILE UNREADABLE OR CHANGED";
+            PS5LOG_LOG("PW_WINE64 controller-settings open=%s profile=%s", pw_result_name(status), id);
+            return 0;
+        }
+        return 0;
+    }
+    if (action != PW_LAUNCHER_ACTION_NONE) *feedback = NULL;
+    return pw_launcher_control(scene, action, selectable, help);
+}
+#endif
+
 /* Shown until a game is chosen; Wine is not loaded. Does not return. */
 static void run_launcher(void)
 {
@@ -892,6 +934,10 @@ static void run_launcher(void)
     char log_status[80], report_path[96];
     snprintf(report_path, sizeof(report_path), "GET LOGS OVER FTP: %s/LOGS", library_root);
     int report_help = 0;
+#if !PW_NATIVE_CHILD_PROBE
+    static PwWineControllerEdit controller_edit;
+    const char *settings_feedback = NULL;
+#endif
     pw_diagnostics_status(log_status, sizeof(log_status));
     scene.status = log_status;
     for (uint64_t tick = 1; chosen < 0; tick++) {
@@ -912,24 +958,27 @@ static void run_launcher(void)
         }
 #endif
         uint32_t before = scene.selected;
+        int controls_changed = 0;
         if (pad_status == PW_OK && pw_pad_ps5_read(&pad) == PW_OK) {
 #if PW_NATIVE_CHILD_PROBE
-            if (pad.core.pressed_edges & PAD_SQUARE) pw_native_child_probe_cancel();
+            if (!report_help && (pad.core.pressed_edges & PAD_SQUARE)) pw_native_child_probe_cancel();
 #endif
-            static const struct { uint32_t button; PwLauncherAction action; } pad_actions[] = {
-                { PAD_RIGHT, PW_LAUNCHER_ACTION_RIGHT }, { PAD_LEFT, PW_LAUNCHER_ACTION_LEFT },
-                { PAD_DOWN, PW_LAUNCHER_ACTION_DOWN }, { PAD_UP, PW_LAUNCHER_ACTION_UP },
-                { PAD_CROSS, PW_LAUNCHER_ACTION_CHOOSE },
-            };
-            if (pad.core.pressed_edges & PAD_OPTIONS) {
-                report_help = !report_help;
-                scene.status = report_help ? report_path : log_status;
-                dirty = 1;
-            }
-            for (size_t i = 0; i < sizeof(pad_actions) / sizeof(pad_actions[0]); i++)
-                if ((pad.core.pressed_edges & pad_actions[i].button) &&
-                    pw_launcher_navigate(&scene, pad_actions[i].action, selectable))
-                    chosen = (int)scene.selected;
+            int prior_help = report_help;
+#if PW_NATIVE_CHILD_PROBE
+            if (pw_launcher_control(&scene, pw_launcher_pad_action(pad.core.pressed_edges),
+                                    selectable, &report_help)) chosen = (int)scene.selected;
+            scene.status = report_help ? report_path : log_status;
+            controls_changed = prior_help != report_help;
+#else
+            int prior_settings = controller_edit.screen.active;
+            PwLauncherAction action = pw_launcher_pad_action(pad.core.pressed_edges);
+            if (launcher_controller_control(&scene, action, selectable, &report_help,
+                                              &controller_edit, &settings_feedback)) chosen = (int)scene.selected;
+            scene.status = report_help ? report_path : settings_feedback ? settings_feedback : log_status;
+            controls_changed = prior_help != report_help || prior_settings != controller_edit.screen.active;
+            dirty |= action != PW_LAUNCHER_ACTION_NONE;
+#endif
+            dirty |= controls_changed;
         }
         /* Key presses; a keyboard plugged in later is found every few seconds. */
         if (hid.ops.load_module) {
@@ -938,14 +987,30 @@ static void run_launcher(void)
             if (hid_status != PW_OK && tick % (5 * PW_WINE64_TICKS_PER_S) == 0)
                 hid_status = pw_hid_ps5_retry(&hid);
             pw_hid_ps5_poll(&hid, &poll);
-            for (size_t i = 0; i < poll.count && chosen < 0; i++) {
+            for (size_t i = 0; i < poll.count && chosen < 0 && !controls_changed; i++) {
                 if (poll.events[i].kind != PW_HID_EVENT_KEY || !poll.events[i].down) continue;
 #if PW_NATIVE_CHILD_PROBE
                 /* pw_hid.c maps the keyboard Escape key to Win32 VK_ESCAPE. */
-                if (poll.events[i].code == 0x1b) { pw_native_child_probe_cancel(); continue; }
+                if (poll.events[i].code == 0x1b && !report_help) { pw_native_child_probe_cancel(); continue; }
 #endif
-                if (pw_launcher_navigate(&scene, pw_launcher_key_action(poll.events[i].code), selectable))
-                    chosen = (int)scene.selected;
+                int prior_help = report_help;
+#if PW_NATIVE_CHILD_PROBE
+                if (pw_launcher_control(&scene, pw_launcher_key_action(poll.events[i].code),
+                                        selectable, &report_help)) chosen = (int)scene.selected;
+                scene.status = report_help ? report_path : log_status;
+                controls_changed = prior_help != report_help;
+#else
+                int prior_settings = controller_edit.screen.active;
+                PwLauncherAction action = pw_launcher_key_action(poll.events[i].code);
+                if (launcher_controller_control(&scene, action, selectable, &report_help,
+                                                  &controller_edit, &settings_feedback)) chosen = (int)scene.selected;
+                scene.status = report_help ? report_path : settings_feedback ? settings_feedback : log_status;
+                controls_changed = prior_help != report_help || prior_settings != controller_edit.screen.active;
+                dirty |= action != PW_LAUNCHER_ACTION_NONE;
+#endif
+                dirty |= controls_changed;
+                /* Opening/dismissing a modal cannot activate a queued key in this batch. */
+                if (controls_changed) break;
             }
         }
 #if PW_NATIVE_CHILD_PROBE
@@ -966,7 +1031,11 @@ static void run_launcher(void)
         }
 #endif
         dirty |= scene.selected != before;
-        if (PW_WINE64_SCRIPT && tick == 3 * PW_WINE64_TICKS_PER_S) {
+        if (PW_WINE64_SCRIPT && tick == 3 * PW_WINE64_TICKS_PER_S
+#if !PW_NATIVE_CHILD_PROBE
+            && !controller_edit.screen.active
+#endif
+        ) {
             if (launch.cycle >= PW_WINE64_SCRIPT_CYCLES) {
                 PS5LOG_LOG("PW_WINE64 launcher script done cycles=%u", (unsigned)launch.cycle);
                 pw_diagnostics_close("wine64-script-done");
@@ -980,7 +1049,13 @@ static void run_launcher(void)
                                              PW_LAUNCHER_RENDER_WIDTH * 4u, frame_bytes };
             const PwPresentView view = { frame, target.width, target.height, target.stride,
                                            (uint32_t)frame_bytes };
-            int status = pw_launcher_render(&scene, &target);
+#if PW_NATIVE_CHILD_PROBE
+            int status = pw_launcher_render_controls(&scene, report_help, &target);
+#else
+            int status = pw_launcher_render_settings(&scene, report_help, &controller_edit.screen,
+                                                       controller_edit.profile.app.name,
+                                                       controller_edit.preset_status != PW_OK, &target);
+#endif
             if (status == PW_OK) status = pw_videoout_ps5_present(&video, &view);
             if (status != PW_OK) PS5LOG_LOG("PW_WINE64 launcher present=%s", pw_result_name(status));
 #if PW_NATIVE_CHILD_PROBE
@@ -1125,7 +1200,10 @@ int main(int argc, char **argv)
     const char *child_hold_reason = "main-completion";
 #endif
     int scaling = PW_PRESENT_SCALE_FIT;
-    PwWinePointer pointer = { 0, 0 };
+    PwWineInputRouter input_router = { 0 };
+    PwWineInputDelivery input_delivery = { 0 };
+    PwPresentView gdi_view = { 0 };
+    uint64_t input_tick_ns = now_ns();
     int (*post_input)(const PwWineInput *) = NULL;
     void (*set_pad)(const PwWinePad *) = NULL;
     int (*rumble)(uint32_t *, uint32_t *) = NULL;
@@ -1323,6 +1401,21 @@ int main(int argc, char **argv)
         else if (words) PS5LOG_LOG("PW_WINE64 arguments words=%d line=%s", words, game->app.arguments);
     }
 
+    pw_wine_input_router_init(&input_router, &game_input);
+    PS5LOG_LOG("PW_WINE64 input_start=%s mouse_speed=%u mouse_deadzone=%u touch_speed=%u",
+               pw_wine_input_mode_name(&input_router, &game_input),
+               (unsigned)game_input.mouse_speed, (unsigned)game_input.mouse_deadzone,
+               (unsigned)game_input.touch_speed);
+    {
+        PwGameBinding ui[PW_GAME_BUTTON_COUNT];
+        char label[PW_GAME_BIND_LABEL_CAPACITY];
+        if (pw_game_input_ui_bindings(&game_input, ui) == PW_OK)
+            for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++)
+                if (ui[i].kind != PW_GAME_BIND_NONE &&
+                    pw_game_binding_label(&ui[i], label, sizeof(label)) == PW_OK)
+                    PS5LOG_LOG("PW_WINE64 ui_binding %s=%s", pw_game_button_name(i), label);
+    }
+
     for (size_t i = 0; i < sizeof(runtime_roots) / sizeof(runtime_roots[0]); i++) {
         struct stat st;
         snprintf(ntdll_dir, sizeof(ntdll_dir), "%s" PW_WINE64_RUNTIME, runtime_roots[i]);
@@ -1361,8 +1454,8 @@ int main(int argc, char **argv)
             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_present_sink");
         post_input = (int (*)(const PwWineInput *))
             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_post_input");
-        /* xinput mode: the DualSense is also the game's XInput controller
-         * 0, read by Wine's xinput (patch 0470); bindings still apply. */
+        /* XInput profiles expose controller 0 through patch 0470. Runtime
+         * mouse/UI mode disconnects it to avoid double delivery. */
         if (game_input.mode == PW_GAME_INPUT_XINPUT) {
             set_pad = (void (*)(const PwWinePad *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad");
@@ -1468,12 +1561,13 @@ int main(int argc, char **argv)
         uint64_t now = now_ns();
         pw_diagnostics_tick(now);
         PwPresentView view;
-        PwWineInput events[2 * PW_GAME_BUTTON_COUNT + 1];
+        /* Pending controller releases take priority over new producers. */
+        posted += pw_wine_input_flush(&input_delivery, post_input);
         int presented = 0;
 
         /* The USB keyboard and mouse; one plugged in later is found by a
          * retry every few seconds. */
-        if (post_input && hid.ops.load_module) {
+        if (post_input && !input_delivery.count && hid.ops.load_module) {
             PwHidPs5Poll poll;
             PwWineInput input;
 
@@ -1533,34 +1627,37 @@ int main(int argc, char **argv)
             }
         }
 #endif
+        uint64_t pad_serial = pad.sample_serial;
         int pad_read = pad_status == PW_OK && post_input && pw_pad_ps5_read(&pad) == PW_OK;
-        /* XInput controller 0: the DualSense, and in a script build the
-         * macro's controller added to it, every frame, so a scripted press
-         * stays down until its release. */
-        if (set_pad) {
-            PwWinePad state;
-            int connected = pw_wine_game_pad(pad_read ? &pad : NULL, &state), scripted = 0;
-#if PW_WINE64_SCRIPT
-            scripted = script_input.pad_events != 0;
-            connected = pw_wine_script_pad(&state, connected, &script_pad, scripted);
-#endif
-            if (pad_read || scripted) set_pad(connected ? &state : NULL);
+        int pad_fresh = pad_read && pad.sample_serial != pad_serial;
+        PwWinePad routed_pad = { 0 };
+        unsigned old_mode = input_router.mouse_mode, was_active = input_router.active;
+        if (!input_delivery.count) {
+            uint64_t elapsed = now >= input_tick_ns ? (now - input_tick_ns) / 1000 : 0;
+            uint32_t elapsed_us = elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+            input_tick_ns = now;
+            input_delivery.count = pw_wine_route_input(&input_router, &game_input,
+                    pad_read ? &pad : NULL, 1, elapsed_us, input_delivery.events,
+                    PW_WINE_ROUTED_EVENTS, &routed_pad);
         }
-        if (pad_read) {
-            size_t count = pw_wine_game_inputs(&game_input, pad.core.pressed_edges,
-                                               pad.core.released_edges, events,
-                                               sizeof(events) / sizeof(events[0]) - 1);
-            if (game_input.mouse != PW_GAME_STICK_NONE) {
-                const PwPadPs5Stick *stick = game_input.mouse == PW_GAME_STICK_LEFT ?
-                                             &pad.left_stick : &pad.right_stick;
-                count += (size_t)pw_wine_pointer_step(&pointer, stick->x, stick->y,
-                                                      game_input.mouse_speed,
-                                                      PW_WINE64_TICK_US, &events[count]);
-            }
-            for (size_t i = 0; i < count; i++) {
-                if (post_input(&events[i]) == 0) posted++;
-                else refused++;
-            }
+        if (old_mode != input_router.mouse_mode) {
+            PS5LOG_LOG("PW_WINE64 input_mode=%s control=L3+R3",
+                       pw_wine_input_mode_name(&input_router, &game_input));
+        }
+        if (pad_status == PW_OK && (old_mode != input_router.mouse_mode ||
+                                   (was_active && !input_router.active)))
+            (void)pw_pad_ps5_vibrate(&pad, 0, 0);
+        if (set_pad) {
+#if PW_WINE64_SCRIPT
+            if (!input_router.mouse_mode)
+                pw_wine_script_pad(&routed_pad, routed_pad.connected, &script_pad,
+                                   script_input.pad_events != 0);
+#endif
+            set_pad(routed_pad.connected ? &routed_pad : NULL);
+        }
+        posted += pw_wine_input_flush(&input_delivery, post_input);
+        if (input_delivery.count) refused++; /* bounded batch retained for retry */
+        if (pad_read && input_router.active && !input_router.mouse_mode) {
             /* The rumble the game asked for: XInput's left motor is the
              * DualSense's large one, speeds 0..65535 become 0..255. */
             uint32_t left, right;
@@ -1583,12 +1680,23 @@ int main(int argc, char **argv)
             PwPresentFrame spinner;
             const PwPresentFrame *next;
 
-            if (pw_wine_frame_box_take(&frames, &shown_sequence, frame_shown, PW_WINE64_MAX_FRAME,
-                                       &view) == 1 && loading_admits(&loading, &view)) {
+            int frame_taken = pw_wine_frame_box_take(&frames, &shown_sequence, frame_shown,
+                                                     PW_WINE64_MAX_FRAME, &view);
+            if (frame_taken == 1) gdi_view.pixels = NULL;
+            if (frame_taken == 1 && loading_admits(&loading, &view)) {
+                gdi_view = view;
+                const PwPresentTarget badge = { frame_shown, view.width, view.height,
+                                                view.stride, view.bytes };
+                (void)pw_launcher_input_badge(pw_wine_input_mode_name(&input_router, &game_input), &badge);
                 if (show_scaled(&video, &view, scaling) == PW_OK) {
                     shown++;          /* present waits for the vblank */
                     presented = 1;
                 }
+            } else if (old_mode != input_router.mouse_mode && gdi_view.pixels) {
+                const PwPresentTarget badge = { frame_shown, gdi_view.width, gdi_view.height,
+                                                gdi_view.stride, gdi_view.bytes };
+                (void)pw_launcher_input_badge(pw_wine_input_mode_name(&input_router, &game_input), &badge);
+                if (show_scaled(&video, &gdi_view, scaling) == PW_OK) { shown++; presented = 1; }
             } else if ((next = loading_frame(&loading, now, started, &spinner)) &&
                        pw_videoout_ps5_present_scaled(&video, next, PW_PRESENT_SCALE_FIT, 0) == PW_OK) {
                 presented = 1;
@@ -1605,8 +1713,8 @@ int main(int argc, char **argv)
         if (pad_status == PW_OK && (pad.core.pressed_edges & PAD_CREATE) &&
             !(pad.core.previous_buttons & PAD_OPTIONS))
             PS5LOG_LOG("PW_WINE64 marker by=player tick=%llu", (unsigned long long)tick);
-        combo_ticks = pad_status == PW_OK && (pad.core.previous_buttons & PAD_CLOSE) == PAD_CLOSE ?
-                      combo_ticks + 1 : 0;
+        combo_ticks = pw_wine_close_chord_tick(&input_router, pad_read ? &pad : NULL,
+                    pad_fresh && !input_delivery.count, combo_ticks);
         if (!close_requested &&
             (combo_ticks >= PW_WINE64_TICKS_PER_S ||
              (PW_WINE64_SECONDS && now - started >= (uint64_t)PW_WINE64_SECONDS * 1000000000u))) {

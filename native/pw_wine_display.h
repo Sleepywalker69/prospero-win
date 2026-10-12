@@ -77,7 +77,7 @@ typedef struct PwWinePointer {
     int64_t x, y;
 } PwWinePointer;
 
-enum { PW_WINE_POINTER_DEADZONE = 20 };   /* of 128, stick noise at rest */
+enum { PW_WINE_POINTER_DEADZONE = PW_GAME_MOUSE_DEADZONE_DEFAULT };
 
 /* Move by a stick position (0..255 each axis, 0x80 centred) held for
  * elapsed_us, at up to speed pixels per second at full tilt, on a squared
@@ -86,4 +86,43 @@ enum { PW_WINE_POINTER_DEADZONE = 20 };   /* of 128, stick noise at rest */
  * else 0. */
 int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_y,
                          uint32_t speed, uint32_t elapsed_us, PwWineInput *out);
+/* Same motion curve, with a validated profile deadzone (0..120 of 128).
+ * Out-of-range deadzones use 20; speed is capped at the profile maximum. */
+int pw_wine_pointer_step_configured(PwWinePointer *, uint8_t, uint8_t, uint32_t speed,
+                                    uint32_t deadzone, uint32_t elapsed_us, PwWineInput *);
+/* Exclusive controller routing. The caller passes title focus (ScePad
+ * interception also disconnects the pad), and publishes the returned gamepad
+ * every tick, including its neutral/disconnected state. Capacity must be at
+ * least PW_WINE_ROUTED_EVENTS; otherwise no state is changed.
+ * L3+R3 switches between profile/game and mouse/UI. The chord is reserved.
+ * Mouse/UI: left stick or one-finger relative touch; Cross left, Circle right.
+ * mode_name is a UI/status hook; this does not emulate a Sony HID device. */
+enum { PW_WINE_ROUTED_EVENTS = 2 * PW_GAME_BUTTON_COUNT + 2,
+       PW_WINE_INPUT_STALE_US = 250000 };
+typedef struct PwWineInputRouter {
+    PwWinePointer pointer;
+    uint64_t serial,discontinuities,touch_epoch;
+    uint32_t stale_us,held,blocked;
+    unsigned mouse_mode,chord_latched,active,generation_valid;
+    unsigned analog_blocked,touch_valid,cycle_armed;
+    uint8_t generation,finger;
+    uint16_t touch_x,touch_y;
+} PwWineInputRouter;
+/* Once per launch, before any input is delivered. Reinitializing a live router
+ * would discard held releases; runtime toggles continue through route_input. */
+void pw_wine_input_router_init(PwWineInputRouter *, const PwGameInput *);
+const char *pw_wine_input_mode_name(const PwWineInputRouter *,const PwGameInput *);
+size_t pw_wine_route_input(PwWineInputRouter *,const PwGameInput *,const PwPadPs5 *,
+                           int focused,uint32_t elapsed_us,PwWineInput *,size_t,
+                           PwWinePad *);
+/* A single bounded batch with per-event acknowledgement. Flush pending
+ * events before routing another batch; a refused release is never forgotten
+ * and accepted presses are never retried. */
+typedef struct PwWineInputDelivery {
+    PwWineInput events[PW_WINE_ROUTED_EVENTS];
+    size_t count,next;
+} PwWineInputDelivery;
+size_t pw_wine_input_flush(PwWineInputDelivery *,int (*post)(const PwWineInput *));
+uint64_t pw_wine_close_chord_tick(const PwWineInputRouter *,const PwPadPs5 *,
+                                 int fresh,uint64_t ticks);
 #endif

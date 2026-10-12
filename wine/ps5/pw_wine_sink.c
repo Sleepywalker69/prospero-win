@@ -97,6 +97,7 @@ static int valid(const PwWineInput *e)
     case PW_WINE_INPUT_KEY:return e->code>0 && e->code<256 && e->down<=1;
     case PW_WINE_INPUT_MOUSE_MOVE:return 1;
     case PW_WINE_INPUT_MOUSE_BUTTON:return e->code<=2 && e->down<=1;
+    case PW_WINE_INPUT_WINDOW_CYCLE:return !e->code && (e->x==1 || e->x==-1) && !e->y && e->down==1;
     default:return 0;
     }
 }

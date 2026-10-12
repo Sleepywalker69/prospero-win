@@ -2,7 +2,8 @@
 #include "pw_game_profile.h"
 #include <string.h>
 
-enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3 };
+enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3,
+       SET_DEADZONE = 1u << 4, SET_TOUCH_SPEED = 1u << 5, SET_START_MODE = 1u << 6 };
 
 /* DualSense buttons in PW_GAME_BUTTON order, with their scePadRead bits. */
 static const struct { const char *name; uint32_t mask; } buttons[PW_GAME_BUTTON_COUNT] = {
@@ -138,6 +139,39 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
         input->mouse_speed = speed;
         input->set |= SET_SPEED;
         return PW_OK;
+    }
+    if (is(key, key_length, "start_mode")) {
+        if (input->set & SET_START_MODE) return PW_ERR_MALFORMED;
+        if (is(v, n, "profile")) input->start_mode = PW_GAME_START_PROFILE;
+        else if (is(v, n, "mouse")) input->start_mode = PW_GAME_START_MOUSE;
+        else return PW_ERR_UNSUPPORTED;
+        input->set |= SET_START_MODE;
+        return PW_OK;
+    }
+    if (is(key, key_length, "mouse_deadzone") || is(key, key_length, "touch_speed")) {
+        uint32_t value;
+        int touch = is(key, key_length, "touch_speed");
+        uint32_t flag = touch ? SET_TOUCH_SPEED : SET_DEADZONE;
+        if ((input->set & flag) || number(v, n, &value) != PW_OK ||
+            (touch ? value < PW_GAME_TOUCH_SPEED_MIN || value > PW_GAME_TOUCH_SPEED_MAX :
+                     value > PW_GAME_MOUSE_DEADZONE_MAX)) return PW_ERR_MALFORMED;
+        if (touch) input->touch_speed = value;
+        else input->mouse_deadzone = value;
+        input->set |= flag;
+        return PW_OK;
+    }
+    if (key_length > 3 && is(key, 3, "ui_")) {
+        for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) {
+            if (!is(key + 3, key_length - 3, buttons[i].name)) continue;
+            /* L3+R3 and Options/Create are reserved routing/lifecycle controls. */
+            if (buttons[i].mask & 0x0fu) return PW_ERR_UNSUPPORTED;
+            if (input->ui_bindings[i].kind != PW_GAME_BIND_UNSET) return PW_ERR_MALFORMED;
+            PwGameBinding parsed = { buttons[i].mask, 0, 0 };
+            int status = binding(v, n, &parsed);
+            if (status == PW_OK) input->ui_bindings[i] = parsed;
+            return status;
+        }
+        return PW_ERR_UNSUPPORTED;
     }
     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) {
         if (!is(key, key_length, buttons[i].name)) continue;
@@ -457,6 +491,8 @@ void pw_game_input_init(PwGameInput *input)
     if (!input) return;
     memset(input, 0, sizeof(*input));
     input->mouse_speed = PW_GAME_MOUSE_SPEED_DEFAULT;
+    input->mouse_deadzone = PW_GAME_MOUSE_DEADZONE_DEFAULT;
+    input->touch_speed = PW_GAME_TOUCH_SPEED_DEFAULT;
     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) input->bindings[i].mask = buttons[i].mask;
 }
 
@@ -481,6 +517,8 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
     for (size_t i = 0; parsed.display.show_fps && i < parsed.debug_env_count; i++)
         if (!strcmp(parsed.debug_env[i].name, "DXVK_HUD") || !strcmp(parsed.debug_env[i].name, "GALLIUM_HUD"))
             return PW_ERR_UNSUPPORTED;
+    PwGameBinding ui[PW_GAME_BUTTON_COUNT];
+    if ((status = pw_game_input_ui_bindings(&parsed.input, ui)) != PW_OK) return status;
     *profile = parsed;
     return PW_OK;
 }
@@ -497,7 +535,11 @@ int pw_game_input_parse(const uint8_t *bytes, size_t length, PwGameInput *input)
     pw_game_input_init(&parsed);
     parsed.mouse_speed = 0;
     if ((status = parse_sections(bytes, length, &unused, &parsed, NULL)) != PW_OK) return status;
-    pw_game_input_overlay(input, &parsed);
+    PwGameInput combined = *input;
+    PwGameBinding ui[PW_GAME_BUTTON_COUNT];
+    pw_game_input_overlay(&combined, &parsed);
+    if ((status = pw_game_input_ui_bindings(&combined, ui)) != PW_OK) return status;
+    *input = combined;
     return PW_OK;
 }
 
@@ -507,9 +549,16 @@ void pw_game_input_overlay(PwGameInput *base, const PwGameInput *overrides)
     if (overrides->set & SET_MODE) base->mode = overrides->mode;
     if (overrides->set & SET_MOUSE) base->mouse = overrides->mouse;
     if (overrides->set & SET_SPEED) base->mouse_speed = overrides->mouse_speed;
-    base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED);
-    for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++)
+    if (overrides->set & SET_DEADZONE) base->mouse_deadzone = overrides->mouse_deadzone;
+    if (overrides->set & SET_TOUCH_SPEED) base->touch_speed = overrides->touch_speed;
+    if (overrides->set & SET_START_MODE) base->start_mode = overrides->start_mode;
+    base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED | SET_DEADZONE |
+                                  SET_TOUCH_SPEED | SET_START_MODE);
+    for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) {
         if (overrides->bindings[i].kind != PW_GAME_BIND_UNSET) base->bindings[i] = overrides->bindings[i];
+        if (overrides->ui_bindings[i].kind != PW_GAME_BIND_UNSET)
+            base->ui_bindings[i] = overrides->ui_bindings[i];
+    }
 }
 
 void pw_game_input_default_mode(PwGameInput *input)
@@ -523,4 +572,81 @@ void pw_game_input_default_mode(PwGameInput *input)
 uint32_t pw_game_button_mask(size_t index)
 {
     return index < PW_GAME_BUTTON_COUNT ? buttons[index].mask : 0u;
+}
+
+const char *pw_game_button_name(size_t index)
+{
+    return index < PW_GAME_BUTTON_COUNT ? buttons[index].name : NULL;
+}
+
+int pw_game_input_ui_bindings(const PwGameInput *input, PwGameBinding *out)
+{
+    static const struct { uint8_t kind; uint16_t code; } defaults[PW_GAME_BUTTON_COUNT] = {
+        { PW_GAME_BIND_MOUSE, 0 }, { PW_GAME_BIND_MOUSE, 1 },
+        { PW_GAME_BIND_KEY, 0x1b }, { PW_GAME_BIND_KEY, 0x0d },
+        { PW_GAME_BIND_KEY, 0x10 }, { PW_GAME_BIND_KEY, 0x09 },
+        { PW_GAME_BIND_NONE, 0 }, { PW_GAME_BIND_NONE, 0 },
+        { PW_GAME_BIND_NONE, 0 }, { PW_GAME_BIND_NONE, 0 },
+        { PW_GAME_BIND_KEY, 0x26 }, { PW_GAME_BIND_KEY, 0x28 },
+        { PW_GAME_BIND_KEY, 0x25 }, { PW_GAME_BIND_KEY, 0x27 },
+        { PW_GAME_BIND_NONE, 0 }, { PW_GAME_BIND_NONE, 0 }, { PW_GAME_BIND_NONE, 0 },
+    };
+    PwGameBinding result[PW_GAME_BUTTON_COUNT];
+    if (!input || !out) return PW_ERR_PRECONDITION;
+    for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) {
+        result[i] = input->ui_bindings[i];
+        if (result[i].kind == PW_GAME_BIND_UNSET)
+            result[i] = (PwGameBinding){ buttons[i].mask, defaults[i].kind, defaults[i].code };
+        if (result[i].mask != buttons[i].mask ||
+            (result[i].kind != PW_GAME_BIND_NONE && result[i].kind != PW_GAME_BIND_KEY &&
+             result[i].kind != PW_GAME_BIND_MOUSE) ||
+            (result[i].kind == PW_GAME_BIND_KEY && (!result[i].code || result[i].code > 255)) ||
+            (result[i].kind == PW_GAME_BIND_MOUSE && result[i].code > 2) ||
+            ((buttons[i].mask & 0x0fu) && result[i].kind != PW_GAME_BIND_NONE))
+            return PW_ERR_MALFORMED;
+        if (result[i].kind == PW_GAME_BIND_NONE) continue;
+        for (size_t j = 0; j < i; j++)
+            if (result[i].kind == result[j].kind && result[i].code == result[j].code)
+                return PW_ERR_MALFORMED;
+    }
+    memcpy(out, result, sizeof(result));
+    return PW_OK;
+}
+
+int pw_game_binding_label(const PwGameBinding *b, char *text, size_t capacity)
+{
+    const char *name = NULL;
+    char numeric[8];
+    if (!b || !text || !capacity) return PW_ERR_PRECONDITION;
+    text[0] = 0;
+    if (b->kind == PW_GAME_BIND_NONE || b->kind == PW_GAME_BIND_UNSET) name = "none";
+    else if (b->kind == PW_GAME_BIND_MOUSE && b->code <= 2)
+        name = b->code == 0 ? "mouse left" : b->code == 1 ? "mouse right" : "mouse middle";
+    else if (b->kind == PW_GAME_BIND_KEY && b->code && b->code <= 255) {
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+            if (keys[i].vk == b->code) { name = keys[i].name; break; }
+    } else return PW_ERR_MALFORMED;
+    if (!name) {
+        if ((b->code >= 'A' && b->code <= 'Z') || (b->code >= '0' && b->code <= '9')) {
+            numeric[0] = (char)b->code;
+            numeric[1] = 0;
+        } else if (b->code >= 0x70 && b->code <= 0x87) {
+            unsigned f = b->code - 0x70 + 1;
+            size_t used = 0;
+            numeric[used++] = 'F';
+            if (f >= 10) numeric[used++] = (char)('0' + f / 10);
+            numeric[used++] = (char)('0' + f % 10);
+            numeric[used] = 0;
+        } else {
+            static const char hex[] = "0123456789ABCDEF";
+            memcpy(numeric, "VK 0x00", sizeof(numeric));
+            numeric[5] = hex[b->code >> 4];
+            numeric[6] = hex[b->code & 15];
+        }
+        name = numeric;
+    }
+    size_t length = strlen(name), copied = length < capacity ? length : capacity - 1;
+    memcpy(text, name, copied);
+    text[copied] = 0;
+    return length >= capacity ? PW_ERR_LIMIT : PW_OK;
 }

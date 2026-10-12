@@ -216,6 +216,14 @@ int pw_wine_library_input(const PwGameProfile *profile, const char *root, PwGame
             status = pw_game_input_parse(text, (size_t)length, input);
     }
     pw_game_input_overlay(input, &profile->input);
+    PwGameBinding ui[PW_GAME_BUTTON_COUNT];
+    if (pw_game_input_ui_bindings(input, ui) != PW_OK) {
+        /* An otherwise valid preset can collide with a profile override.
+         * Refuse that preset as a whole, just as for a malformed preset file. */
+        pw_game_input_init(input);
+        pw_game_input_overlay(input, &profile->input);
+        status = PW_ERR_MALFORMED;
+    }
     pw_game_input_default_mode(input);
     return status;
 }

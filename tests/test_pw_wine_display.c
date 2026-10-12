@@ -299,8 +299,233 @@ static void test_script_pad(void)
     }
 }
 
+static void test_input_router(void)
+{
+    PwWineInputRouter r={0};
+    PwGameInput profile;
+    PwPadPs5 pad={0};
+    PwWinePad game;
+    PwWineInput e[PW_WINE_ROUTED_EVENTS];
+    size_t n;
+    pw_game_input_init(&profile);profile.mode=PW_GAME_INPUT_XINPUT;
+    pad.core.connected=1;pad.left_stick=pad.right_stick=(PwPadPs5Stick){128,128};
+#define STEP() (pad.sample_serial++,pw_wine_route_input(&r,&profile,&pad,1,10000,e,PW_WINE_ROUTED_EVENTS,&game))
+    assert(STEP()==0 && game.connected);
+    pad.core.previous_buttons=0x4000;assert(STEP()==0 && game.buttons==0x1000);
+    pad.core.previous_buttons=2;assert(STEP()==0 && game.buttons==0x40); /* L3 remains usable */
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=0x4000;assert(STEP()==0);
+    /* Switch with Cross held: release gamepad, never leak held click. */
+    pad.core.previous_buttons|=6;assert(STEP()==0 && !game.connected && r.mouse_mode);
+    for(int i=0;i<8;i++)assert(STEP()==0 && r.mouse_mode && !game.connected);
+    pad.core.previous_buttons=0x4000;assert(STEP()==0);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=0x4000;n=STEP();
+    assert(n==1 && e[0].type==PW_WINE_INPUT_MOUSE_BUTTON && e[0].code==0 && e[0].down);
+    /* Toggle releases held mouse before exposing gamepad. */
+    pad.core.previous_buttons|=6;n=STEP();assert(n==1 && !e[0].down && !r.mouse_mode && !game.connected);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=6;assert(STEP()==0 && r.mouse_mode);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    /* Touch anchors, uses actual deltas, ignores repeated/stale frames. */
+    pad.touch_data.fingers=1;pad.touch_data.touch[0]=(PwPadPs5Touch){100,100,7,{0}};
+    assert(STEP()==0);
+    pad.touch_data.touch[0].x=110;pad.touch_data.touch[0].y=94;
+    n=STEP();assert(n==1 && e[0].x==5 && e[0].y==-3);
+    assert(pw_wine_route_input(&r,&profile,&pad,1,10000,e,PW_WINE_ROUTED_EVENTS,&game)==0);
+    pad.touch_data.touch[0].finger=8;pad.touch_data.touch[0].x=900;assert(STEP()==0);
+    pad.touch_data.fingers=0;assert(STEP()==0);
+    pad.left_stick.x=148;assert(STEP()==0); /* dead zone */
+    pad.left_stick.x=255;n=STEP();assert(n==1 && e[0].x>0);
+    pad.left_stick.x=128;pad.core.previous_buttons=0x2000;n=STEP();assert(n==1 && e[0].code==1 && e[0].down);
+    /* Focus loss releases; held input cannot be re-pressed on restoration. */
+    n=pw_wine_route_input(&r,&profile,&pad,0,10000,e,PW_WINE_ROUTED_EVENTS,&game);
+    assert(n==1 && !e[0].down && !game.connected);
+    assert(STEP()==0);pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=0x4000;assert(STEP()==1);
+    /* Empty reads eventually release without replaying movement. */
+    n=pw_wine_route_input(&r,&profile,&pad,1,PW_WINE_INPUT_STALE_US,e,PW_WINE_ROUTED_EVENTS,&game);
+    assert(n==1 && !e[0].down && !r.active);
+    assert(STEP()==0);pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=0x4000;assert(STEP()==1);
+    pad.core.connected=0;n=STEP();assert(n==1 && !e[0].down);
+    pad.core.connected=1;assert(STEP()==0);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=0x4000;assert(STEP()==1);
+    pad.discontinuities++;n=STEP();assert(n==1 && !e[0].down);
+    pad.core.previous_buttons=0;pad.discontinuities++;
+    pad.core.pressed_edges=pad.core.released_edges=0x4000;
+    assert(STEP()==0); /* discontinuity must discard batched click pulses */
+    pad.core.pressed_edges=pad.core.released_edges=0;
+    pad.touch_data.fingers=1;pad.touch_data.touch[0]=(PwPadPs5Touch){100,100,7,{0}};
+    assert(STEP()==0);
+    pad.touch_epoch++;pad.touch_data.touch[0].x=300;
+    assert(STEP()==0); /* lift/re-touch same ID inside native batch reanchors */
+    pad.touch_data.fingers=0;assert(STEP()==0);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=0xc00;n=STEP();
+    assert(n==2 && e[0].code==0x10 && e[0].down && e[1].code==9 && e[1].down);
+    pad.core.connected=0;n=STEP();assert(n==2 && !e[0].down && !e[1].down);
+    pad.core.connected=1;pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=8;assert(STEP()==0);
+    assert(STEP()==0);
+    pad.core.previous_buttons=0;n=STEP();
+    assert(n==1 && e[0].type==PW_WINE_INPUT_WINDOW_CYCLE && e[0].x==1);
+    pad.core.previous_buttons=8;assert(STEP()==0);
+    pad.core.previous_buttons=9;assert(STEP()==0); /* close chord cancels cycle */
+    pad.core.previous_buttons=8;assert(STEP()==0);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.previous_buttons=1;assert(STEP()==0);
+    pad.core.previous_buttons=9;assert(STEP()==0);
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    /* Tiny output buffers cannot consume state or lose releases. */
+    PwWineInputRouter saved=r;
+    assert(pw_wine_route_input(&r,&profile,&pad,1,10000,e,0,&game)==0 && !memcmp(&r,&saved,sizeof(r)));
+    assert(pw_wine_route_input(NULL,&profile,&pad,1,10000,e,PW_WINE_ROUTED_EVENTS,&game)==0);
+    /* Repeat toggles, full-release latch and no duplicate ownership. */
+    pad.core.previous_buttons=0;assert(STEP()==0);
+    for(int i=0;i<100;i++) {
+        unsigned old=r.mouse_mode;
+        pad.core.previous_buttons=6;STEP();assert(r.mouse_mode!=old && !game.connected);
+        STEP();assert(r.mouse_mode!=old);
+        pad.core.previous_buttons=0;STEP();
+    }
+    pad.core.previous_buttons=9;STEP();
+    assert(pw_wine_close_chord_tick(&r,&pad,1,10)==11);
+    assert(pw_wine_close_chord_tick(&r,&pad,0,10)==0);
+    r.stale_us=PW_WINE_INPUT_STALE_US;r.active=0;
+    assert(pw_wine_close_chord_tick(&r,&pad,1,10)==0);
+    /* A reset releases the maximum old binding set without admitting
+     * batch tap pulses or exceeding the fixed delivery capacity. */
+    memset(&r,0,sizeof(r));r.active=1;r.held=0x1ffff;
+    profile.mode=PW_GAME_INPUT_KEYBOARD;
+    for(unsigned i=0;i<PW_GAME_BUTTON_COUNT;i++)
+        profile.bindings[i]=(PwGameBinding){1u<<i,PW_GAME_BIND_KEY,(uint16_t)(0x30+i)};
+    pad.core.previous_buttons=0;pad.core.pressed_edges=pad.core.released_edges=0x1ffff;
+    pad.discontinuities++;
+    n=STEP();assert(n==PW_GAME_BUTTON_COUNT);
+    for(size_t i=0;i<n;i++)assert(!e[i].down);
+    pad.core.pressed_edges=pad.core.released_edges=0;
+    pw_game_input_init(&profile);
+    /* Keyboard profiles retain their bindings, without a gamepad. */
+    memset(&r,0,sizeof(r));profile.mode=PW_GAME_INPUT_KEYBOARD;
+    profile.bindings[0]=(PwGameBinding){0x4000,PW_GAME_BIND_KEY,0x20};
+    pad.core.previous_buttons=0;assert(STEP()==0 && !game.connected);
+    pad.core.previous_buttons=0x4000;n=STEP();assert(n==1 && e[0].code==0x20 && e[0].down);
+    pad.core.generation++;n=STEP();assert(n==1 && !e[0].down && !game.connected);
+    assert(STEP()==0);pad.core.previous_buttons=0;assert(STEP()==0);
+    pad.core.pressed_edges=pad.core.released_edges=0x4000;
+    n=STEP();assert(n==2 && e[0].down && !e[1].down && e[0].code==0x20);
+    assert(pw_wine_route_input(&r,&profile,&pad,1,10000,e,PW_WINE_ROUTED_EVENTS,&game)==0);
+#undef STEP
+}
+
+static void test_delivery_backpressure(void)
+{
+    PwWineInputDelivery d={0};
+    PwWineInput next,move={PW_WINE_INPUT_MOUSE_MOVE,0,1,1,0};
+    while(pw_wine_next_input(&next)) {}
+    /* Actual sink, one free slot: down accepted, up refused. */
+    for(int i=0;i<PW_WINE_INPUT_QUEUE-1;i++)assert(!pw_wine_post_input(&move));
+    d.events[0]=(PwWineInput){PW_WINE_INPUT_KEY,0x20,0,0,1};
+    d.events[1]=(PwWineInput){PW_WINE_INPUT_KEY,0x20,0,0,0};d.count=2;
+    assert(pw_wine_input_flush(&d,pw_wine_post_input)==1 && d.next==1 && d.count==2);
+    assert(pw_wine_input_flush(&d,pw_wine_post_input)==0 && d.next==1);
+    unsigned downs=0,ups=0;
+    while(pw_wine_next_input(&next))if(next.type==PW_WINE_INPUT_KEY){downs+=next.down;ups+=!next.down;}
+    assert(downs==1 && ups==0);
+    assert(pw_wine_input_flush(&d,pw_wine_post_input)==1 && !d.count && !d.next);
+    assert(pw_wine_next_input(&next) && next.code==0x20 && !next.down);
+    assert(!pw_wine_next_input(&next));
+    assert(pw_wine_input_flush(&d,pw_wine_post_input)==0);
+}
+
+static void test_configured_controller(void)
+{
+    PwGameInput profile;
+    PwWineInputRouter router;
+    PwPadPs5 pad = { 0 };
+    PwWineInput events[PW_WINE_ROUTED_EVENTS], movement, expected;
+    PwWinePad gamepad;
+    PwWinePointer pointer = { 0 }, reference = { 0 };
+    const char *settings = "[input]\nmode = xinput\nstart_mode = mouse\nmouse_deadzone = 40\n"
+                           "touch_speed = 200\nui_cross = space\nui_circle = none\n";
+    pw_game_input_init(&profile);
+    assert(pw_game_input_parse((const uint8_t *)settings, strlen(settings), &profile) == PW_OK);
+    pw_wine_input_router_init(&router, &profile);
+    assert(router.mouse_mode && !router.active && !router.held);
+    assert(!strcmp(pw_wine_input_mode_name(&router, &profile), "MOUSE/UI"));
+    pad.core.connected = 1;
+    pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 128, 128 };
+#define CONFIG_STEP() (++pad.sample_serial, pw_wine_route_input(&router, &profile, &pad, 1, 16000, events, PW_WINE_ROUTED_EVENTS, &gamepad))
+    assert(CONFIG_STEP() == 0 && !gamepad.connected);
+    pad.core.previous_buttons = 0x4000;
+    assert(CONFIG_STEP() == 1 && events[0].type == PW_WINE_INPUT_KEY && events[0].code == 0x20 && events[0].down);
+    pad.core.previous_buttons |= 6;
+    assert(CONFIG_STEP() == 1 && !events[0].down && events[0].code == 0x20);
+    assert(!router.mouse_mode && !gamepad.connected); /* old remapped key released before switch */
+    pad.core.previous_buttons = 0;
+    assert(CONFIG_STEP() == 0 && gamepad.connected);
+    pad.core.previous_buttons = 0x4000;
+    assert(CONFIG_STEP() == 0 && gamepad.buttons == 0x1000); /* profile mode still XInput */
+    pad.core.previous_buttons = 0;
+    CONFIG_STEP();
+    pad.core.previous_buttons = 6;
+    assert(CONFIG_STEP() == 0 && router.mouse_mode && !gamepad.connected);
+    pad.core.previous_buttons = 0;
+    assert(CONFIG_STEP() == 0);
+    pad.core.previous_buttons = 0x2000;
+    assert(CONFIG_STEP() == 0); /* explicit UI none */
+    pad.core.previous_buttons = 0;
+    assert(CONFIG_STEP() == 0);
+    pad.left_stick.x = 158;
+    assert(CONFIG_STEP() == 0); /* configured 40-unit deadzone */
+    pad.left_stick.x = 255;
+    assert(CONFIG_STEP() == 1 && events[0].type == PW_WINE_INPUT_MOUSE_MOVE && events[0].x == 19);
+    pad.left_stick.x = 128;
+    pad.touch_data.fingers = 1;
+    pad.touch_data.touch[0] = (PwPadPs5Touch){ 100, 100, 3, {0} };
+    assert(CONFIG_STEP() == 0); /* anchor only */
+    pad.touch_data.touch[0].x = 110;
+    pad.touch_data.touch[0].y = 95;
+    assert(CONFIG_STEP() == 1 && events[0].x == 10 && events[0].y == -5);
+    pad.touch_data.touch[0].finger++;
+    pad.touch_data.touch[0].x = 300;
+    assert(CONFIG_STEP() == 0); /* sensitivity never bypasses re-anchoring */
+    pad.touch_data.fingers = 0;
+    assert(CONFIG_STEP() == 0);
+    /* Defaults and invalid programmatic startup enums select profile mode. */
+    pw_wine_input_router_init(&router, NULL);
+    assert(!router.mouse_mode && !router.active);
+    profile.start_mode = (PwGameStartMode)99;
+    pw_wine_input_router_init(&router, &profile);
+    assert(!router.mouse_mode);
+    pw_wine_input_router_init(NULL, &profile);
+#undef CONFIG_STEP
+
+    /* Boundary deadzones remain finite, monotone and retain full travel. */
+    for (uint32_t deadzone = 0; deadzone <= PW_GAME_MOUSE_DEADZONE_MAX; deadzone++) {
+        pointer = (PwWinePointer){ 0, 0 };
+        assert(!pw_wine_pointer_step_configured(&pointer, (uint8_t)(128 + deadzone), 128,
+                                               1200, deadzone, 16000, &movement));
+        assert(pw_wine_pointer_step_configured(&pointer, 255, 0, 1200, deadzone, 16000, &movement));
+        assert(movement.x == 19 && movement.y == -19);
+    }
+    pointer = reference = (PwWinePointer){ 0, 0 };
+    assert(pw_wine_pointer_step_configured(&pointer, 160, 96, 1200, UINT32_MAX, 1000000, &movement));
+    assert(pw_wine_pointer_step(&reference, 160, 96, 1200, 1000000, &expected));
+    assert(movement.type == expected.type && movement.x == expected.x && movement.y == expected.y);
+    assert(!memcmp(&pointer, &reference, sizeof(pointer)));
+    pointer = (PwWinePointer){ 0, 0 };
+    assert(pw_wine_pointer_step_configured(&pointer, 255, 128, UINT32_MAX, 0, UINT32_MAX, &movement));
+    assert(movement.x > 0 && movement.x < INT32_MAX); /* speed capped before multiply */
+}
+
 int main(void)
 {
+    test_configured_controller();
+    test_delivery_backpressure();
+    test_input_router();
     test_frames();
     test_threads();
     test_inputs();

@@ -52,6 +52,8 @@ static int valid_ops(const PwPadPs5Ops *ops)
 static void centre_analog(PwPadPs5 *pad)
 {
     pad->left_stick=pad->right_stick=(PwPadPs5Stick){0x80,0x80};pad->l2=pad->r2=0;
+    pad->touch_epoch++;
+    memset(&pad->touch_data,0,sizeof(pad->touch_data));
 }
 
 int pw_pad_ps5_open(PwPadPs5 *pad,const PwPadPs5Ops *ops,
@@ -83,27 +85,40 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
      * consumed repeatedly by the title lifecycle adapter. */
     pad->core.pressed_edges=0;pad->core.released_edges=0;
     int count=pad->ops.pad_read(pad->pad_handle,raw,PW_PAD_PS5_BATCH);pad->last_read_rc=count;
-    if(count<0){pad->read_errors++;centre_analog(pad);return count;}
+    if(count<0){pad->read_errors++;pad->discontinuities++;centre_analog(pad);return count;}
     if(!count){pad->empty_reads++;return 0;}
     if(count>PW_PAD_PS5_BATCH)count=PW_PAD_PS5_BATCH;
+    int used=0;
     for(int i=0;i<count;i++) {
         unsigned intercepted=(raw[i].buttons&PW_PAD_INTERCEPTED)!=0;
-        samples[i]=(PwPadSample){.buttons=raw[i].buttons&~PW_PAD_INTERCEPTED,
+        /* A repeated/out-of-order connected sample cannot replay a touch delta
+         * or keep a dead device alive. Disconnect/interception always wins. */
+        if(raw[i].connected && !intercepted && pad->timestamp_valid &&
+           pad->last_generation==raw[i].connected_count &&
+           raw[i].timestamp && raw[i].timestamp<=pad->last_timestamp)continue;
+        pad->last_timestamp=raw[i].timestamp;pad->timestamp_valid=raw[i].timestamp!=0;
+        pad->sample_serial++;
+        samples[used++]=(PwPadSample){.buttons=raw[i].buttons&~PW_PAD_INTERCEPTED,
             .timestamp_us=raw[i].timestamp,.generation=raw[i].connected_count,
             .connected=raw[i].connected!=0,.intercepted=intercepted};
         if(!pad->generation_valid || pad->last_generation!=raw[i].connected_count) {
             pad->last_generation=raw[i].connected_count;pad->generation_valid=1;
             pad->generation_changes++;
         }
-        if(intercepted){pad->intercepted_samples++;centre_analog(pad);}
+        if(intercepted){pad->discontinuities++;pad->intercepted_samples++;centre_analog(pad);}
         else if(raw[i].connected) {
             pad->connected_samples++;
             pad->left_stick=raw[i].left_stick;pad->right_stick=raw[i].right_stick;
             pad->l2=raw[i].l2;pad->r2=raw[i].r2;
+            if(pad->touch_data.fingers!=1 || raw[i].touch_data.fingers!=1 ||
+               pad->touch_data.touch[0].finger!=raw[i].touch_data.touch[0].finger)
+                pad->touch_epoch++;
+            pad->touch_data=raw[i].touch_data;
+            if(pad->touch_data.fingers>2)pad->touch_data.fingers=0;
         }
-        else{pad->disconnected_samples++;centre_analog(pad);}
+        else{pad->discontinuities++;pad->disconnected_samples++;centre_analog(pad);}
     }
-    return count;
+    return used;
 }
 
 int pw_pad_ps5_read(PwPadPs5 *pad)

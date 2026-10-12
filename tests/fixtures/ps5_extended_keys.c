@@ -20,16 +20,31 @@ static struct {
  INPUT sent[PS5_INPUT_BATCH];
 } m;
 static int screen_lock;
+#ifdef HAS_WINDOW_SWITCHER
+static int input_lock;
+static HWND input_owner;
+static UINT64 input_generation;
+static UINT64 window_input_generation(HWND h){return h?1:0;}
+static BYTE held_keys[256],held_buttons[3];
+static int pthread_mutex_trylock(int *p){CHECK(p==&input_lock);return 0;}
+static BOOL is_window(HWND h){return h!=NULL;}
+static void release_window_input(void){input_owner=NULL;}
+static HWND cycle_window(HWND h,INT direction){return h;}
+#endif
 static uintptr_t bridge_token;
 static int fake_lock(int *p) { CHECK(p==&screen_lock&&!m.locks); m.locks++; return 0; }
-static int fake_unlock(int *p) { CHECK(p==&screen_lock&&m.locks==1); m.locks--; return 0; }
+static int fake_unlock(int *p) {
+#ifdef HAS_WINDOW_SWITCHER
+ if(p==&input_lock)return 0;
+#endif
+ CHECK(p==&screen_lock&&m.locks==1); m.locks--; return 0; }
 #define pthread_mutex_lock fake_lock
 #define pthread_mutex_unlock fake_unlock
 static uintptr_t bridge_current_token(void) { return m.current_token; }
-static BOOL bridge_service_window(HWND h) { CHECK(h==m.foreground); return m.service; }
+static inline BOOL bridge_service_window(HWND h) { CHECK(h==m.foreground); return m.service; }
 static HWND bridge_input_window(HWND h) { CHECK(h==m.foreground&&m.locks==1); return m.selected; }
 static HWND NtUserGetForegroundWindow(void) { return m.foreground; }
-static void NtUserSetForegroundWindow(HWND h) { CHECK(!m.locks&&h); m.foreground=h; m.focus++; }
+static void NtUserSetForegroundWindow(HWND h) { CHECK(!m.locks&&h); m.foreground=h; m.selected=h; m.focus++; }
 static HWND last_shown_window(void) { return m.last; }
 static int fake_fd(void) { m.fd_calls++; return m.fd; }
 static ssize_t fake_read(int fd,void *buffer,size_t size) { CHECK(fd==m.fd&&buffer&&size==64);m.reads++;if(m.read_bytes){m.read_bytes--;return 1;}errno=EAGAIN;return -1; }
@@ -44,7 +59,11 @@ static void NtUserSendHardwareInput(HWND h,UINT a,INPUT *input,UINT b) { CHECK(!
 static void move_cursor(HWND h,INT x,INT y) { CHECK(!m.locks&&h==m.selected&&x==3&&y==-4);m.moves++; }
 static void send_mouse(HWND h,DWORD flags,INT x,INT y) { static const DWORD expected[3][2]={{MOUSEEVENTF_LEFTUP,MOUSEEVENTF_LEFTDOWN},{MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_RIGHTDOWN},{MOUSEEVENTF_MIDDLEUP,MOUSEEVENTF_MIDDLEDOWN}};CHECK(!m.locks&&h==m.selected&&!x&&!y&&m.code<3&&flags==expected[m.code][m.down!=0]);m.buttons++; }
 /* ACTUAL_FUNCTIONS */
-static void reset(void) { memset(&m,0,sizeof(m));bridge_token=0;m.selected=H(12);m.foreground=H(12);m.fd=-1;m.type=1;next_input=fake_next;input_fd=fake_fd; }
+static void reset(void) {
+#ifdef HAS_WINDOW_SWITCHER
+ input_owner=NULL;input_generation=0;memset(held_keys,0,sizeof(held_keys));memset(held_buttons,0,sizeof(held_buttons));
+#endif
+ memset(&m,0,sizeof(m));bridge_token=0;m.selected=H(12);m.foreground=H(12);m.fd=-1;m.type=1;next_input=fake_next;input_fd=fake_fd; }
 /* Independent numeric oracle for the sixteen upstream VKs, not parsed from its switch. */
 static BOOL expected_extended(UINT code) { static const UINT codes[]={0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x2d,0x2e,0x5b,0x5c,0x5d,0x6f,0xa3,0xa5};for(size_t i=0;i<sizeof(codes)/sizeof(*codes);i++)if(code==codes[i])return TRUE;return FALSE; }
 static void check_key(UINT code,UINT down) {
@@ -58,7 +77,11 @@ static void check_key(UINT code,UINT down) {
 static void matrix(void) {
  /* The old actual body fails immediately on Up; keypad8 keeps the same scan with no extended flag. */
  check_key(VK_UP,1);check_key(VK_UP,0);check_key(VK_NUMPAD8,1);check_key(VK_NUMPAD8,0);
+#ifdef HAS_WINDOW_SWITCHER
+ for(UINT code=1;code<=255;code++)for(UINT down=0;down<2;down++)check_key(code,down);
+#else
  for(UINT code=0;code<=255;code++)for(UINT down=0;down<3;down++)check_key(code,down==2?7:down);
+#endif
 }
 static void guards(void) {
  reset();m.count=1;m.current_token=7;CHECK(!ps5_ProcessEvents(0));CHECK(!m.next_calls&&!m.fd_calls&&!m.sends&&!m.locks&&m.count==1);
@@ -66,7 +89,12 @@ static void guards(void) {
  for(int service=0;service<=1;service++){reset();m.selected=NULL;m.service=service;bridge_token=!service;m.count=70;m.code=VK_UP;m.down=1;CHECK(ps5_ProcessEvents(0));CHECK(m.next_calls==PS5_INPUT_BATCH&&m.count==6&&!m.sends&&!m.maps&&!m.layouts&&!m.moves&&!m.buttons);}
  reset();m.count=1;m.code=VK_UP;m.down=1;m.selected=H(19);CHECK(ps5_ProcessEvents(0));CHECK(m.sends==1&&m.delivered==H(19)&&m.focus==1);
  reset();m.count=1;m.code=VK_UP;m.down=1;m.selected=NULL;m.last=H(23);CHECK(ps5_ProcessEvents(0));CHECK(m.sends==1&&m.delivered==H(23)&&m.focus==1);
- reset();m.count=1;m.code=VK_UP;m.down=1;m.selected=NULL;CHECK(ps5_ProcessEvents(0));CHECK(m.sends==1&&m.delivered==NULL&&!m.focus);
+ reset();m.count=1;m.code=VK_UP;m.down=1;m.selected=NULL;CHECK(ps5_ProcessEvents(0));
+#ifdef HAS_WINDOW_SWITCHER
+ CHECK(!m.sends&&!m.focus);
+#else
+ CHECK(m.sends==1&&m.delivered==NULL&&!m.focus);
+#endif
  reset();m.count=70;m.code=VK_UP;m.down=1;CHECK(ps5_ProcessEvents(0));CHECK(m.sends==PS5_INPUT_BATCH&&m.next_calls==PS5_INPUT_BATCH&&m.count==6);
  reset();m.fd=9;m.read_bytes=3;m.count=1;m.code=VK_UP;m.down=1;CHECK(ps5_ProcessEvents(0));CHECK(m.reads==4&&m.fd_calls==1&&m.sends==1);
  reset();input_fd=NULL;m.count=1;m.code=VK_UP;m.down=1;CHECK(ps5_ProcessEvents(0));CHECK(!m.fd_calls&&!m.reads&&m.sends==1);

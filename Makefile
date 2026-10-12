@@ -68,12 +68,16 @@ $(eval $(call test_rule,test_pw_wine_dmem_ps5,tests/test_pw_wine_dmem_ps5.c wine
 $(eval $(call test_rule,test_pw_wine_prx,tests/test_pw_wine_prx.c wine/ps5/pw_wine_prx.c,-I.))
 $(eval $(call test_rule,test_pw_wine_threads,tests/test_pw_wine_threads.c wine/ps5/pw_wine_threads.c,-pthread))
 $(eval $(call test_rule,test_pw_wine_sink,tests/test_pw_wine_sink.c wine/ps5/pw_wine_sink.c,-pthread))
+$(eval $(call test_rule,test_pw_wine_child_ui,tests/test_pw_wine_child_ui.c native/pw_wine_child_ui.c wine/ps5/pw_wine_sink.c,-pthread))
+$(BUILD)/test_pw_wine_child_ui: native/pw_wine_child_ui.h wine/ps5/pw_wine_sink.h
 $(eval $(call test_rule,test_pw_wine_start,tests/test_pw_wine_start.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,-I.))
 $(eval $(call test_rule,test_windows_child_fixture,tests/test_windows_child_fixture.c,-Itests/windows_fixture_mock))
 $(BUILD)/test_windows_child_fixture: tests/fixtures/windows_child_process.c tests/windows_fixture_mock/windows.h
 $(eval $(call test_rule,test_pw_wine_launch,tests/test_pw_wine_launch.c src/pw_wine_launch.c,))
 $(eval $(call test_rule,test_pw_script_input,tests/test_pw_script_input.c src/pw_script_input.c,))
 $(eval $(call test_rule,test_pw_game_profile,tests/test_pw_game_profile.c src/pw_game_profile.c src/pw_app_profile.c,))
+$(eval $(call test_rule,test_pw_controller_settings,tests/test_pw_controller_settings.c src/pw_controller_settings.c src/pw_game_profile.c src/pw_app_profile.c,))
+$(eval $(call test_rule,test_pw_wine_controller_settings,tests/test_pw_wine_controller_settings.c native/pw_wine_controller_settings.c native/pw_wine_library.c src/pw_controller_settings.c src/pw_game_profile.c src/pw_app_profile.c src/pw_profile_catalog.c,-D_DEFAULT_SOURCE -Xlinker --wrap=write -Xlinker --wrap=fsync -Xlinker --wrap=close -Xlinker --wrap=rename))
 $(eval $(call test_rule,test_pw_prefix_temp,tests/test_pw_prefix_temp.c src/pw_prefix_temp.c native/pw_wine_prefix.c,-D_DEFAULT_SOURCE))
 $(eval $(call test_rule,test_pw_tsc_calibrate,tests/test_pw_tsc_calibrate.c src/pw_tsc_calibrate.c,))
 $(eval $(call test_rule,test_pw_wine_prefix_cpu,tests/test_pw_wine_prefix_cpu.c src/pw_prefix_temp.c native/pw_wine_prefix.c,-D_DEFAULT_SOURCE))
@@ -117,7 +121,7 @@ $(eval $(call test_rule,test_pw_wine_library,tests/test_pw_wine_library.c native
 $(eval $(call test_rule,test_pw_hid,tests/test_pw_hid.c src/pw_hid.c,))
 $(eval $(call test_rule,test_pw_spinner,tests/test_pw_spinner.c src/pw_spinner.c,))
 $(eval $(call test_rule,test_pw_hid_ps5,tests/test_pw_hid_ps5.c native/pw_hid_ps5.c src/pw_hid.c,-DPW_HID_PS5_HOST_TEST))
-$(eval $(call test_rule,test_pw_wine_display,tests/test_pw_wine_display.c native/pw_wine_display.c src/pw_game_profile.c src/pw_app_profile.c src/pw_script_input.c,-pthread))
+$(eval $(call test_rule,test_pw_wine_display,tests/test_pw_wine_display.c native/pw_wine_display.c wine/ps5/pw_wine_sink.c src/pw_game_profile.c src/pw_app_profile.c src/pw_script_input.c,-pthread))
 $(eval $(call test_rule,test_pw_wine_dl,tests/test_pw_wine_dl.c wine/ps5/pw_wine_dl.c wine/ps5/pw_wine_prx.c,-pthread))
 # The modules and the test are linked with --wrap for every __wrap_ name
 # the virtual working directory defines; the test turns fortify off, since
@@ -323,10 +327,10 @@ $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
 
 TESTS := test_wine_net_title test_wine_net_disabled test_wine_net_installer test_wine_net_owner test_wine_net_wire test_wine_net_bootstrap test_wine_net_main test_wine_user_title test_wine_user_disabled test_wine_user_installer test_wine_user_owner test_wine_user_wire test_wine_user_bootstrap test_wine_user_main test_pw_wine_creation_install test_wine_child_data test_wine_child_data_owner test_wine_child_data_flow test_bootstrap_diagnostic_flow test_pw_wine_child_title test_pw_wine_fixture_owner test_pw_wine_child_wire test_pw_wine_child_bootstrap test_pw_wine_child_main test_pw_wine_fixture_provider test_pw_wine_fixture_socket test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
 	test_pw_present test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch \
-	test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
+	test_pw_script_input test_pw_game_profile test_pw_controller_settings test_pw_wine_controller_settings test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
 	test_d3d9_bridge_wire test_vk_replay test_d3d9_objects test_d3d9_program_query test_d3d9_program_wire test_d3d9_factory_wire test_d3d9_resource_wire \
 	test_d3d9_texture_wire test_d3d9_window test_d3d9_window_driver test_vk_wire test_vk_codec test_pw_wine_library test_pw_wine_display \
-	test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_wine_threads test_pw_wine_compat \
+	test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_wine_child_ui test_pw_wine_threads test_pw_wine_compat \
 	test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_d3d9_gamma_wire test_d3d9_query_wire \
 	test_d3d9_stateblock_wire test_pw_guest_fp test_d3d9_cursor_wire test_d3d9_up_wire test_pw_vm test_pw_x86_block test_pw_x86_flat \
 	test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top test_pw_x86_engine \
@@ -347,6 +351,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_docs_links.py
 	python3 tests/test_d3d9_inventory.py
 	python3 tests/test_native_contract.py
+	python3 tests/test_controller_settings_launcher.py
 	python3 tests/test_build_native_child_probe.py
 	python3 tests/test_native_service_converter.py
 	python3 tests/test_native_suite.py
@@ -366,7 +371,11 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_COMPOSED_SOURCE)" \
 			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/strict" && \
 		python3 tests/test_ps5_extended_keys.py --wine-source "$(WINE_COMPOSED_SOURCE)" \
-			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/ubsan" --ubsan; \
+			--fixtures tests/fixtures --cc "$(CC)" --out "$$key_out/ubsan" --ubsan && \
+		python3 tests/test_ps5_window_switcher.py --wine-source "$(WINE_COMPOSED_SOURCE)" \
+			--cc "$(CC)" --out "$$key_out/window-strict" && \
+		python3 tests/test_ps5_window_switcher.py --wine-source "$(WINE_COMPOSED_SOURCE)" \
+			--cc "$(CC)" --out "$$key_out/window-ubsan" --ubsan; \
 	elif test "$(WINE_COMPOSED_SOURCE_EXPLICIT)" = 0; then \
 		echo "ps5 extended keys skipped: set WINE_COMPOSED_SOURCE to run optional composed-source controls"; \
 	else \

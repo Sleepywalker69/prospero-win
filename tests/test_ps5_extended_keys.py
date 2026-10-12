@@ -34,7 +34,7 @@ def main():
  if 'static BOOL is_extended_key(' in text:body+=function(text,'static BOOL is_extended_key(')
  body+=function(text,'static BOOL ps5_ProcessEvents(')
  declarations=re.search(r'struct ps5_input\n\{.*?\n\};\n\nenum \{ PS5_MAX_WINDOWS = 64, PS5_INPUT_BATCH = 64 \};',text,re.S).group()
- generated=a.out/'control.c';generated.write_text(fixture.read_text().replace('/* ACTUAL_FUNCTIONS */',body).replace('/* ACTUAL_INPUT_DECLARATIONS */',declarations))
+ generated=a.out/'control.c';generated.write_text(('#define HAS_WINDOW_SWITCHER 1\n' if 'static pthread_mutex_t input_lock' in text else '')+fixture.read_text().replace('/* ACTUAL_FUNCTIONS */',body).replace('/* ACTUAL_INPUT_DECLARATIONS */',declarations))
  cc=pathlib.Path(compiler).resolve();binary=a.out/'control';receipt={'scope':'Exact extracted source bodies with inert input/USER/pthread/pipe boundaries; no Wine, target or third-party executable execution','source':{'path':str(source.resolve()),'sha256':sha(source)},'fixture_sha256':sha(fixture),'runner_sha256':sha(pathlib.Path(__file__)),'generated_sha256':sha(generated),'extracted_body_sha256':hashlib.sha256(body.encode()).hexdigest(),'compiler':{'path':str(cc),'sha256':sha(cc),'version':subprocess.check_output([str(cc),'--version'],text=True).splitlines()[0]},'commands':[]}
  flags=['-std=gnu11','-D_GNU_SOURCE','-D__WINESRC__','-fshort-wchar','-O1','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I'+str(headers.resolve())]
  if a.ubsan:flags+=['-fsanitize=undefined','-fno-sanitize-recover=all']

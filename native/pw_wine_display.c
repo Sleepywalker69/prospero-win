@@ -147,13 +147,13 @@ int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script,
 }
 
 /* Signed 1/65536-pixel travel of one axis. */
-static int64_t travel(uint8_t stick, uint32_t speed, uint32_t elapsed_us)
+static int64_t travel(uint8_t stick, uint32_t speed, uint32_t deadzone, uint32_t elapsed_us)
 {
     int32_t axis = (int32_t)stick - 0x80, magnitude = axis < 0 ? -axis : axis;
     int64_t t, v;
 
-    if (magnitude <= PW_WINE_POINTER_DEADZONE) return 0;
-    t = (int64_t)(magnitude - PW_WINE_POINTER_DEADZONE) * 65536 / (127 - PW_WINE_POINTER_DEADZONE);
+    if ((uint32_t)magnitude <= deadzone) return 0;
+    t = (int64_t)(magnitude - (int32_t)deadzone) * 65536 / (127 - deadzone);
     if (t > 65536) t = 65536;
     v = t * t >> 16;                       /* 0..65536: a squared curve */
     v = v * speed * elapsed_us / 1000000;   /* < 2^63 for speed <= 20000 */
@@ -163,11 +163,21 @@ static int64_t travel(uint8_t stick, uint32_t speed, uint32_t elapsed_us)
 int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_y,
                          uint32_t speed, uint32_t elapsed_us, PwWineInput *out)
 {
+    return pw_wine_pointer_step_configured(pointer, stick_x, stick_y, speed,
+                                           PW_WINE_POINTER_DEADZONE, elapsed_us, out);
+}
+
+int pw_wine_pointer_step_configured(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_y,
+                                    uint32_t speed, uint32_t deadzone, uint32_t elapsed_us,
+                                    PwWineInput *out)
+{
     int64_t dx, dy;
 
     if (!pointer || !out) return 0;
-    pointer->x += travel(stick_x, speed, elapsed_us);
-    pointer->y += travel(stick_y, speed, elapsed_us);
+    if (speed > PW_GAME_MOUSE_SPEED_MAX) speed = PW_GAME_MOUSE_SPEED_MAX;
+    if (deadzone > PW_GAME_MOUSE_DEADZONE_MAX) deadzone = PW_GAME_MOUSE_DEADZONE_DEFAULT;
+    pointer->x += travel(stick_x, speed, deadzone, elapsed_us);
+    pointer->y += travel(stick_y, speed, deadzone, elapsed_us);
     /* whole pixels, towards zero, so both directions keep their fraction */
     dx = pointer->x / 65536;
     dy = pointer->y / 65536;
@@ -176,4 +186,162 @@ int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_
     pointer->y -= dy * 65536;
     *out = (PwWineInput){ PW_WINE_INPUT_MOUSE_MOVE, 0, (int32_t)dx, (int32_t)dy, 0 };
     return 1;
+}
+
+void pw_wine_input_router_init(PwWineInputRouter *router, const PwGameInput *profile)
+{
+    if (!router) return;
+    memset(router, 0, sizeof(*router));
+    router->mouse_mode = profile && profile->start_mode == PW_GAME_START_MOUSE;
+}
+
+const char *pw_wine_input_mode_name(const PwWineInputRouter *r,const PwGameInput *profile)
+{
+    if(r && r->mouse_mode)return "MOUSE/UI";
+    return profile && profile->mode==PW_GAME_INPUT_XINPUT ? "GAMEPAD (XInput)" : "PROFILE KEYS";
+}
+
+static PwGameInput routed_bindings(const PwGameInput *profile,unsigned mouse)
+{
+    PwGameInput b=*profile;
+    if(mouse) {
+        if(pw_game_input_ui_bindings(profile,b.bindings)!=PW_OK) {
+            /* Malformed programmatic inputs fail back to the known UI map. */
+            PwGameInput defaults;
+            pw_game_input_init(&defaults);
+            (void)pw_game_input_ui_bindings(&defaults,b.bindings);
+        }
+    } else if(profile->mode==PW_GAME_INPUT_XINPUT) {
+        /* A physical control belongs to exactly one input path. */
+        memset(b.bindings,0,sizeof(b.bindings));
+    }
+    return b;
+}
+
+size_t pw_wine_route_input(PwWineInputRouter *r,const PwGameInput *profile,
+                           const PwPadPs5 *pad,int focused,uint32_t elapsed_us,
+                           PwWineInput *out,size_t max,PwWinePad *gamepad)
+{
+    const uint32_t chord=0x6u;
+    uint32_t raw=pad ? pad->core.previous_buttons : 0;
+    unsigned fresh;
+    size_t n=0;
+    if(!r || !profile || !out || !gamepad || max<PW_WINE_ROUTED_EVENTS)return 0;
+    fresh=pad && pad->sample_serial!=r->serial;
+    memset(gamepad,0,sizeof(*gamepad));
+    PwGameInput bindings=routed_bindings(profile,r->mouse_mode);
+    if(fresh){r->serial=pad->sample_serial;r->stale_us=0;}
+    else if(elapsed_us>=PW_WINE_INPUT_STALE_US-r->stale_us)r->stale_us=PW_WINE_INPUT_STALE_US;
+    else r->stale_us+=elapsed_us;
+    unsigned active=focused && pad && pad->core.connected && r->stale_us<PW_WINE_INPUT_STALE_US;
+    unsigned generation=active && ((r->generation_valid && r->generation!=pad->core.generation) ||
+                                  r->discontinuities!=pad->discontinuities);
+    if(pad)r->discontinuities=pad->discontinuities;
+    unsigned toggle=active && fresh && !r->chord_latched && (raw&chord)==chord;
+    if(!(raw&chord))r->chord_latched=0;
+    if(toggle)r->chord_latched=1;
+    unsigned reset=!active || !r->active || generation || toggle;
+    if(reset) {
+        n=pw_wine_game_inputs(&bindings,0,r->held,out,max);
+        r->held=0;r->blocked=raw;r->analog_blocked=1;
+        r->pointer=(PwWinePointer){0,0};r->touch_valid=0;r->cycle_armed=0;
+    }
+    if(pad && r->touch_epoch!=pad->touch_epoch)r->touch_valid=0;
+    if(pad)r->touch_epoch=pad->touch_epoch;
+    r->active=active;
+    if(!active)return n;
+    r->generation=pad->core.generation;r->generation_valid=1;
+    if(toggle) {
+        r->mouse_mode=!r->mouse_mode;
+        return n; /* neutral gamepad and release old path before new mode */
+    }
+    uint32_t was_blocked=r->blocked;
+    r->blocked&=raw;
+    uint32_t held=raw&~r->blocked;
+    if(r->chord_latched)held&=~chord;
+    if(r->analog_blocked &&
+       pad->left_stick.x>=108 && pad->left_stick.x<=148 &&
+       pad->left_stick.y>=108 && pad->left_stick.y<=148 &&
+       pad->right_stick.x>=108 && pad->right_stick.x<=148 &&
+       pad->right_stick.y>=108 && pad->right_stick.y<=148 && !pad->l2 && !pad->r2)
+        r->analog_blocked=0;
+    if(!r->mouse_mode && profile->mode==PW_GAME_INPUT_XINPUT) {
+        PwPadPs5 filtered=*pad;
+        filtered.core.previous_buttons=held;
+        if(r->analog_blocked) {
+            filtered.left_stick=filtered.right_stick=(PwPadPs5Stick){128,128};
+            filtered.l2=filtered.r2=0;
+        }
+        pw_wine_game_pad(&filtered,gamepad);
+    } else {
+        bindings=routed_bindings(profile,r->mouse_mode);
+        n+=pw_wine_game_inputs(&bindings,held&~r->held,r->held&~held,out+n,max-n);
+        /* Keep a complete quick tap delivered within one native batch.
+         * Held transitions above and tap pulses are disjoint. */
+        uint32_t taps=fresh && !reset ? pad->core.pressed_edges&pad->core.released_edges&
+                             ~held&~r->held&~was_blocked : 0;
+        if(r->chord_latched)taps&=~chord;
+        n+=pw_wine_game_inputs(&bindings,taps,0,out+n,max-n);
+        n+=pw_wine_game_inputs(&bindings,0,taps,out+n,max-n);
+        /* Options acts on release, so Options+Create remains the title's
+         * close chord even when Options was pressed first. */
+        if(r->mouse_mode) {
+            if((raw|(fresh ? pad->core.pressed_edges : 0))&0x1u)r->cycle_armed=0;
+            else if(((held&~r->held)|taps)&0x8u)r->cycle_armed=1;
+            if(r->cycle_armed && !(held&0x8u)) {
+                out[n++]=(PwWineInput){PW_WINE_INPUT_WINDOW_CYCLE,0,1,0,1};
+                r->cycle_armed=0;
+            }
+        }
+        if(r->mouse_mode && fresh && pad->touch_data.fingers==1) {
+            const PwPadPs5Touch *t=&pad->touch_data.touch[0];
+            /* Relative raw sensor units, half a pixel each at 100 percent.
+             * No invented sensor extent/absolute mapping. Re-anchor new IDs. */
+            if(r->touch_valid && r->finger==t->finger) {
+                int dx=(int)t->x-r->touch_x,dy=(int)t->y-r->touch_y;
+                if(dx>=-512 && dx<=512 && dy>=-512 && dy<=512) {
+                    uint32_t speed=profile->touch_speed;
+                    if(speed<PW_GAME_TOUCH_SPEED_MIN || speed>PW_GAME_TOUCH_SPEED_MAX)
+                        speed=PW_GAME_TOUCH_SPEED_DEFAULT;
+                    r->pointer.x+=(int64_t)dx*32768*speed/100;
+                    r->pointer.y+=(int64_t)dy*32768*speed/100;
+                    n+=(size_t)pw_wine_pointer_step(&r->pointer,128,128,0,0,out+n);
+                }
+            }
+            r->touch_x=t->x;r->touch_y=t->y;r->finger=t->finger;r->touch_valid=1;
+        } else if(fresh)r->touch_valid=0;
+        PwGameStick stick=r->mouse_mode ? PW_GAME_STICK_LEFT : profile->mouse;
+        if(!r->analog_blocked && stick!=PW_GAME_STICK_NONE &&
+           !(r->mouse_mode && pad->touch_data.fingers)) {
+            const PwPadPs5Stick *s=stick==PW_GAME_STICK_LEFT ? &pad->left_stick : &pad->right_stick;
+            uint32_t speed=profile->mouse_speed;
+            if(speed>PW_GAME_MOUSE_SPEED_MAX)speed=PW_GAME_MOUSE_SPEED_MAX;
+            if(elapsed_us>50000)elapsed_us=50000;
+            n+=(size_t)pw_wine_pointer_step_configured(&r->pointer,s->x,s->y,speed,
+                                                       profile->mouse_deadzone,elapsed_us,out+n);
+        }
+    }
+    r->held=held;
+    return n;
+}
+
+size_t pw_wine_input_flush(PwWineInputDelivery *delivery,int (*post)(const PwWineInput *))
+{
+    size_t accepted=0;
+    if(!delivery || !post || delivery->count>PW_WINE_ROUTED_EVENTS ||
+       delivery->next>delivery->count)return 0;
+    while(delivery->next<delivery->count) {
+        if(post(&delivery->events[delivery->next])!=0)break;
+        delivery->next++;accepted++;
+    }
+    if(delivery->next==delivery->count)delivery->next=delivery->count=0;
+    return accepted;
+}
+
+uint64_t pw_wine_close_chord_tick(const PwWineInputRouter *router,const PwPadPs5 *pad,
+                                 int fresh,uint64_t ticks)
+{
+    return router && router->active && fresh && pad && pad->core.connected &&
+           router->stale_us<PW_WINE_INPUT_STALE_US &&
+           (pad->core.previous_buttons&0x9u)==0x9u ? ticks+1 : 0;
 }
