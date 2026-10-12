@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Explicit native-only derivative of one immutable matched donor; never executes targets."""
 from __future__ import annotations
-import argparse, gzip, hashlib, json, os, shutil, stat, subprocess, tarfile, zipfile
+import argparse, gzip, hashlib, json, os, re, shutil, stat, subprocess, tarfile, zipfile
 from pathlib import Path
 import package_windows_child_fixture as pkg
 
@@ -31,6 +31,22 @@ ALLOWED_SOURCE_CHANGES = {
  'tests/test_wine_net_wire.c','tests/test_wine_user_wire.c'}
 MANIFEST = 'provenance/derived-native.json'
 require = pkg.require
+
+def producer(environment):
+    require(environment.get('GITHUB_REPOSITORY')=='Sleepywalker69/prospero-win','wrong native producer repository')
+    run,attempt=environment.get('GITHUB_RUN_ID'),environment.get('GITHUB_RUN_ATTEMPT')
+    require(isinstance(run,str) and re.fullmatch('[1-9][0-9]*',run) and
+            isinstance(attempt,str) and re.fullmatch('[1-9][0-9]*',attempt),'invalid native producer run/attempt')
+    return {'native_run_url':'https://github.com/Sleepywalker69/prospero-win/actions/runs/'+run,
+            'native_run_attempt':attempt}
+
+def verify_producer(record):
+    url,attempt=record.get('native_run_url'),record.get('native_run_attempt')
+    require(isinstance(url,str) and
+            re.fullmatch(r'https://github\.com/Sleepywalker69/prospero-win/actions/runs/[1-9][0-9]*',url) and
+            isinstance(attempt,str) and re.fullmatch('[1-9][0-9]*',attempt),
+            'invalid native producer receipt')
+    return {'native_run_url':url,'native_run_attempt':attempt}
 
 def git(root,*args):
     return subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True,timeout=120).stdout
@@ -292,6 +308,7 @@ def check_native(package,app,title):
     return worker
 
 def assemble(root,contract,app,build,title_path,out,archive):
+    native_producer=producer(os.environ)
     value,package=donor_state(contract)
     compatibility=compatible_sources(root)
     require(compatibility==value['source_compatibility'],'source changed before packaging')
@@ -322,7 +339,7 @@ def assemble(root,contract,app,build,title_path,out,archive):
     pkg.normalize_directories(out)
     inventory=pkg.inventory(out)
     verify_payload(value['inventory'],inventory)
-    report={'schema':'pw-derived-native-package/1','donor':DONOR,'native_project':title['project'],
+    report={'schema':'pw-derived-native-package/1','donor':DONOR,**native_producer,'native_project':title['project'],
             'native_worker_build_id':worker['worker']['build_id'],'source_compatibility':compatibility,
             'replaced':{n:inventory[n] for n in REPLACED},'inherited_inventory':value['inventory'],
             'native_title_receipt':pkg.record(title_path),'native_compile_receipt':title['title_compile_receipt'],
@@ -395,6 +412,7 @@ def retained_donor(root):
 def verify(root):
     report=pkg.read_json(root/MANIFEST);actual=pkg.inventory(root)
     require(report['schema']=='pw-derived-native-package/1' and report['donor']==DONOR,'derived identity differs')
+    verify_producer(report)
     require(report['console_execution_verified'] is False and report['reference_results']=='inherited; not rerun',
             'derived execution claim')
     require({n:v for n,v in actual.items() if n not in (MANIFEST,'SHA256SUMS')}==report['files'],
@@ -453,6 +471,6 @@ def main():
     elif a.command=='assemble':
         r=assemble(a.repo,a.contract,a.app,a.build,a.title,a.out,a.archive)
         print(json.dumps({'schema':r['schema'],'native_project':r['native_project'],'donor':DONOR['project'],
-                          'archive':pkg.record(a.archive),'console_execution_verified':False},sort_keys=True))
+                          'archive':pkg.record(a.archive),**verify_producer(r),'console_execution_verified':False},sort_keys=True))
     else:verify(a.root);print('Derived package verified; no target execution.')
 if __name__=='__main__':main()

@@ -139,7 +139,7 @@ class DerivedTests(unittest.TestCase):
 
     def test_recompute_protected_source_delta(self):
         row={'bytes':3,'sha256':'a'*64,'mode':0o644}
-        old={'native/pw_wine_child_data.c':row,'tools/build_wine_ps5.sh':row}
+        old={'native/pw_wine_child_data.c':dict(row),'tools/build_wine_ps5.sh':dict(row)}
         new=copy.deepcopy(old);new['native/pw_wine_child_data.c']['sha256']='b'*64
         claimed={'native/pw_wine_child_data.c':new['native/pw_wine_child_data.c']}
         self.assertEqual(d.source_delta(old,new,claimed),claimed)
@@ -182,6 +182,7 @@ class DerivedTests(unittest.TestCase):
             receipt={'bytes':3,'sha256':'a'*64}
             native={'commit':'b'*40,'tree':'c'*40}
             report={'schema':'pw-derived-native-package/1','donor':d.DONOR,
+                    'native_run_url':'https://github.com/Sleepywalker69/prospero-win/actions/runs/123','native_run_attempt':'1',
                     'console_execution_verified':False,'reference_results':'inherited; not rerun',
                     'files':{n:v for n,v in actual.items() if n not in (d.MANIFEST,'SHA256SUMS')},
                     'inherited_inventory':copy.deepcopy(inherited),
@@ -199,5 +200,26 @@ class DerivedTests(unittest.TestCase):
                 report['inherited_inventory']=copy.deepcopy(inherited)
                 report['native_project']={'commit':'f'*40,'tree':'c'*40}
                 with self.assertRaisesRegex(ValueError,'native project/title'):d.verify(root)
+
+
+    def test_native_producer_identity_is_new_and_bounded(self):
+        env={'GITHUB_REPOSITORY':'Sleepywalker69/prospero-win','GITHUB_RUN_ID':'987','GITHUB_RUN_ATTEMPT':'2'}
+        got=d.producer(env)
+        self.assertEqual(got,{'native_run_url':'https://github.com/Sleepywalker69/prospero-win/actions/runs/987',
+                              'native_run_attempt':'2'})
+        self.assertEqual(d.verify_producer(got),got)
+        self.assertNotEqual(got['native_run_url'].rsplit('/',1)[-1],d.DONOR['run'])
+        for key,values in [('GITHUB_REPOSITORY',('fork/prospero-win','Sleepywalker69/other',None)),
+                           ('GITHUB_RUN_ID',('0','01','-1','1/2','1'+chr(10),1,None)),
+                           ('GITHUB_RUN_ATTEMPT',('0','01','x','1'+chr(10),1,None))]:
+            for value in values:
+                bad=dict(env);bad[key]=value
+                with self.assertRaises(ValueError):d.producer(bad)
+        for key,values in [('native_run_url',('https://github.com/fork/prospero-win/actions/runs/987',
+                         got['native_run_url']+'/jobs','https://githubXcom/Sleepywalker69/prospero-win/actions/runs/987',None)),
+                           ('native_run_attempt',('0','01',1,None))]:
+            for value in values:
+                bad=dict(got);bad[key]=value
+                with self.assertRaises(ValueError):d.verify_producer(bad)
 
 if __name__=='__main__':unittest.main()
