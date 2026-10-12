@@ -1078,6 +1078,11 @@ tests/test_wine_child_progress_failure.c
 tools/reuse_host_wine.py
 tests/test_reuse_host_wine.py
 docs/verified-host-reuse.md
+.github/workflows/transfer-user-runtime.yml
+tools/split_verified_artifact.py
+tests/test_split_verified_artifact.py
+tools/inspect_matched_artifact.py
+tests/test_inspect_matched_artifact.py
 
 # Exact reviewed host compiler cache transport only.
 .github/workflows/export-host-compiler-cache.yml
