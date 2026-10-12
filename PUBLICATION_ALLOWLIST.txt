@@ -1084,3 +1084,11 @@ docs/verified-host-reuse.md
 tools/export_host_compiler_cache.py
 tests/test_export_host_compiler_cache.py
 docs/host-cache-113-save.json
+
+# Bounded compiler-cache consumer experiment.
+tools/import_host_compiler_cache.py
+tools/benchmark_wine_cache_component.py
+tests/test_import_host_compiler_cache.py
+tests/test_wine_cache_component.py
+.github/workflows/wine-cache-component.yml
+docs/wine-cache-component.md
