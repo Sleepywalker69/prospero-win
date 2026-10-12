@@ -560,9 +560,10 @@ static int pages(void)
     attempt("VirtualProtect_one_4KiB");api=VirtualProtect(base+4096,4096,PAGE_READONLY,&old);error=api?0:GetLastError();
     ok&=observation("VirtualProtect_one_4KiB",api&&old==PAGE_READWRITE,error,0,4096,old,PAGE_READWRITE);
     for(i=0;i<4;++i){
+        const DWORD expected_protect=i==1?PAGE_READONLY:PAGE_READWRITE;
         memset(&info,0,sizeof(info));attempt("VirtualQuery_4KiB");size=VirtualQuery(base+4096*i,&info,sizeof(info));
         ok&=observation("VirtualQuery_4KiB",size==sizeof(info)&&info.State==MEM_COMMIT&&
-            info.Protect==(i==1?PAGE_READONLY:PAGE_READWRITE),size?0:GetLastError(),0,size,i,info.Protect);
+            info.Protect==expected_protect,size?0:GetLastError(),0,size,i,info.Protect);
     }
     attempt("VirtualFree_decommit_4KiB");api=VirtualFree(base+8192,4096,MEM_DECOMMIT);error=api?0:GetLastError();
     if(!observation("VirtualFree_decommit_4KiB",api,error,0,4096,8192,0)){ok=0;goto done;}

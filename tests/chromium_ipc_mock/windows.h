@@ -41,8 +41,8 @@ typedef struct { void *BaseAddress,*AllocationBase; DWORD AllocationProtect; SIZ
 #define PROC_THREAD_ATTRIBUTE_HANDLE_LIST 0x20002u
 #define EXTENDED_STARTUPINFO_PRESENT 0x80000u
 #define CREATE_SUSPENDED 4u
-#define PAGE_READWRITE 4u
-#define PAGE_READONLY 2u
+#define PAGE_READWRITE 4
+#define PAGE_READONLY 2
 #define FILE_MAP_READ 4u
 #define FILE_MAP_WRITE 2u
 #define SEC_IMAGE 0x01000000u
