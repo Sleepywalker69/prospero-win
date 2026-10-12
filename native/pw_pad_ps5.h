@@ -45,10 +45,45 @@ typedef struct PwPadPs5 {
     unsigned timestamp_valid;
 } PwPadPs5;
 
+/* Dormant internal observation API. No existing native struct ABI changes.
+ * Each record owns normalized values at one accepted native sample. Loss
+ * samples carry neutral analog/touch state, matching the compatibility pad.
+ * No pointers into the reader's stack escape.
+ */
+enum {
+    PW_PAD_OBS_READ_ERROR = 1u << 0,
+    PW_PAD_OBS_DISCONNECTED = 1u << 1,
+    PW_PAD_OBS_INTERCEPTED = 1u << 2,
+    PW_PAD_OBS_GENERATION = 1u << 3,
+    PW_PAD_OBS_INVALID_COUNT = 1u << 4
+};
+typedef struct PwPadPs5ObservedRecord {
+    PwPadSample sample;
+    PwPadPs5Stick left_stick, right_stick;
+    uint8_t l2, r2;
+    PwPadPs5TouchData touch_data;
+} PwPadPs5ObservedRecord;
+typedef struct PwPadPs5ObservedBatch {
+    PwPadPs5ObservedRecord records[PW_PAD_PS5_BATCH];
+    uint32_t count, loss_flags;
+    int native_read_rc;
+} PwPadPs5ObservedBatch;
+
 int pw_pad_ps5_platform_ops(PwPadPs5Ops *);
 int pw_pad_ps5_open(PwPadPs5 *,const PwPadPs5Ops *,const PwPadKeyMap *,size_t);
 /* Held buttons, edges, sticks and triggers from the pending samples. */
 int pw_pad_ps5_read(PwPadPs5 *);
+/* Same compatibility state/return as read(), with an optional owned batch.
+ * out must be separate caller-owned storage, not overlapping pad. It is
+ * cleared even on precondition failure. NULL is the legacy wrapper path.
+ * count <=64; zero can mean empty or all timestamps rejected. native_read_rc
+ * retains the platform count/error. Any loss_flags invalidates the WHOLE
+ * batch for future event replay, including neutral samples after that loss.
+ * Rearm policy belongs to a consumer and requires a later usable batch.
+ * Oversized platform count is uncertain: observed count=0, legacy clamp
+ * behavior retained. No observer is activated by existing title callers.
+ */
+int pw_pad_ps5_read_observed(PwPadPs5 *, PwPadPs5ObservedBatch *out);
 int pw_pad_ps5_close(PwPadPs5 *);
 /* Run the motors: large is the low-frequency one (XInput's left), small
  * the high-frequency one, 0 stops. PW_OK, PW_ERR_UNSUPPORTED with no

@@ -26,11 +26,14 @@ static const PwPadKeyMap map[]={{L1,'Z',0,0,"left-flipper"}};
 int main(void)
 {
     PwPadPs5 pad;
+    static PwPadPs5ObservedBatch observed;
     assert(pw_pad_ps5_open(&pad,&ops,map,1)==PW_OK && pad.opened && pad.pad_handle==7);
     assert(pad.left_stick.x==0x80 && pad.right_stick.y==0x80 && !pad.l2 && !pad.r2);
     assert(init_calls==1&&foreground_calls==1&&pad_init_calls==1&&open_calls==1);
     fixture[0]=(PwPadPs5Data){.buttons=L1|CREATE,.connected=1,.timestamp=1000,.connected_count=1};
-    fixture_count=1;assert(pw_pad_ps5_read(&pad)==PW_OK);
+    fixture_count=1;assert(pw_pad_ps5_read_observed(&pad,&observed)==PW_OK);
+    assert(observed.count==1 && !observed.loss_flags && observed.native_read_rc==1);
+    assert(observed.records[0].sample.buttons==(L1|CREATE));
     assert(pad.connected_samples==1 && pad.core.pressed_edges==(L1|CREATE));
     fixture_count=0;assert(pw_pad_ps5_read(&pad)==PW_OK &&
                            !pad.core.pressed_edges && !pad.core.released_edges);
@@ -105,5 +108,9 @@ int main(void)
     assert(pw_pad_ps5_close(&pad)==PW_OK && terminate_calls==1);
     assert(pw_pad_ps5_close(NULL)==PW_ERR_PRECONDITION);
     assert(pw_pad_ps5_read(&pad)==PW_ERR_PRECONDITION);
+    memset(&observed,0xff,sizeof(observed));
+    assert(pw_pad_ps5_read_observed(&pad,&observed)==PW_ERR_PRECONDITION);
+    assert(!observed.count && !observed.loss_flags && !observed.native_read_rc);
+    assert(pw_pad_ps5_read_observed(NULL,NULL)==PW_ERR_PRECONDITION);
     return 0;
 }
