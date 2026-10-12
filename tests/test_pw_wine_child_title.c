@@ -46,6 +46,8 @@ static void *created_context;
 static PwWineFixtureSocketSink installed_sink;
 static void *installed_context;
 static char logs[16384];
+static unsigned flush_calls;
+static int flush_error;
 static const char hash[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 static int mock_clock_gettime(clockid_t id, struct timespec *t)
@@ -84,6 +86,13 @@ void pw_diagnostics_log_local(const char *format, ...)
     va_list ap; va_start(ap, format);
     vsnprintf(logs + n, sizeof(logs) - n, format, ap);
     va_end(ap); strcat(logs, "\n");
+    errno = ERANGE;
+}
+void pw_diagnostics_flush_local(void)
+{
+    assert(logs[0] && logs[strlen(logs) - 1] == '\n');
+    ++flush_calls;
+    errno = flush_error;
 }
 unsigned pw_wine_fixture_owner_bytes(void) { return sizeof(owner_storage); }
 int pw_wine_fixture_owner_init(void *storage, unsigned bytes,
@@ -130,6 +139,7 @@ static void reset(void)
     sleep_calls = sleep_error = provider_calls = sink_calls = provider_result = sink_result = 0;
     abi_value = wow64_value = 1; abi_calls = wow64_calls = 0;
     cancel_at = early_start = 0;
+    flush_calls = 0; flush_error = 0;
     clock_seconds = 123; clock_nsec = 456000000; created_entry = NULL; created_context = NULL;
     installed_sink = NULL; installed_context = NULL;
     descriptor = (struct Descriptor){ PW_PRX_MAGIC, PW_PRX_VERSION, 7,
@@ -261,6 +271,30 @@ static void supervision(void)
 int main(void)
 {
     profiles(); preparation(); installation(); supervision();
+    static const char *const immediate[] = {
+        "bootstrap_progress", "bootstrap_failure", "bootstrap_failure_value",
+        "bootstrap_refused", "progress_refused", "wire_failure", "wire_phase",
+        "wire_receive", "wire_channel", "first_failure", "helper_possible",
+        "helper_unsettled", "helper_not_dispatched", "helper_terminal_failure",
+        "helper_cleanup_begin", "helper_cleanup_unproved", "helper_ack_after_cancel",
+        "helper_cancel_sent", "channel_zero_hup", "child_failure", "child_failure_value",
+        "root_release_safe", "supervisor_failure", "supervisor_sleep_failure"
+    };
+    for (unsigned failed = 0; failed < 2; ++failed) {
+        reset(); assert(!pw_wine_child_title_prepare(1, hash));
+        flush_error = failed ? EIO : 0;
+        for (unsigned i = 0; i < sizeof(immediate) / sizeof(immediate[0]); ++i) {
+            unsigned before = flush_calls;
+            errno = EACCES;
+            captured.record(captured.context, immediate[i], 17, -1, 5, 13);
+            assert(flush_calls == before + 1 && errno == EACCES);
+            assert(!pw_wine_child_title_restart_ready() && !cancel_calls && !pump_calls);
+            assert(!atomic_load(&title.cancelled) && !atomic_load(&title.socket_state));
+        }
+        unsigned before = flush_calls;
+        captured.record(captured.context, "signal_ack", 17, 19, 0, 0);
+        assert(flush_calls == before); /* Steady-state traffic keeps normal batching. */
+    }
     puts("title adapter source-coupled mocks: PASS (no native boundaries executed)");
     return 0;
 }

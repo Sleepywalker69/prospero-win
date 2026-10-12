@@ -717,3 +717,37 @@ register each suite. Host and synthetic PE/package controls do not establish
 service startup, a Windows result on PS5, actual DNS/Internet/TLS behavior,
 child presentation/input, or Battle.net installation. The separate matched
 Windows reference and exact console result remain required.
+
+### Immediate parent bootstrap-log retention
+
+The title now flushes its existing local log after owner bootstrap, control-wire,
+helper, failure, and release observations. These are supervisor-side records
+already captured by the owner; native child and Wine callbacks do no new I/O.
+Steady-state signal acknowledgements keep normal batching. This avoids relying
+on the display/main loop's next 100 ms diagnostic tick for the last received
+bootstrap record. The flush preserves ordinary errno and performs no network
+send, reconnect, new log destination or helper operation. A disk-write failure leaves
+the existing logger unavailable and has no authority to change child admission,
+helper uncertainty, release, cancellation, or retry policy.
+
+This is best-effort visibility through the existing file descriptor, not fsync
+or a power-loss durability guarantee. Local mutex acquisition and storage writes
+can wait; neither has a new hard deadline. Existing startup and cleanup deadlines
+are unchanged. Absence of a record still cannot establish the last child
+instruction, process death, helper settlement, or safe title restart.
+
+The 136-byte wire format, validation rules, and milestone numbering are
+unchanged. Stage 5 remains NET_SOCKET_BEGIN; stage 6 remains NET_SOCKET_READY and
+is emitted only after a nonnegative socket result. On a negative result, the
+existing FAILURE frame carries the saved raw result and immediate Net errno.
+No observer is inserted between sceNetSocket and sceNetErrnoLoc. Positive socket
+IDs are not reported. A fault before return/errno capture, failed wire delivery,
+or failure to retain the parent record can still leave that boundary unresolved.
+The child-local log continues to open only after child data readiness.
+
+Host controls exercise immediate visibility without a tick while the network
+lock is held, full and partial write failures, absent logger, errno preservation,
+selected title-event retention, unchanged restart hold under simulated log
+failure, and the existing actual data adapter's positive/negative socket paths.
+These controls do not establish console admission, fault location, process
+lifetime, or a successful Windows child result.

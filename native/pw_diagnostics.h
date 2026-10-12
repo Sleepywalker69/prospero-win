@@ -15,6 +15,10 @@ void pw_diagnostics_log(const char *format, ...);
 /* Same bounded formatting and local retention; no network send, network lock
  * or reconnect. Local file writes can still wait for storage. */
 void pw_diagnostics_log_local(const char *format, ...);
+/* Best-effort immediate write of pending local records, without a tick or
+ * network work. Preserves errno. Storage/mutex waits are not deadline-bounded;
+ * this is not fsync, a durability guarantee, or an ownership certificate. */
+void pw_diagnostics_flush_local(void);
 /* Writes buffered records to the session file; never waits for the network
  * (a background thread brings a dropped channel back). */
 void pw_diagnostics_tick(uint64_t now_ns);
