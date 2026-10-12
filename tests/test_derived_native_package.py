@@ -222,4 +222,84 @@ class DerivedTests(unittest.TestCase):
                 bad=dict(got);bad[key]=value
                 with self.assertRaises(ValueError):d.verify_producer(bad)
 
+
+    def test_restore_runtime_report_uses_exact_package_serialization(self):
+        raw = b'{"z": [1, 2], "a": {"y": 2, "b": 1}}\n'
+        report = json.loads(raw)
+        canonical = d.pkg.json_bytes(report)
+        changed = copy.deepcopy(report); changed['a']['y'] = 3
+        extra = copy.deepcopy(report); extra['extra'] = 0
+        missing = copy.deepcopy(report); del missing['a']['b']
+        reordered = copy.deepcopy(report); reordered['z'].reverse()
+        boolean = copy.deepcopy(report); boolean['a']['b'] = True
+        floating = copy.deepcopy(report); floating['a']['y'] = 2.0
+        cases = [
+            ('canonical', raw, canonical, False, None),
+            ('nested-value', raw, d.pkg.json_bytes(changed), False, 'Wine report differs'),
+            ('extra-field', raw, d.pkg.json_bytes(extra), False, 'Wine report differs'),
+            ('missing-field', raw, d.pkg.json_bytes(missing), False, 'Wine report differs'),
+            ('list-order', raw, d.pkg.json_bytes(reordered), False, 'Wine report differs'),
+            ('boolean-number', raw, d.pkg.json_bytes(boolean), False, 'Wine report differs'),
+            ('float-number', raw, d.pkg.json_bytes(floating), False, 'Wine report differs'),
+            ('malformed-json', b'{broken', canonical, False, None),
+            ('duplicate-key', b'{"z": [1, 2], "a": 1, "a": {"y": 2, "b": 1}}',
+             canonical, False, 'duplicate JSON key'),
+            ('noncanonical-package', raw, raw, False, 'Wine report differs'),
+            ('tampered-evidence', raw, canonical, 'report', 'retained runtime bytes differ'),
+            ('tampered-abi', raw, canonical, 'abi', 'retained runtime bytes differ'),
+            ('mismatched-binary', raw, canonical, 'binary', 'donor runtime package/evidence mismatch'),
+            ('missing-abi', raw, canonical, 'missing-abi', 'required ABI input omitted'),
+        ]
+        for name, evidence_bytes, package_bytes, tamper, error in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); evidence = root/'evidence'; package = root/'package'
+                base = evidence/'unaccepted-build-inputs'; base.mkdir(parents=True)
+                (package/'provenance').mkdir(parents=True)
+                (package/'provenance/wine-build.json').write_bytes(package_bytes)
+                files = {
+                    'report.json': evidence_bytes,
+                    'build/dlls/ntdll/ntdll.so': b'ntdll-so',
+                    'prx/ntdll.shared.elf': b'ntdll-elf',
+                    'private-dispatch-pe.json': b'{}',
+                    'prx/sce_module/ntdll.prx': b'ntdll-prx',
+                    'pe/x86_64-windows/ntdll.dll': b'ntdll-pe',
+                }
+                inventory = {}
+                for relative, data in files.items():
+                    path = base/'target/wine'/relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    inventory['target/wine/'+relative] = {
+                        **d.pkg.record(path), 'original_mode': 0o644}
+                for source, target in (
+                    ('prx/sce_module/ntdll.prx', 'PPSA99995/win/wine/lib/wine/x86_64-unix/ntdll.prx'),
+                    ('pe/x86_64-windows/ntdll.dll', 'PPSA99995/win/wine/lib/wine/x86_64-windows/ntdll.dll')):
+                    path = package/target; path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(files[source])
+                if tamper == 'missing-abi':
+                    del inventory['target/wine/private-dispatch-pe.json']
+                (base/'UNACCEPTED-BUILD.json').write_bytes(d.pkg.json_bytes({
+                    'schema': 'pw-windows-child-unaccepted-build-evidence/1',
+                    'files': inventory}))
+                if tamper == 'report':
+                    (base/'target/wine/report.json').write_bytes(evidence_bytes+b' ')
+                elif tamper == 'abi':
+                    (base/'target/wine/private-dispatch-pe.json').write_bytes(b'{"changed": true}')
+                elif tamper == 'binary':
+                    (package/'PPSA99995/win/wine/lib/wine/x86_64-unix/ntdll.prx').write_bytes(b'changed')
+                out = root/'runtime'
+                if name == 'malformed-json':
+                    with self.assertRaises(json.JSONDecodeError):
+                        d.restore_runtime(evidence, out, package)
+                elif error is not None:
+                    with self.assertRaisesRegex(ValueError, error):
+                        d.restore_runtime(evidence, out, package)
+                else:
+                    restored = d.restore_runtime(evidence, out, package)
+                    self.assertEqual((out/'report.json').read_bytes(), evidence_bytes)
+                    self.assertEqual(restored['report.json'], {
+                        **d.pkg.record(out/'report.json'), 'mode': 0o644})
+                    self.assertNotEqual(d.pkg.record(out/'report.json'),
+                                        d.pkg.record(package/'provenance/wine-build.json'))
+
 if __name__=='__main__':unittest.main()

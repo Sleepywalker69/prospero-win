@@ -162,7 +162,8 @@ def restore_runtime(evidence,out,package):
             if path.is_file():
                 relative=path.relative_to(out/branch)
                 require(pkg.record(path)==pkg.record(package/dest/relative),'donor runtime package/evidence mismatch')
-    require(pkg.record(out/'report.json')==pkg.record(package/'provenance/wine-build.json'),'Wine report differs')
+    require(pkg.json_bytes(pkg.read_json(out/'report.json'))==
+            (package/'provenance/wine-build.json').read_bytes(),'Wine report differs')
     for name in ('build/dlls/ntdll/ntdll.so','prx/ntdll.shared.elf','private-dispatch-pe.json'):
         require(name in records,'required ABI input omitted: '+name)
     return records
