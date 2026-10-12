@@ -155,6 +155,12 @@ jobs:
             --out "$RUNNER_TEMP/wine-evidence/focus-mouse-strict"
           python3 tools/check_focus_mouse_source.py --wine-source "$PROSPERO_WINE_SOURCE" \
             --cc clang --sanitize address,undefined --out "$RUNNER_TEMP/wine-evidence/focus-mouse-sanitize"
+      - name: Exercise actual driver receipt and source-ownership boundaries
+        run: |
+          python3 tests/test_ps5_window_switcher.py --wine-source "$PROSPERO_WINE_SOURCE" \
+            --out "$RUNNER_TEMP/wine-evidence/driver-input-strict"
+          python3 tests/test_ps5_window_switcher.py --wine-source "$PROSPERO_WINE_SOURCE" \
+            --cc clang --ubsan --out "$RUNNER_TEMP/wine-evidence/driver-input-ubsan"
       - name: Retain Wine source evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
