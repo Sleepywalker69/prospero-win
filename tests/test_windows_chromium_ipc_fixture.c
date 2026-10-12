@@ -27,6 +27,8 @@ static struct {
     int compare_unknown_error,duplicate_same_failed,included_invalid,included_control_bad;
     DWORD event_type,pipe_type,candidate_type,event_type_error,candidate_type_error;
     unsigned error_resets;int candidate_unsupported;
+    DWORD local_pin_error;unsigned object_queries,info_classes,pinned_type_seen,raw_type_seen;
+    int missing_query,malformed_type,type_query_failed,private_type_text_leaked;
 } m;
 DWORD GetLastError(void){return m.error;}
 DWORD GetCurrentProcessId(void){return 100;}
@@ -34,7 +36,12 @@ ULONGLONG GetTickCount64(void){return 100;}
 BOOL WriteFile(HANDLE h,const void *buffer,DWORD size,DWORD *bytes,void *overlapped)
 {
     (void)h;(void)buffer;
-    if(!overlapped){*bytes=m.log_ok?size:0;return m.log_ok;}
+    if(!overlapped){
+        if(strstr(buffer,"identity_candidate_pinned_ALPC_Port"))m.pinned_type_seen=1;
+        if(strstr(buffer,"identity_candidate_unpinned_racy_ALPC_Port"))m.raw_type_seen=1;
+        if(strstr(buffer,"private_object_name"))m.private_type_text_leaked=1;
+        *bytes=m.log_ok?size:0;return m.log_ok;
+    }
     *bytes=m.io_ok?size:0;m.error=m.io_error;return m.io_ok;
 }
 BOOL ReadFile(HANDLE h,void *buffer,DWORD size,DWORD *bytes,void *overlapped)
@@ -51,7 +58,7 @@ HMODULE GetModuleHandleW(const wchar_t *name){(void)name;return (HMODULE)(uintpt
 static BOOL WINAPI compare_mock(HANDLE first,HANDLE second)
 {
     if(first==(HANDLE)(uintptr_t)11){
-        assert(second==(HANDLE)(uintptr_t)43);m.error=m.included_control_bad?ERROR_NOT_SAME_OBJECT:0;
+        assert(second==(HANDLE)(uintptr_t)43||second==(HANDLE)(uintptr_t)44);m.error=m.included_control_bad?ERROR_NOT_SAME_OBJECT:0;
         return !m.included_control_bad;
     }
     assert(first==(HANDLE)(uintptr_t)10);
@@ -61,9 +68,38 @@ static BOOL WINAPI compare_mock(HANDLE first,HANDLE second)
     m.error=m.candidate_same?0:m.compare_unknown_error?ERROR_ACCESS_DENIED:ERROR_NOT_SAME_OBJECT;
     return m.candidate_same;
 }
+static LONG NTAPI query_object_mock(HANDLE handle,ULONG info_class,void *buffer,ULONG capacity,ULONG *returned)
+{
+    struct object_type_prefix *info=buffer;const char *name;size_t minimum=sizeof(*info)+22*sizeof(ULONG),length;
+    int candidate=handle==(HANDLE)(uintptr_t)10||handle==(HANDLE)(uintptr_t)40;
+    ++m.object_queries;m.info_classes|=1u<<info_class;assert(info_class==2&&capacity==4096);
+    if(candidate&&m.type_query_failed){*returned=9000;return (LONG)-1073741820;}
+    name=handle==(HANDLE)(uintptr_t)11?"Event":handle==(HANDLE)(uintptr_t)12?"File":"ALPC Port";
+    if(candidate&&m.malformed_type==5)name="private_object_name";
+    length=strlen(name);memset(buffer,0,capacity);
+    info->length=(uint16_t)(length*2);info->maximum=(uint16_t)(info->length+2);
+    info->text=(const uint16_t *)((unsigned char *)buffer+minimum);
+    for(size_t i=0;i<length;++i){uint16_t letter=(unsigned char)name[i];memcpy((unsigned char *)buffer+minimum+2*i,&letter,2);}
+    *returned=(ULONG)(minimum+info->maximum);
+    if(candidate){
+        if(m.malformed_type==1)info->length|=1;
+        if(m.malformed_type==2)info->text=(const uint16_t *)(uintptr_t)1;
+        if(m.malformed_type==3)info->maximum=UINT16_MAX;
+        if(m.malformed_type==4)*returned=4097;
+        if(m.malformed_type==6)info->text=(const uint16_t *)((unsigned char *)buffer+minimum+1);
+        if(m.malformed_type==7)info->length=0;
+        if(m.malformed_type==8)info->text=(const uint16_t *)buffer;
+    }
+    return 0;
+}
 FARPROC GetProcAddress(HMODULE module,const char *name)
 {
     FARPROC symbol=NULL;compare_objects_fn callback=compare_mock;(void)module;
+    if(!strcmp(name,"NtQueryObject")){
+        query_object_fn query=query_object_mock;
+        if(m.missing_query){m.error=127;return NULL;}
+        memcpy(&symbol,&query,sizeof(symbol));return symbol;
+    }
     assert(!strcmp(name,"CompareObjectHandles"));
     if(m.missing_compare){m.error=127;return NULL;}
     memcpy(&symbol,&callback,sizeof(symbol));return symbol;
@@ -73,6 +109,8 @@ BOOL DuplicateHandle(HANDLE source,HANDLE original,HANDLE target,HANDLE *copy,DW
     assert((original==(HANDLE)(uintptr_t)10||original==(HANDLE)(uintptr_t)11)&&target==GetCurrentProcess());
     assert(!rights&&!inherit&&options==DUPLICATE_SAME_ACCESS);
     if(source==GetCurrentProcess()){
+        if(original==(HANDLE)(uintptr_t)11){*copy=(HANDLE)(uintptr_t)44;return TRUE;}
+        if(m.local_pin_error){*copy=(HANDLE)(uintptr_t)99;m.error=m.local_pin_error;return FALSE;}
         if(m.duplicate_same_failed){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_ACCESS_DENIED;return FALSE;}
         *copy=(HANDLE)(uintptr_t)40;return TRUE;
     }
@@ -93,7 +131,7 @@ HANDLE CreateEventW(SECURITY_ATTRIBUTES *sa,BOOL manual,BOOL initial,const wchar
 BOOL CloseHandle(HANDLE h)
 {
     /* Only successfully acquired parent-local copies may be closed. */
-    assert(h==(HANDLE)(uintptr_t)40||h==(HANDLE)(uintptr_t)41||h==(HANDLE)(uintptr_t)42||h==(HANDLE)(uintptr_t)43);
+    assert(h==(HANDLE)(uintptr_t)40||h==(HANDLE)(uintptr_t)41||h==(HANDLE)(uintptr_t)42||h==(HANDLE)(uintptr_t)43||h==(HANDLE)(uintptr_t)44);
     ++m.closes;return TRUE;
 }
 DWORD WaitForSingleObject(HANDLE h,DWORD wait)
@@ -136,6 +174,8 @@ BOOL VirtualFree(void *address,SIZE_T size,DWORD type)
     assert(address==m.memory+8192&&size==4096&&type==MEM_DECOMMIT);
     m.states[2]=MEM_RESERVE;m.protections[2]=0;return TRUE;
 }
+BOOL GetHandleInformation(HANDLE handle,DWORD *flags)
+{ assert(handle==(HANDLE)(uintptr_t)10);*flags=0;return TRUE; }
 void SetLastError(DWORD error){m.error=error;++m.error_resets;}
 DWORD GetFileType(HANDLE h)
 {
@@ -225,6 +265,26 @@ int main(void)
         CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==FILE_TYPE_UNKNOWN);CHECK(!stage_failed);
         reset();m.candidate_type_error=ERROR_ACCESS_DENIED;
         CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==FILE_TYPE_UNKNOWN);CHECK(!stage_failed);
+        reset();inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(m.object_queries==3&&m.info_classes==(1u<<2)&&m.pinned_type_seen&&!m.raw_type_seen);
+        CHECK(!stage_failed&&!handles&&m.closes==2);
+        reset();m.local_pin_error=ERROR_NOT_SUPPORTED;
+        inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(m.raw_type_seen&&!m.pinned_type_seen&&m.object_queries==3);
+        CHECK(!stage_failed&&!handles&&m.closes==1);
+        m.candidate_unsupported=1;CHECK(!excluded_object(&child,FILE_TYPE_UNKNOWN));CHECK(stage_failed&&!handles);
+        for(int malformed=1;malformed<=8;++malformed){
+            reset();m.malformed_type=malformed;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+            CHECK(!m.pinned_type_seen&&!m.raw_type_seen&&!m.private_type_text_leaked);
+            CHECK(!stage_failed&&!handles&&m.closes==2);
+        }
+        reset();m.type_query_failed=1;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(!m.pinned_type_seen&&!stage_failed&&!handles&&m.closes==2);
+        reset();m.missing_query=1;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(!m.object_queries&&!stage_failed&&!handles&&m.closes==1);
+        reset();m.missing_compare=1;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(m.object_queries==3&&!stage_failed&&!handles&&m.closes==2);
+
 
     }
     printf("windows_chromium_ipc_fixture: %u mocked decision-path checks passed\n",checks);

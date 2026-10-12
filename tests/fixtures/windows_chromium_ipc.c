@@ -33,6 +33,7 @@ typedef LONG (NTAPI *nt_read_fn)(HANDLE,const void *,void *,SIZE_T,SIZE_T *);
 typedef LONG (NTAPI *nt_write_fn)(HANDLE,void *,const void *,SIZE_T,SIZE_T *);
 typedef LONG (NTAPI *nt_section_fn)(HANDLE,ULONG,void *,ULONG,ULONG *);
 typedef BOOL (WINAPI *compare_objects_fn)(HANDLE,HANDLE);
+typedef LONG (NTAPI *query_object_fn)(HANDLE,ULONG,void *,ULONG,ULONG *);
 struct section_basic { void *base; ULONG attributes; LARGE_INTEGER size; };
 
 static void trace(const char *stage,const char *result,DWORD error,LONG status,
@@ -381,6 +382,94 @@ static int pipe_child(HANDLE pipe,HANDLE rx,HANDLE tx)
     if(port)ok&=settle_slots(pipe,port);
     close_handle(&port);return ok;
 }
+/* ObjectTypeInformation prefix documented for NtQueryObject. Type names
+ * are categories, not object-instance names; no ObjectNameInformation call. */
+struct object_type_prefix { uint16_t length,maximum; const uint16_t *text; };
+struct object_category { const char *name,*label; };
+static const struct object_category object_categories[]={
+    {"","Unclassified"},{"Event","Event"},{"File","File"},{"ALPC Port","ALPC_Port"},
+    {"Port","Port"},{"IoCompletion","IoCompletion"},{"TpWorkerFactory","TpWorkerFactory"},
+    {"WaitCompletionPacket","WaitCompletionPacket"},{"Process","Process"},{"Thread","Thread"},
+    {"Token","Token"},{"Section","Section"},{"Key","Key"},{"Directory","Directory"},
+    {"SymbolicLink","SymbolicLink"},{"Mutant","Mutant"},{"Semaphore","Semaphore"},
+    {"Timer","Timer"},{"Job","Job"},{"EtwRegistration","EtwRegistration"},
+    {"EtwConsumer","EtwConsumer"},{"DebugObject","DebugObject"},{"Desktop","Desktop"},
+    {"WindowStation","WindowStation"},{"Session","Session"}
+};
+static unsigned object_category(const unsigned char *buffer,SIZE_T capacity,ULONG returned)
+{
+    const struct object_type_prefix *info=(const struct object_type_prefix *)buffer;
+    uintptr_t start=(uintptr_t)buffer,text_address;SIZE_T offset,minimum=sizeof(*info)+22*sizeof(ULONG);
+    unsigned category,i;int equal;
+    if(returned>capacity||returned<minimum)return 0;
+    text_address=(uintptr_t)info->text;
+    if(text_address<start||text_address%sizeof(uint16_t))return 0;
+    offset=(SIZE_T)(text_address-start);
+    if(offset<minimum||offset>returned||!info->length||info->length%sizeof(uint16_t)||
+       info->maximum%sizeof(uint16_t)||info->length>info->maximum||info->maximum>returned-offset||
+       info->length>128)return 0;
+    for(category=1;category<sizeof(object_categories)/sizeof(object_categories[0]);++category){
+        const char *name=object_categories[category].name;
+        if(strlen(name)*sizeof(uint16_t)!=info->length)continue;
+        equal=1;
+        for(i=0;i<info->length/sizeof(uint16_t);++i){
+            uint16_t letter;memcpy(&letter,buffer+offset+i*sizeof(letter),sizeof(letter));
+            if(letter!=(unsigned char)name[i]){equal=0;break;}
+        }
+        if(equal)return category;
+    }
+    return 0;
+}
+static unsigned observe_object_type(query_object_fn query,HANDLE handle,const char *stage)
+{
+    union { void *align_pointer;uint64_t align_integer;unsigned char bytes[4096]; } storage;
+    ULONG returned=0;LONG status;unsigned category=0;char label[128];
+    memset(&storage,0,sizeof(storage));attempt(stage);
+    status=query(handle,2,storage.bytes,sizeof(storage.bytes),&returned); /* ObjectTypeInformation only. */
+    if(status>=0)category=object_category(storage.bytes,sizeof(storage.bytes),returned);
+    (void)snprintf(label,sizeof(label),"%s_%s",stage,object_categories[category].label);
+    trace(label,"observation_only",0,status,returned,category,0);
+    return category;
+}
+static void inspect_candidate_object(HANDLE candidate,HANDLE event,HANDLE pipe)
+{
+    query_object_fn query=NULL;compare_objects_fn compare=NULL;FARPROC symbol;HANDLE pinned=NULL,control=NULL;
+    BOOL api;DWORD error,flags=0;unsigned category;
+    attempt("identity_diagnostic_GetHandleInformation");api=GetHandleInformation(candidate,&flags);error=api?0:GetLastError();
+    trace("identity_diagnostic_GetHandleInformation","observation_only",error,0,0,api?1:0,flags);
+    /* Pin before allocating any other diagnostic handles. Never act on or
+     * close the unknown original; a failed API's output is not owned. */
+    attempt("identity_diagnostic_local_pin");
+    api=DuplicateHandle(GetCurrentProcess(),candidate,GetCurrentProcess(),&pinned,0,FALSE,DUPLICATE_SAME_ACCESS);
+    error=api?0:GetLastError();if(api)own(pinned);else pinned=NULL;
+    trace("identity_diagnostic_local_pin","observation_only",error,0,0,api?1:0,(uint64_t)(uintptr_t)pinned);
+    symbol=GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryObject");
+    if(!symbol){trace("identity_diagnostic_query_unavailable","observation_only",GetLastError(),0,0,0,0);goto done;}
+    _Static_assert(sizeof(query)==sizeof(symbol),"Windows query pointer width");memcpy(&query,&symbol,sizeof(query));
+    if(pinned&&pinned!=INVALID_HANDLE_VALUE)observe_object_type(query,pinned,"identity_candidate_pinned");
+    else observe_object_type(query,candidate,"identity_candidate_unpinned_racy");
+    category=observe_object_type(query,event,"identity_diagnostic_known_event");
+    trace("identity_diagnostic_event_control","observation_only",0,0,0,category==1,category);
+    category=observe_object_type(query,pipe,"identity_diagnostic_known_pipe");
+    trace("identity_diagnostic_pipe_control","observation_only",0,0,0,category==2,category);
+    attempt("identity_diagnostic_local_event_duplicate");
+    api=DuplicateHandle(GetCurrentProcess(),event,GetCurrentProcess(),&control,0,FALSE,DUPLICATE_SAME_ACCESS);
+    error=api?0:GetLastError();if(api)own(control);else control=NULL;
+    trace("identity_diagnostic_local_event_duplicate","observation_only",error,0,0,api?1:0,(uint64_t)(uintptr_t)control);
+    symbol=GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),"CompareObjectHandles");
+    if(!symbol){trace("identity_diagnostic_compare_unavailable","observation_only",GetLastError(),0,0,0,0);goto done;}
+    memcpy(&compare,&symbol,sizeof(compare));
+    if(control&&control!=INVALID_HANDLE_VALUE){
+        attempt("identity_diagnostic_local_event_same");api=compare(event,control);error=api?0:GetLastError();
+        trace("identity_diagnostic_local_event_same","observation_only",error,0,0,api?1:0,0);
+    }
+    if(pinned&&pinned!=INVALID_HANDLE_VALUE){
+        attempt("identity_diagnostic_local_candidate_same");api=compare(candidate,pinned);error=api?0:GetLastError();
+        trace("identity_diagnostic_local_candidate_same","observation_only",error,0,0,api?1:0,0);
+    }
+ done:
+    close_handle(&control);close_handle(&pinned);
+}
 static int known_file_kind(DWORD kind)
 { return kind==FILE_TYPE_DISK||kind==FILE_TYPE_CHAR||kind==FILE_TYPE_PIPE; }
 static DWORD candidate_file_kind(HANDLE candidate,HANDLE event,HANDLE pipe)
@@ -412,6 +501,7 @@ static int worker_main(int argc,char **argv)
     rx=own((HANDLE)(uintptr_t)numbers[3]);tx=own((HANDLE)(uintptr_t)numbers[4]);
     release=own((HANDLE)(uintptr_t)numbers[5]);extra=own((HANDLE)(uintptr_t)numbers[6]);
     start_log();
+    inspect_candidate_object((HANDLE)(uintptr_t)numbers[7],release,rx);
     file_kind=candidate_file_kind((HANDLE)(uintptr_t)numbers[7],release,rx);
     if(file_kind==UINT32_MAX)goto done;
     p=packet(PW_IPC_HELLO,0);p.address=(uint64_t)(uintptr_t)&private_value;p.value=private_value;

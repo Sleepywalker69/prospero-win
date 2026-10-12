@@ -139,6 +139,31 @@ handles. No unknown candidate is signaled, closed or waited on in the child.
 A 5-second acknowledgement timeout and external 90-second process deadline bound
 the exchange; child termination during capture cannot satisfy the control.
 
+### Additional observation-only handle diagnosis
+
+Before the existing exclusion exchange, the child records GetHandleInformation
+and attempts same-process duplication of the candidate before creating any other
+diagnostic handle. A successful copy pins the object for inspection. If that
+fails, any query of the original slot is explicitly labeled `unpinned_racy`.
+`NtQueryObject(ObjectTypeInformation)` uses one aligned 4 KiB buffer and validates
+the public Unicode type prefix, returned length, alignment and complete string
+span before matching a fixed category allowlist. Only category labels such as
+Event, File or ALPC_Port are emitted; unknown type text, raw UTF-16 and object
+instance names are not logged. ObjectNameInformation is never requested.
+
+Known event and pipe types, plus a same-process event duplicate/identity check,
+provide diagnostic calibration. Unsupported APIs, oversized/malformed metadata,
+and pin failures are observation-only. The original API errors remain recorded.
+Only successful owned copies are closed, never the unknown original. Failure
+to close an owned diagnostic duplicate remains a real cleanup failure; optional
+observation status does not excuse leaked resources. Native query calls have no fixture-side asynchronous timeout; the existing outer runner
+deadline remains the bound.
+
+These records **do not grant exclusion success** or add another error-50
+exception. A reported ALPC_Port or other category is diagnostic evidence to
+review before designing another control. The existing identity/file-kind gates
+and their failure outcome remain unchanged.
+
 ## Evidence and bounded cleanup
 
 Each machine-readable line includes schema, case, role, nonce, Windows PID,
@@ -252,6 +277,7 @@ Only the Windows x64/x86 MSVC jobs establish build and reference execution.
 ## API references
 
 - [Explicit handle list](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+- [NtQueryObject public type-information contract](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryobject)
 - [GetFileType classifications and UNKNOWN errors](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype)
 - [CompareObjectHandles identity and error contract](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles)
 - [DuplicateHandle access and source-close semantics](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)

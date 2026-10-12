@@ -236,6 +236,20 @@ class ReferenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
                 item[field] = saved
 
+    def test_object_type_diagnostics_cannot_authorize_unsupported_capture(self):
+        case = 'live-memory';parent, child = paired_rows(case)
+        child.insert(0, row('identity_candidate_unpinned_racy_ALPC_Port', 'observation_only',
+                           case=case, role='child', pid=101, a=3))
+        child.insert(0, row('identity_diagnostic_event_control', 'observation_only',
+                           case=case, role='child', pid=101, a=1, b=1))
+        child.insert(0, row('identity_diagnostic_pipe_control', 'observation_only',
+                           case=case, role='child', pid=101, a=1, b=2))
+        capture = next(r for r in parent if r['stage'] == 'identity_capture_child_handle')
+        capture.update(result='non_event', error=50, a=0, b=0)
+        next(r for r in parent if r['stage'] == 'handle_list_excluded').update(error=50, a=2, b=0)
+        write(self.path, parent);write(self.directory / 'ipc-10-101.log', child)
+        with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+
     def test_source_safety_and_independent_identity(self):
         source = (ROOT / 'tests/fixtures/windows_chromium_ipc.c').read_text()
         for forbidden in ('TerminateProcess(', 'INFINITE', '--no-sandbox', '--single-process', 'CreateRemoteThread(', 'AdjustTokenPrivileges('):
