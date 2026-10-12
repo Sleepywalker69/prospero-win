@@ -2,8 +2,10 @@
 name: Original Chromium IPC Windows reference
 on:
   workflow_dispatch:
+  workflow_call:
   pull_request:
     paths:
+      - .gitattributes
       - tests/fixtures/windows_chromium_ipc.c
       - tests/fixtures/windows_chromium_ipc_contract.h
       - tests/test_windows_chromium_ipc_*.py
@@ -11,6 +13,9 @@ on:
       - tests/chromium_ipc_mock/windows.h
       - tools/build_windows_chromium_ipc.ps1
       - tools/check_windows_chromium_ipc.py
+      - tools/windows_chromium_ipc_contract.py
+      - tools/windows_chromium_ipc_package.py
+      - tools/join_windows_chromium_ipc.py
       - .github/workflows/windows-chromium-ipc-reference.yml
 permissions:
   contents: read
@@ -39,7 +44,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $out = Join-Path $env:RUNNER_TEMP 'chromium-ipc-${{ matrix.arch }}'
-          function Invoke-BoundedReference($exe, $arguments, $directory) {
+          function Invoke-BoundedReference($exe, $arguments, $directory, $expectedExit = 0) {
             New-Item -ItemType Directory $directory | Out-Null
             $options = @{
               FilePath = $exe; PassThru = $true; NoNewWindow = $true; WorkingDirectory = $directory
@@ -57,7 +62,7 @@ jobs:
             $code = $process.ExitCode
             "reference_exit=$code" | Set-Content (Join-Path $directory 'reference.exit')
             Get-Content (Join-Path $directory 'stdout.log') | Write-Host
-            if ($code -ne 0) { throw "Reference failed or remained unsettled: $code" }
+            if ($null -eq $code -or $code -ne $expectedExit) { throw "Reference exit $code differs from expected $expectedExit" }
             return $code
           }
           $original = Join-Path $env:RUNNER_TEMP 'original-${{ matrix.arch }}/parent.exe'
@@ -71,6 +76,35 @@ jobs:
               Tee-Object -FilePath (Join-Path $directory 'REFERENCE.json')
             if ($LASTEXITCODE -ne 0) { throw "Structured reference rejected: $case" }
           }
+          # Aliases retain empty profile arguments; each launch has fresh process state.
+          $entryRoot = Join-Path $out 'empty-argument-reference'
+          New-Item -ItemType Directory $entryRoot | Out-Null
+          foreach ($case in $cases) {
+            $alias = Join-Path $out "pw-ipc-$case.exe"
+            $directory = Join-Path $entryRoot $case
+            $code = Invoke-BoundedReference $alias '' $directory
+            python tools/check_windows_chromium_ipc.py --directory $directory --case $case --bits $bits --exit-code $code |
+              Tee-Object -FilePath (Join-Path $directory 'REFERENCE.json')
+            if ($LASTEXITCODE -ne 0) { throw "Empty-argument reference rejected: $case" }
+          }
+          $controls = Join-Path $out 'entry-rejection-controls'
+          New-Item -ItemType Directory $controls | Out-Null
+          $null = Invoke-BoundedReference (Join-Path $out 'chromium-ipc.exe') '' (Join-Path $controls 'canonical-no-case') 2
+          $null = Invoke-BoundedReference (Join-Path $out 'chromium-ipc.exe') 'self-memory extra' (Join-Path $controls 'canonical-extra') 2
+          $unknown = Join-Path $controls 'unregistered-ipc.exe'
+          Copy-Item (Join-Path $out 'chromium-ipc.exe') $unknown
+          $null = Invoke-BoundedReference $unknown '' (Join-Path $controls 'unknown-no-case') 2
+          $null = Invoke-BoundedReference $unknown 'self-memory' (Join-Path $controls 'unknown-explicit-case') 2
+          foreach ($case in $cases) {
+            $directory = Join-Path $controls "alias-arguments-$case"
+            $null = Invoke-BoundedReference (Join-Path $out "pw-ipc-$case.exe") $case $directory 2
+          }
+          if (Get-ChildItem $controls -Recurse -Filter 'ipc-*.log') { throw 'Rejected entry unexpectedly entered a case.' }
+          [ordered]@{schema='pw-chromium-ipc-empty-argument-reference/1'; bits=$bits;
+            project_commit=('${{ github.sha }}'); run_id='${{ github.run_id }}'; run_attempt='${{ github.run_attempt }}';
+            explicit_cases=$cases; empty_argument_cases=$cases; rejection_controls=12;
+            windows_reference='pass'; native_admission='not_implemented'; ps5_execution='not_run'; native_settlement='unverified'} |
+            ConvertTo-Json -Depth 5 | Set-Content -Encoding ascii (Join-Path $out 'ENTRY-REFERENCE.json')
       - name: Preserve exact binaries, original source and reference evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

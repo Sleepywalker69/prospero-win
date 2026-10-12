@@ -70,6 +70,7 @@ static struct {
     int validate_error,send_error,receive_error,ack_bad,sleep_action,hash_bad;
     unsigned opens,reads,closes[128],dups,pairs,adds,kills,sends,receives,validations,records,sleeps,lists,apps,missing_result;
     unsigned opened[128],positions[128],next_fd,stage_receive;
+    const char *last_open_path;
     int root_during_clock,inject_seal,publication_samples;
     unsigned first_failures,first_index,release_index,inside_callback,reenter_failure;
     int64_t first_api,first_raw,first_errno;
@@ -140,7 +141,7 @@ static int mock_mutex_unlock(pthread_mutex_t *p)
 {CHECK(p==&owner.clock_lock&&m.mutex_locked);m.mutex_locked=0;return m.mutex_error;}
 static int mock_open(const char *path,int flags,...)
 {
-    CHECK(path&&(flags&O_NOFOLLOW)&&(flags&O_NONBLOCK));m.opens++;
+    CHECK(path&&(flags&O_NOFOLLOW)&&(flags&O_NONBLOCK));m.opens++;m.last_open_path=path;
     if(m.open_error){errno=EACCES;return -1;}
     int alias=-1;
     for(unsigned i=0;i<2;i++)if(!strcmp(path,helpers[i]))alias=(int)i;

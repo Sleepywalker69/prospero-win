@@ -235,7 +235,14 @@ class WineChildIntegration(unittest.TestCase):
         workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
                              Loader=yaml.BaseLoader)
         job = workflow['jobs']['matched-runtime']
-        self.assertEqual(job['env'], {'BUILD_JOBS': '2'})
+        self.assertEqual(set(job['env']), {'BUILD_JOBS', 'PW_IPC_REQUESTED'})
+        self.assertEqual(job['env']['BUILD_JOBS'], '2')
+        from test_windows_child_workflow_options import actual_gate, base_context
+        for selected in (False, True):
+            context = base_context(**{'github.event_name': 'workflow_dispatch',
+                                      'inputs.enable_chromium_ipc': selected, 'labels': []})
+            self.assertEqual(actual_gate(job['env']['PW_IPC_REQUESTED'], context),
+                             '1' if selected else '0')
         step = job['steps'][0]
         self.assertEqual(step.get('id'), 'runtime-paths')
         self.assertNotIn('if', step)
@@ -336,6 +343,7 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
         #include <string.h>
         #include "pw_game_profile.h"
         #include "pw_wine_launch.h"
+        #include "pw_wine_ipc_profile.h"
         /* This extracted mode1/2 caller control uses the actual default-off configuration. */
         #define PW_WINE_USER_PROFILE_ENABLED 0
         #define PW_WINE_NET_PROFILE_ENABLED 0
@@ -382,7 +390,7 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
             path = Path(directory)
             (path / 'test.c').write_text(code)
             subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                            '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'include'), str(path / 'test.c'),
+                            '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'include'), '-I' + str(ROOT / 'native'), '-I' + str(ROOT / 'wine/ps5'), str(path / 'test.c'),
                             str(ROOT / 'src' / 'pw_wine_launch.c'), '-o', str(path / 'test')], check=True)
             subprocess.run([str(path / 'test')], check=True)
 
@@ -445,7 +453,7 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
             path = Path(directory)
             (path / 'test.c').write_text(code)
             subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                            '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'include'), str(path / 'test.c'),
+                            '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'include'), '-I' + str(ROOT / 'native'), '-I' + str(ROOT / 'wine/ps5'), str(path / 'test.c'),
                             str(ROOT / 'src' / 'pw_wine_start.c'), '-o', str(path / 'test')], check=True)
             subprocess.run([str(path / 'test')], check=True)
 
@@ -632,7 +640,7 @@ int pw_wine_start_load(PwWineStart *a,const PwWineStartConfig *b,const PwWineSta
             path = Path(directory)
             (path / 'test.c').write_text(code)
             subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                            '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'include'), str(path / 'test.c'),
+                            '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'include'), '-I' + str(ROOT / 'native'), '-I' + str(ROOT / 'wine/ps5'), str(path / 'test.c'),
                             str(ROOT / 'src' / 'pw_wine_launch.c'), '-o', str(path / 'test')], check=True)
             subprocess.run([str(path / 'test')], check=True)
 

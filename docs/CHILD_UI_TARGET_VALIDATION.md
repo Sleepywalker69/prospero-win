@@ -116,3 +116,27 @@ No deployment, console launch, child input, cross-process focus, CEF/Battle.net
 execution, socket/ancillary compatibility or native cleanup is established by
 this static-validation artifact. See [the preview contract](CHILD_UI_PREVIEW.md)
 for the target gates and unchanged admission boundaries.
+
+## Explicit strict IPC label and option isolation
+
+`build-windows-chromium-ipc-strict` on a same-repository pull request opts in
+only the strict IPC matched cohort. Adding that exact current label, or opening,
+synchronizing, or reopening a pull request that retains it, starts the matched
+workflow and its reusable x64/x86 Windows references in the same run/attempt.
+The duplicate push-backed seed head and external forks remain excluded. Adding
+an unrelated label cannot trigger work, even if an opt-in label is already present.
+Adding the ordinary fixture label retains the ordinary default-off selection.
+
+IPC and child UI preview cannot share a matched build. Both dispatch booleans
+true, or both current PR opt-in labels present on an otherwise accepted event,
+fail the small `reject-conflicting-options` job. Every heavy job rejects that
+combination in its own condition before source checkout or build work. Remove
+one opt-in label and add the intended one again to start a separate cohort;
+label removal by itself does not run this workflow. The standalone IPC workflow
+does not offer the preview dispatch input or implement the preview label path.
+
+Accepted events keep non-cancelling per-ref serialization. Ignored and rejected
+events use their own run-ID concurrency group, so they cannot replace a pending
+accepted job. The original fixture references and strict IPC source, artifact,
+run/attempt and eight-profile checks remain mandatory. Preview collectors and
+native settlement/deployment requirements are unchanged.

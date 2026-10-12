@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Synthetic verifier tests. They are not records of Windows execution."""
 import importlib.util
+import re
 from pathlib import Path
 import tempfile
 import sys
@@ -276,6 +277,42 @@ class ReferenceTests(unittest.TestCase):
             next(r for r in parent if r['stage'] == 'handle_list_excluded').update(error=error, a=flag)
             write(self.path, parent);write(self.directory / 'ipc-10-101.log', child)
             with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+
+    def test_fixed_entry_aliases_match_recipe_and_documented_ids(self):
+        source = (ROOT / 'tests/fixtures/windows_chromium_ipc.c').read_text()
+        recipe = (ROOT / 'tools/build_windows_chromium_ipc.ps1').read_text()
+        guide = (ROOT / 'docs/WINDOWS_CHROMIUM_IPC_PROBES.md').read_text()
+        aliases = re.findall(r'L"(pw-ipc-[a-z-]+\.exe)"', source)
+        expected = [f'pw-ipc-{case}.exe' for case in check.CASES]
+        self.assertEqual(aliases, expected)
+        self.assertEqual(len(set(aliases)), 8)
+        for case, alias in zip(check.CASES, aliases):
+            self.assertIn(f"'{alias}' = '{case}'", recipe)
+            profile = f'windows-chromium-ipc-{case}-v1'
+            self.assertIn(profile, guide)
+            self.assertLess(len(profile), 65)
+        self.assertIn('GetModuleFileNameW(NULL,image,MAX_PATH)', source)
+        self.assertNotIn('choose_entry(argv[0]', source)
+        self.assertIn('git -C $repo diff --exit-code HEAD --', recipe)
+        attributes = (ROOT / '.gitattributes').read_text()
+        for path in ('tests/fixtures/windows_chromium_ipc.c', 'tests/fixtures/windows_chromium_ipc_contract.h',
+                     'tools/build_windows_chromium_ipc.ps1', 'tools/check_windows_chromium_ipc.py',
+                     '.github/workflows/windows-chromium-ipc-reference.yml'):
+            self.assertIn(f'{path} text eol=lf', attributes)
+        for field in ('project =', 'recipe_sha256', 'checker_sha256', 'reference_workflow_sha256',
+                      'empty_argument_entries', 'run_id=', 'run_attempt='):
+            self.assertIn(field, recipe)
+
+    def test_empty_argument_workflow_preserves_bounded_reference_and_rejections(self):
+        workflow = (ROOT / '.github/workflows/windows-chromium-ipc-reference.yml').read_text()
+        self.assertIn('$process.WaitForExit(90000)', workflow)
+        self.assertNotIn('$process.WaitForExit()', workflow)
+        self.assertIn('$null -eq $code -or $code -ne $expectedExit', workflow)
+        self.assertIn("Invoke-BoundedReference $alias '' $directory", workflow)
+        self.assertIn('rejection_controls=12', workflow)
+        self.assertIn("Get-ChildItem $controls -Recurse -Filter 'ipc-*.log'", workflow)
+        self.assertIn("native_admission='not_implemented'; ps5_execution='not_run'", workflow)
+        self.assertIn("native_settlement='unverified'", workflow)
 
     def test_source_safety_and_independent_identity(self):
         source = (ROOT / 'tests/fixtures/windows_chromium_ipc.c').read_text()

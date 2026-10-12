@@ -26,6 +26,7 @@ static void fake_ui_bind(PwWineChildBootstrap *,const PwWineChildBootstrapOps *)
 #undef mmap
 static unsigned binds,detaches,pumps,ui_closes;
 static int pump_failure;
+static unsigned forced_ipc_profile;
 static unsigned char storage[1]; /* inert mapped storage; queue IO is mocked */
 static void *fake_ui_mmap(void *hint,size_t bytes,int prot,int flags,int fd,off_t offset)
 {assert(!hint&&bytes==PW_WCU_HEADER+PW_WCU_MAX_BYTES&&prot==(PROT_READ|PROT_WRITE)&&flags==(MAP_PRIVATE|MAP_ANON)&&fd==-1&&!offset);return storage;}
@@ -34,7 +35,7 @@ static int fake_ui_receive(PwWineChildUiHandoff *h,PwNativeChildIo *i,int contro
     assert(h==&ui_handoff&&hello->child_pid==600&&hello->child_ppid==53&&hello->kind==PW_WC_HELLO);
     int rc=fake_receive(i,control,PW_WC_KIND(PW_WC_BOOTSTRAP),&h->bootstrap,server,&wire_result);
     h->result=wire_result; /* preserve the composed diagnostic fixture result */
-    if(rc==PW_WC_RECORD){*ui=10;h->state=PW_WCU_HANDOFF_DONE;h->session=80;}
+    if(rc==PW_WC_RECORD){if(forced_ipc_profile)h->bootstrap.profile=forced_ipc_profile;*ui=10;h->state=PW_WCU_HANDOFF_DONE;h->session=80;}
     else {*ui=-1;h->state=PW_WCU_HANDOFF_FAILED;}
     return rc;
 }
@@ -62,5 +63,11 @@ int main(void)
     assert(!legacy_main_controls());assert(binds&&detaches&&pumps&&ui_closes);
     reset();pump_failure=1;run();assert(m.exit_code==17&&m.kills==1&&ui_channel.retired&&!atomic_load(&runtime_failure));
     assert(closed(10)==1&&!closed(9)&&!closed(3));
+    for(unsigned profile=PW_WC_PROFILE_IPC_FIRST;profile<=PW_WC_PROFILE_IPC_LAST;profile++){
+        reset();forced_ipc_profile=profile;run();
+        assert(m.exit_code==13&&startup_phase==PW_WCS_PROFILE&&!m.prepares&&!m.starts&&!m.progress&&!m.writes);
+        assert(!ui_channel.initialized&&closed(9)==1&&closed(10)==1&&closed(3)==1);
+    }
+    forced_ipc_profile=0;
     puts("child UI worker: opt-in pre-Wine binding, control coexistence and independent detach controls passed");return 0;
 }
