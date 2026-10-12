@@ -50,14 +50,15 @@ def fixture():
 
 
 def net_observation_fixture():
+    names = ('sceNetSocket', 'sceNetErrnoLoc', *(n for n in build.NET_FUNCTIONS if n not in ('sceNetSocket', 'sceNetErrnoLoc')), 'sceKernelLoadStartModule')
     class Image:
         def __init__(self):
-            self.data = bytearray(0x1010)
-            self.relocations = [{'address': a, 'type': 6, 'addend': 0, 'symbol': i + 1} for i, a in enumerate((0x2000, 0x2008))]
-            self.symbols = [{'name': ''}, {'name': 'sceNetSocket'}, {'name': 'sceNetErrnoLoc'}]
+            self.data = bytearray(0x1040)
+            self.relocations = [{'address': a, 'type': 6, 'addend': 0, 'symbol': i + 1} for i, a in enumerate(range(0x2000, 0x2040, 8))]
+            self.symbols = [{'name': ''}] + [{'name': n} for n in names]
         def offset(self, address, size, flags):
-            valid = (flags == 1 and 0x1000 <= address and address + size <= 0x1200) or (
-                flags == 6 and 0x2000 <= address and address + size <= 0x2010)
+            valid = (flags == 1 and 0x1000 <= address and address + size <= 0x1400) or (
+                flags == 6 and 0x2000 <= address and address + size <= 0x2040)
             if not valid: raise ValueError('unmapped diagnostic fixture bytes')
             return address - 0x1000
     image = Image()
@@ -71,15 +72,20 @@ def net_observation_fixture():
     image.data[0x15] = 0xc3
     emit(0x1100, b'\xff\x15', 0x2000)
     emit(0x1106, b'\xff\x15', 0x2008)
-    image.data[0x10c] = 0xc3
+    emit(0x110c, b'\xff\x15', 0x2038)
+    image.data[0x112] = 0xc3
+    for i in range(8): emit(0x1300 + i * 7, b'\x48\x8b\x05', 0x2000 + i * 8)
+    image.data[0x338] = 0xc3
     symbols = ('1: 0000000000001000 22 FUNC LOCAL DEFAULT 1 observe_net_targets\n'
-               '2: 0000000000001100 13 FUNC GLOBAL DEFAULT 1 pw_wine_child_data_prepare\n')
+               '2: 0000000000001100 19 FUNC GLOBAL DEFAULT 1 pw_wine_child_data_prepare\n'
+               '3: 0000000000001300 57 FUNC LOCAL DEFAULT 1 observe_net_import_slots\n')
     disassembly = '\n'.join(f'{a:x}: {op}' for a, op in (
         (0x1000, 'movq opaque(%rip), %rax'), (0x1007, 'movq opaque(%rip), %rcx'),
         (0x100e, 'leaq opaque(%rip), %rdx'), (0x1015, 'retq'),
-        (0x1100, 'callq *opaque(%rip)'), (0x1106, 'callq *opaque(%rip)'), (0x110c, 'retq')))
-    graph = {name: {'provider': 'libSceNet.sprx', 'nid': name + '#test', 'relocations': [dict(image.relocations[i])]}
-             for i, name in enumerate(('sceNetSocket', 'sceNetErrnoLoc'))}
+        (0x1100, 'callq *opaque(%rip)'), (0x1106, 'callq *opaque(%rip)'), (0x110c, 'callq *opaque(%rip)'), (0x1112, 'retq'),
+        *((0x1300+i*7, 'movq opaque(%rip), %rax') for i in range(8)), (0x1338, 'retq')))
+    graph = {name: {'provider': 'libkernel.sprx' if name == 'sceKernelLoadStartModule' else 'libSceNet.sprx', 'nid': name + '#test', 'relocations': [dict(image.relocations[i])]}
+             for i, name in enumerate(names)}
     converted, recovered = copy.deepcopy(image), copy.deepcopy(image)
     for output in (converted, recovered):
         for symbol in output.symbols[1:]: symbol['name'] += '#test'
@@ -194,8 +200,9 @@ class WineServiceChildBuild(unittest.TestCase):
             with patch.object(build,'provider',return_value=description):
                 result=build.net_inputs(sdk,Path('/inert'),None)
                 self.assertEqual(result,{'provider':{'soname':'libSceNet.sprx',**build.record(path)},
-                    'functions':list(build.NET_FUNCTIONS),'acquisition':'static-imports',
-                    'initialization':'native-root-transport','explicit_net_init':False,'runtime_validated':False})
+                    'functions':list(build.NET_FUNCTIONS),'acquisition':'static-imports-after-fixed-path-load-diagnostic',
+                    'load_path':'/system/common/lib/libSceNet.sprx','wire_version':3,
+                    'preload_mask':'0x8000000000000002','initialization':'loader-start-result-checked','explicit_net_init':False,'runtime_validated':False})
                 self.assertNotIn('sceNetInit',result['functions'])
                 path.write_bytes(b'changed provider bytes')
                 self.assertNotEqual(result['provider'],build.net_inputs(sdk,Path('/inert'),None)['provider'])
@@ -290,7 +297,7 @@ class WineServiceChildBuild(unittest.TestCase):
         for name in ('sceKernelDlsym','sceSysmoduleLoadModuleInternal','sceSysmoduleGetModuleHandleInternal'):
             linked,converted,providers=fixture()
             self.add_import(linked,converted,providers,name,'libkernel.sprx')
-            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'dynamic Net acquisition'):
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'symbol lookup or Sysmodule Net acquisition'):
                 build.ordinary_graph(linked,converted,providers)
 
     def test_each_required_net_import_and_provider_is_exact(self):
@@ -417,9 +424,14 @@ class WineServiceChildBuild(unittest.TestCase):
     def test_net_target_proof_uses_actual_instruction_bytes_and_preserved_cells(self):
         inputs = net_observation_fixture()
         result = build.check_net_target_observation(*inputs)
-        self.assertEqual(result['got_slots'], {'sceNetSocket': 0x2000, 'sceNetErrnoLoc': 0x2008})
+        self.assertEqual(len(result['got_slots']), 8)
+        self.assertEqual(result['got_slots']['sceNetSocket'], 0x2000)
+        self.assertEqual(result['got_slots']['sceNetErrnoLoc'], 0x2008)
+        self.assertEqual(result['wire_version'], 3)
+        self.assertEqual(result['stages'], [4, 5])
+        self.assertEqual(len(result['guard_instructions']), 8)
         self.assertEqual(result['observation_instructions'], {'sceNetSocket': [0x1000], 'sceNetErrnoLoc': [0x1007]})
-        self.assertEqual(result['original_call_instructions'], {'sceNetSocket': [0x1100], 'sceNetErrnoLoc': [0x1106]})
+        self.assertEqual(result['original_call_instructions'], {'sceNetSocket': [0x1100], 'sceNetErrnoLoc': [0x1106], 'sceKernelLoadStartModule': [0x110c]})
         self.assertEqual(result['anchor_instruction'], 0x100e)
         self.assertEqual(result['functions']['pw_wine_child_data_prepare']['address'], 0x1100)
         self.assertEqual(result['wire_bytes'], 136)
@@ -429,7 +441,7 @@ class WineServiceChildBuild(unittest.TestCase):
         self.assertEqual(build.check_net_target_observation(*misleading)['got_slots'], result['got_slots'])
 
     def test_net_target_proof_rejects_ambiguous_missing_or_changed_boundaries(self):
-        for mutation in range(19):
+        for mutation in range(22):
             values = list(net_observation_fixture())
             linked, converted, recovered, graph, symbols, disassembly = values
             if mutation == 0: values[4] = symbols.replace('observe_net_targets', 'missing')
@@ -446,6 +458,10 @@ class WineServiceChildBuild(unittest.TestCase):
             if mutation == 16: recovered.symbols[1]['name'] = 'wrong#test'
             if mutation == 17: recovered.data[0] ^= 1
             if mutation == 18: converted.data[0x1000] = 1
+            if mutation == 19: values[4] = symbols.replace('observe_net_import_slots', 'missing_guard')
+            if mutation == 20:
+                for image in (linked, converted, recovered): image.data[0x301] = 0x8d
+            if mutation == 21: graph['sceKernelLoadStartModule']['provider'] = 'libSceNet.sprx'
             if mutation in (10, 11, 12, 13, 14):
                 for image in (linked, converted, recovered):
                     if mutation == 10: image.data[1] = 0x8d  # LEA slot address is not a target load.

@@ -109,7 +109,13 @@ static int send_progress(void *context,unsigned stage)
     if(!session||bootstrap.started||stage<1||stage>PW_WC_PROGRESS_LAST)return -1;
     PwWineChildFrame frame=*session;
     frame.kind=PW_WC_PROGRESS;frame.failure_api=stage;
-    if(stage==PW_WCP_NET_SOCKET_BEGIN)observe_net_targets(&frame);
+    if(stage==PW_WCP_HELPER_VERIFIED||stage==PW_WCP_NET_SOCKET_BEGIN)observe_net_targets(&frame);
+    if(stage==PW_WCP_NET_SOCKET_BEGIN){
+        frame.net_load_attempted=data_readiness.net_load_attempted;
+        frame.net_load_result=data_readiness.net_load_result;
+        frame.net_start_result=data_readiness.net_start_result;
+        frame.net_missing_mask=data_readiness.net_missing_mask;
+    }
     return send_record(&frame);
 }
 /* Observe one explicit parent cancellation without treating it as corrupt
@@ -408,7 +414,8 @@ static int run_child(void)
         bootstrap.stage=PW_WCB_DATA;
         boot_failure(data_readiness.api,data_readiness.raw,
                      data_readiness.errno_valid?data_readiness.native_error:0,0,
-                     (int32_t)(data_readiness.api==PW_WCD_CONTROL?data_readiness.control_revents:
+                     (int32_t)((data_readiness.api==PW_WCD_NET_LOADER_SLOT||data_readiness.api==PW_WCD_NET_IMPORT_SLOT)?data_readiness.net_missing_mask:
+                               data_readiness.api==PW_WCD_CONTROL?data_readiness.control_revents:
                                data_readiness.api==PW_WCD_RESOLVE?data_readiness.resolution_index:data_readiness.helper_status));
     }
     if(!rc)rc=send_progress(session,PW_WCP_DATA_READY);

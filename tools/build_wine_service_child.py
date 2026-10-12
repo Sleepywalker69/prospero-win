@@ -104,7 +104,7 @@ def ordinary_graph(linked, converted, providers):
             set(NET_FUNCTIONS) and {name for name in graph if name.startswith('sceNet')} == set(NET_FUNCTIONS),
             'child requires exactly seven native-root Net imports')
     require('sceKernelDlsym' not in graph and not any(name.startswith('sceSysmodule') for name in graph),
-            'child must not use dynamic Net acquisition')
+            'child must not use symbol lookup or Sysmodule Net acquisition')
     return graph
 
 
@@ -144,7 +144,9 @@ def net_inputs(sdk, bindir, commands):
     require(item['soname'] == name and all(item['definitions'].get(call) == 'FUNC' for call in NET_FUNCTIONS),
             'child static Net provider/exports differ')
     return {'provider': {'soname': name, **record(path)}, 'functions': list(NET_FUNCTIONS),
-            'acquisition': 'static-imports', 'initialization': 'native-root-transport',
+            'acquisition': 'static-imports-after-fixed-path-load-diagnostic',
+            'load_path': '/system/common/lib/libSceNet.sprx', 'wire_version': 3,
+            'preload_mask': '0x8000000000000002', 'initialization': 'loader-start-result-checked',
             'explicit_net_init': False, 'runtime_validated': False}
 
 
@@ -179,7 +181,7 @@ def inspect_code(path, bindir, commands):
 def check_net_target_observation(linked, converted, recovered, graph, symbols, disassembly):
     """Prove fixed x86-64 GOT observations against actual decoded instruction boundaries."""
     check_disassembly(disassembly)
-    names = ('observe_net_targets', 'pw_wine_child_data_prepare')
+    names = ('observe_net_targets', 'pw_wine_child_data_prepare', 'observe_net_import_slots')
     functions = {}
     for name in names:
         rows = [line.split() for line in symbols.splitlines() if len(line.split()) >= 8 and line.split()[7] == name]
@@ -196,10 +198,10 @@ def check_net_target_observation(linked, converted, recovered, graph, symbols, d
             require(image.data[offset:offset + size] == value, 'net observation text changed through conversion')
         functions[name] = {'address': address, 'bytes': size, 'sha256': hashlib.sha256(value).hexdigest()}
     slots = {}
-    for name in ('sceNetSocket', 'sceNetErrnoLoc'):
+    for name in (*NET_FUNCTIONS, 'sceKernelLoadStartModule'):
         entry = graph.get(name, {})
         relocations = entry.get('relocations', [])
-        require(entry.get('provider') == 'libSceNet.sprx' and len(relocations) == 1 and
+        require(entry.get('provider') == ('libkernel.sprx' if name == 'sceKernelLoadStartModule' else 'libSceNet.sprx') and len(relocations) == 1 and
                 relocations[0]['type'] in (6, 7) and relocations[0]['addend'] == 0,
                 'ambiguous net observation import: ' + name)
         address, symbol = relocations[0]['address'], relocations[0]['symbol']
@@ -216,7 +218,7 @@ def check_net_target_observation(linked, converted, recovered, graph, symbols, d
                     [r for r in image.relocations if r['address'] == address] == relocations,
                     'net observation symbol/relocation differs after conversion')
         slots[name] = address
-    require(len(set(slots.values())) == 2, 'net observation imports alias one slot')
+    require(len(set(slots.values())) == 8, 'net observation imports alias one slot')
     instructions = {}
     for line in disassembly.splitlines():
         match = re.match(r'^\s*([0-9a-fA-F]+):\s+(\S.*)$', line)
@@ -224,8 +226,9 @@ def check_net_target_observation(linked, converted, recovered, graph, symbols, d
             address = int(match[1], 16)
             require(address not in instructions, 'duplicate net observation instruction address')
             instructions[address] = match[2]
-    observations = {name: [] for name in slots}
-    calls = {name: [] for name in slots}
+    observations = {name: [] for name in ('sceNetSocket', 'sceNetErrnoLoc')}
+    guards = {name: [] for name in slots}
+    calls = {name: [] for name in ('sceNetSocket', 'sceNetErrnoLoc', 'sceKernelLoadStartModule')}
     anchors, focused = [], []
     for name, function in functions.items():
         start, size = function['address'], function['bytes']
@@ -240,18 +243,25 @@ def check_net_target_observation(linked, converted, recovered, graph, symbols, d
             if len(code) == 7 and 0x48 <= code[0] <= 0x4f and code[2] & 0xc7 == 5:
                 target = address + 7 + int.from_bytes(code[3:], 'little', signed=True)
                 if name == names[0] and code[1] == 0x8b:
+                    for symbol in observations:
+                        if target == slots[symbol]: observations[symbol].append(address)
+                if name == names[2] and code[1] == 0x8b:
                     for symbol, slot in slots.items():
-                        if target == slot: observations[symbol].append(address)
+                        if target == slot: guards[symbol].append(address)
                 if name == names[0] and code[1] == 0x8d and target == functions[names[1]]['address']:
                     anchors.append(address)
             if name == names[1] and len(code) == 6 and code[:2] == b'\xff\x15':
                 target = address + 6 + int.from_bytes(code[2:], 'little', signed=True)
-                for symbol, slot in slots.items():
-                    if target == slot: calls[symbol].append(address)
+                for symbol in calls:
+                    if target == slots[symbol]: calls[symbol].append(address)
     require(all(len(found) == 1 for found in observations.values()) and len(anchors) == 1,
             'net observation must load each actual GOT slot and LEA the local anchor once')
+    require(all(len(found) == 1 for found in guards.values()), 'guard must reread all eight actual GOT cells')
     require(all(calls.values()), 'data preparation no longer calls through the observed GOT slots')
-    return {'schema': 'pw-wine-child-net-target-observation/1', 'stage': 5, 'wire_bytes': 136,
+    return {'schema': 'pw-wine-child-net-target-observation/2', 'stages': [4, 5], 'wire_version': 3, 'wire_bytes': 136,
+            'load_path': '/system/common/lib/libSceNet.sprx', 'guard_instructions': guards,
+            'guard_slot_order': [*NET_FUNCTIONS, 'sceKernelLoadStartModule'],
+            'missing_mask_meaning': 'bit i is one iff guard_slot_order[i] was zero',
             'functions': functions, 'got_slots': slots, 'observation_instructions': observations,
             'anchor_instruction': anchors[0], 'original_call_instructions': calls,
             'focused_disassembly': focused, 'target_executed': False, 'runtime_validated': False}
@@ -291,6 +301,10 @@ def inputs(args, commands):
                             'abi': 1, 'runtime_validated': False}, 'Wine service consumers were not explicitly built')
     require(abi.get('creation', {}).get('abi') == 1 and abi['creation'].get('protocol') == 962,
             'child requires actual matched creation protocol and broker')
+    donor = None
+    if getattr(args, 'donor_contract', None) is not None:
+        from derived_native_package import admit_runtime
+        donor = admit_runtime(root, runtime, abi, args.donor_contract)
     helper = helper_inputs(args, root, project, sdk)
     net = net_inputs(sdk, bindir, commands)
     result = {'helper': helper, 'net_transport': net, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
@@ -310,6 +324,8 @@ def inputs(args, commands):
               'libc_companion': record(title / 'runtime/libc.prx'), 'host_llvm': llvm,
               'sdk_headers': tree_files(sdk / 'target/include'), 'sdk_wrappers': tree_files(sdk / 'bin'),
               'providers': {name: record(sdk / 'target/lib' / leaf) for name, leaf in PROVIDERS.items()}}
+    if donor is not None:
+        result['derived_donor'] = donor
     return result, (root, sdk, foundation, runtime, bindir, title)
 
 
@@ -554,8 +570,12 @@ def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=
 
 
 def title_profiles_input_contract(root, service_work, fixture, user_fixture=None,
-                                  run_id=None, run_attempt=None, network_fixture=None):
+                                  run_id=None, run_attempt=None, network_fixture=None, donor_contract=None):
     """Keep leaf/USER admission independent; optional network needs its own original pair."""
+    if donor_contract is not None:
+        from derived_native_package import title_inputs
+        return title_inputs(root, service_work, fixture, user_fixture, run_id, run_attempt,
+                            network_fixture, donor_contract)
     result, header, pair, user_pair = title_input_contract(root, service_work, fixture,
                                                          user_fixture, run_id, run_attempt)
     network_pair = None
@@ -675,7 +695,8 @@ def check_title(args):
     app, build = args.app.resolve(strict=True), args.build.resolve(strict=True)
     title_inputs = json.loads((build / 'wine-child-title-inputs.json').read_text())
     expected_inputs, header, pair, user_pair, network_pair = title_profiles_input_contract(root, args.service_work, args.fixture,
-        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture)
+        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture,
+        donor_contract=getattr(args, 'donor_contract', None))
     fixture_sha = pair['files']['child.exe']['sha256']
     require(title_inputs == expected_inputs and (build / 'wine-child-title-config.h').read_text() == header,
             'title fixture/USER macro/source input record differs')
@@ -734,7 +755,8 @@ def check_title(args):
             record(app / 'lapy.elf') == manifest['helper']['elf'], 'helper changed during title inspection')
     require(source_identity(root, commands)[0] == manifest['project'], 'project changed during title inspection')
     require(title_profiles_input_contract(root, args.service_work, args.fixture, user_fixture,
-        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture) ==
+        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture,
+        donor_contract=getattr(args, 'donor_contract', None)) ==
         (expected_inputs, header, pair, user_pair, network_pair), 'original/USER/network fixture changed during title inspection')
     require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None) == compile_inputs,
             'title compile inputs changed during inspection')
@@ -766,7 +788,7 @@ def main():
     parser.add_argument('--check-title', action='store_true')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper-directory'):
+    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper-directory', 'donor-contract'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--run-id')
     parser.add_argument('--run-attempt')

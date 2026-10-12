@@ -112,7 +112,7 @@ static int cancel_cb(void *c){CHECK(c==&m);return m.cancelled;}
 static void record_cb(void *c,const char *event,uint64_t generation,int64_t a,int64_t b,int64_t d)
 {
     CHECK(c==&m&&event);(void)generation;(void)a;(void)b;(void)d;m.records++;
-    if(!strcmp(event,"bootstrap_progress"))m.progress_records++;
+    if(!strcmp(event,"bootstrap_progress")||!strcmp(event,"bootstrap_net_before"))m.progress_records++;
     if(!strcmp(event,"bootstrap_net_targets")){
         m.progress_records++;m.net_target_records++;
         m.net_targets[0]=(uint64_t)a;m.net_targets[1]=(uint64_t)b;m.net_targets[2]=(uint64_t)d;
@@ -235,6 +235,7 @@ static int progress_frame(uint32_t kinds,PwWineChildFrame *out,PwWineChildWireRe
     if(!(kinds&PW_WC_KIND(PW_WC_PROGRESS))){m.progress_mask_refused++;r->status=PW_WC_PROTOCOL;r->api=PW_WC_API_RECEIVE;return PW_WC_ERROR;}
     *out=m.sent;out->kind=PW_WC_PROGRESS;out->failure_api=m.progress_stage;if(m.progress_auto)m.progress_stage++;
     if(out->failure_api==PW_WCP_NET_SOCKET_BEGIN){
+        out->net_load_attempted=1;out->net_load_result=33;
         out->net_socket_target=UINT64_MAX;out->net_errno_target=UINT64_C(0x8000000000000000);
         out->data_prepare_anchor=UINT64_C(0x0123456789abcdef);
     }

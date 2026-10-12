@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Derived native child over immutable matched113
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: derived-native-child-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+jobs:
+  native-only:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           contains(github.event.pull_request.labels.*.name, 'build-derived-native113')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Establish bounded native-only paths
+        run: |
+          {
+            echo "TITLE_FOUNDATION=$RUNNER_TEMP/title-foundation"
+            echo "FOUNDATION=$RUNNER_TEMP/prx-foundation"
+            echo "DONOR_WORK=$RUNNER_TEMP/derived-donor"
+            echo "PW_DERIVED_DONOR_CONTRACT=$RUNNER_TEMP/derived-donor/donor-contract.json"
+            echo "PW_WINE_CHILD_RUNTIME=$RUNNER_TEMP/derived-donor/runtime"
+            echo "PW_WINDOWS_CHILD_FIXTURE_DIR=$RUNNER_TEMP/derived-donor/fixtures/original"
+            echo "PW_WINDOWS_CHILD_USER_DIR=$RUNNER_TEMP/derived-donor/fixtures/user"
+            echo "PW_WINDOWS_CHILD_NETWORK_DIR=$RUNNER_TEMP/derived-donor/fixtures/network"
+            echo "PW_NATIVE_SDK_SOURCE_ARCHIVE=$RUNNER_TEMP/sdk-source.tar.gz"
+          } >> "$GITHUB_ENV"
+      - name: Install hosted compiler prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 llvm-18-dev pkg-config m4 patch curl wget unzip zip zlib1g-dev
+          python3 -m pip install pyyaml==6.0.1
+          echo "PATH=/usr/lib/llvm-18/bin:$PATH" >> "$GITHUB_ENV"
+      - name: Run derived admission controls before downloads
+        run: |
+          python3 tests/test_derived_native_package.py
+          python3 tests/test_wine_service_child_build.py
+          python3 tests/test_native_suite.py
+      - name: Fetch and verify exact donor source object
+        run: |
+          set -euo pipefail
+          head_before=$(git rev-parse HEAD)
+          git fetch --no-tags origin 7acf08abea63640a737c7cec0cae4c0da61b82f5:refs/pw-derived/donor113
+          [[ $(git rev-parse 'refs/pw-derived/donor113^{commit}') == 7acf08abea63640a737c7cec0cae4c0da61b82f5 ]]
+          [[ $(git rev-parse 'refs/pw-derived/donor113^{tree}') == e28679c3d6c1a8735b9069509062c4114c166c47 ]]
+          [[ $(git rev-parse HEAD) == "$head_before" ]]
+      - name: Download exact accepted same-repository donor artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11747362547/zip > "$RUNNER_TEMP/donor-package.zip"
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11747637406/zip > "$RUNNER_TEMP/donor-evidence.zip"
+          python3 tools/derived_native_package.py prepare --repo "$GITHUB_WORKSPACE" \
+            --package-zip "$RUNNER_TEMP/donor-package.zip" --evidence-zip "$RUNNER_TEMP/donor-evidence.zip" \
+            --out "$DONOR_WORK"
+      - name: Build only pinned public native SDK and converter prerequisites
+        run: |
+          set -euo pipefail
+          for selection in title prx; do
+            if [[ $selection == title ]]; then
+              destination=$TITLE_FOUNDATION; pin=9c0b994a048521af6fb84c73ded364504fe250e9
+            else
+              destination=$FOUNDATION; pin=30597512539e7edfde079cbcaf4a626bc0a948c5
+            fi
+            git init --quiet "$destination"
+            git -C "$destination" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+            git -C "$destination" fetch --depth=1 origin "$pin"
+            git -C "$destination" checkout --detach FETCH_HEAD
+            [[ $(git -C "$destination" rev-parse HEAD) == "$pin" ]]
+          done
+          make -C "$TITLE_FOUNDATION" deps libc
+          bash "$FOUNDATION/tools/setup-native-dependencies.sh"
+          sdk="$TITLE_FOUNDATION/.deps/native/ps5-payload-sdk"
+          python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
+          echo "PS5_PAYLOAD_SDK=$sdk" >> "$GITHUB_ENV"
+          sdk_source="$RUNNER_TEMP/sdk-source"
+          git init --quiet "$sdk_source"
+          git -C "$sdk_source" remote add origin https://github.com/ps5-payload-dev/sdk.git
+          git -C "$sdk_source" fetch --depth=1 origin 4eb701204fc3f8d31e84cf8ca272974e2be9c867
+          git -C "$sdk_source" checkout --detach FETCH_HEAD
+          [[ $(git -C "$sdk_source" rev-parse HEAD) == 4eb701204fc3f8d31e84cf8ca272974e2be9c867 ]]
+          git -C "$sdk_source" archive HEAD | gzip -n > "$PW_NATIVE_SDK_SOURCE_ARCHIVE"
+      - name: Compile only current native child title and helper
+        env:
+          PW_NATIVE_MODE: wine64
+          PW_OUTPUT_SUFFIX: -windows-child-fixture
+          PW_WINE_CHILD_FIXTURE_MODE: "1"
+          PW_WINE64_SCRIPT: "0"
+          PW_FOUNDATION_READY: "1"
+        run: |
+          set -euo pipefail
+          export PS5_NATIVE_FOUNDATION="$TITLE_FOUNDATION"
+          export PW_WINE_CHILD_FOUNDATION="$FOUNDATION"
+          bash tools/build_native.sh
+      - name: Assemble and verify full derived tree with two producer identities
+        run: |
+          python3 tools/derived_native_package.py assemble --repo "$GITHUB_WORKSPACE" \
+            --contract "$PW_DERIVED_DONOR_CONTRACT" --app dist/PPSA99995-windows-child-fixture \
+            --build build/native-windows-child-fixture \
+            --title build/native-windows-child-fixture-wine-child-title-inspection/native-wine-child-title.json \
+            --out "$RUNNER_TEMP/derived-package" --archive "$RUNNER_TEMP/derived-native-child.tar.gz"
+      - name: Publish derived full package in this repository
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: derived-native-child-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/derived-native-child.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain new native evidence without republishing raw guest state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: derived-native-child-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/native-windows-child-fixture
+            build/native-windows-child-fixture-wine-child-title-inspection
+            ${{ runner.temp }}/derived-package/provenance/derived-native.json
+          retention-days: 7
+          if-no-files-found: warn

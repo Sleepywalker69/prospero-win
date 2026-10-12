@@ -588,18 +588,20 @@ void pw_wine_fixture_owner_socket_failure(void *context,const PwWineFixtureSocke
 
 static void record(PwWineFixtureOwner *o,const char *event,Generation *g,int64_t a,int64_t b,int64_t c)
 { o->config.record(o->config.context,event,g?g->generation:0,a,b,c); }
-/* Called only after the same-session and increasing-stage checks. Stage 5
- * replaces, rather than supplements, the ordinary progress log and flush.
- * These opaque values never drive ownership, cleanup or release decisions. */
+/* Called only after same-session and increasing-stage checks. Stages4/5
+ * replace the ordinary progress log; stage5 also emits one bounded load-result
+ * record. These observations never grant ownership, readiness or settlement. */
 static void record_progress(PwWineFixtureOwner *o,Generation *g,const PwWineChildFrame *f)
 {
-    if(f->failure_api==PW_WCP_NET_SOCKET_BEGIN){
+    if(f->failure_api==PW_WCP_HELPER_VERIFIED||f->failure_api==PW_WCP_NET_SOCKET_BEGIN){
         int64_t socket_target,errno_target,anchor;
         _Static_assert(sizeof(socket_target)==sizeof(f->net_socket_target),"diagnostic word size");
         memcpy(&socket_target,&f->net_socket_target,sizeof(socket_target));
         memcpy(&errno_target,&f->net_errno_target,sizeof(errno_target));
         memcpy(&anchor,&f->data_prepare_anchor,sizeof(anchor));
-        record(o,"bootstrap_net_targets",g,socket_target,errno_target,anchor);
+        record(o,f->failure_api==PW_WCP_HELPER_VERIFIED?"bootstrap_net_before":"bootstrap_net_targets",g,socket_target,errno_target,anchor);
+        if(f->failure_api==PW_WCP_NET_SOCKET_BEGIN)
+            record(o,"bootstrap_net_load",g,f->net_load_result,f->net_start_result,f->net_missing_mask);
     }else record(o,"bootstrap_progress",g,f->failure_api,0,0);
 }
 /* Only the supervisor emits; callback paths merely publish immutable data. */

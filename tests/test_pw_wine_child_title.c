@@ -272,7 +272,7 @@ int main(void)
 {
     profiles(); preparation(); installation(); supervision();
     static const char *const immediate[] = {
-        "bootstrap_progress", "bootstrap_net_targets", "bootstrap_failure", "bootstrap_failure_value",
+        "bootstrap_progress", "bootstrap_net_before", "bootstrap_net_targets", "bootstrap_net_load", "bootstrap_failure", "bootstrap_failure_value",
         "bootstrap_refused", "progress_refused", "wire_failure", "wire_phase",
         "wire_receive", "wire_channel", "first_failure", "helper_possible",
         "helper_unsettled", "helper_not_dispatched", "helper_terminal_failure",
@@ -296,6 +296,14 @@ int main(void)
         captured.record(captured.context, "bootstrap_net_targets", 17, -1, INT64_MIN, 0);
         assert(flush_calls == before + 1 && errno == EACCES);
         assert(strstr(logs, "stage=5 socket_target=0xffffffffffffffff errno_target=0x8000000000000000 data_prepare_anchor=0x0000000000000000"));
+        before = flush_calls;
+        captured.record(captured.context, "bootstrap_net_before", 17, -1, INT64_MIN, 0);
+        assert(flush_calls == before + 1);
+        assert(strstr(logs, "stage=4 socket_target=0xffffffffffffffff errno_target=0x8000000000000000"));
+        before = flush_calls;
+        captured.record(captured.context, "bootstrap_net_load", 17, -7, INT32_MIN, 127);
+        assert(flush_calls == before + 1);
+        assert(strstr(logs, "event=bootstrap_net_load generation=17 first=-7 second=-2147483648 third=127"));
         before = flush_calls;
         captured.record(captured.context, "signal_ack", 17, 19, 0, 0);
         assert(flush_calls == before); /* Steady-state traffic keeps normal batching. */

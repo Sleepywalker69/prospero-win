@@ -3,7 +3,7 @@
 #define PW_WINE_CHILD_WIRE_H
 #include "pw_native_child_protocol.h"
 
-enum { PW_WC_WIRE_BYTES = 136, PW_WC_BUILD_CHARS = 40,
+enum { PW_WC_WIRE_BYTES = 136, PW_WC_WIRE_VERSION = 3, PW_WC_BUILD_CHARS = 40,
        PW_WC_STARTUP_MS = 30000, PW_WC_LIFETIME_MS = 60000, PW_WC_BATTLENET_LIFETIME_MS = 300000,
        PW_WC_USER_LIFETIME_MS = 120000, PW_WC_NET_LIFETIME_MS = 120000,
        PW_WC_SIGNAL_QUIT = 3, PW_WC_SIGNAL_USR1 = 30 };
@@ -29,7 +29,7 @@ enum { PW_WC_API_NONE, PW_WC_API_CLOCK, PW_WC_API_TYPE, PW_WC_API_POLL,
        PW_WC_API_SEND, PW_WC_API_RECEIVE, PW_WC_API_CLOSE };
 
 /* FAILURE diagnostics, plus the fixed PROGRESS stage in failure_api.
- * The byte layout and protocol version are unchanged; a matched rebuilt
+ * The136-byte extent is unchanged, but protocol version3 refuses legacy peers; a matched rebuilt
  * parent/child cohort is required for the additional record kind.
  * Values below 0x100 remain the existing socket-setup API namespace. Native
  * call failures retain their immediate return/errno; validation failures never
@@ -55,18 +55,25 @@ enum { PW_WC_DATA_UNOBSERVED, PW_WC_DATA_DIRECTORY, PW_WC_DATA_NOT_DIRECTORY,
 /* Values, never a wire struct. The codec fixes every byte and reserved zero. */
 typedef struct PwWineChildFrame {
     uint32_t kind, sequence, parent_pid, child_pid, child_ppid, wine_pid, wine_tid;
-    uint32_t profile, machine; /* wire version 2: fixed native config, never paths */
+    uint32_t profile, machine; /* wire version 3: fixed native config, never paths */
     uint64_t generation;
     int64_t target_tid;
     int32_t signal, status, native_error;
     char build_id[PW_WC_BUILD_CHARS + 1];
     uint32_t failure_api, returned_length, errno_valid;
     int32_t failure_raw, returned_value; /* FAILURE only; otherwise all zero */
-    /* Opaque observations only on PROGRESS/NET_SOCKET_BEGIN. They do not
+    /* Opaque observations on PROGRESS/HELPER_VERIFIED (before fixed-path load)
+     * and NET_SOCKET_BEGIN (after load). They do not
      * certify import validity, readiness or helper settlement. The codec alone
      * maps these values to the existing 24 payload bytes; all logical control
      * and FAILURE fields remain zero for this stage. A matched rebuild is required. */
     uint64_t net_socket_target, net_errno_target, data_prepare_anchor;
+    /* Stage5 only: immediate signed loader handle and module-start output.
+     * Missing-mask bits0..6 are Socket/Connect/Send/Recv/Setsockopt/SocketClose/
+     * ErrnoLoc; bit7 is LoadStartModule. A bit means its observed cell was zero.
+     * These payload values never certify target validity or execution. */
+    int32_t net_load_result, net_start_result;
+    uint32_t net_load_attempted, net_missing_mask;
 } PwWineChildFrame;
 
 typedef struct PwWineChildWireResult {

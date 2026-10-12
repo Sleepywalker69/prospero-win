@@ -15,9 +15,11 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Match the native root helper's ordinary Net imports. Service startup uses
- * the same checked socket operations, without an extra module query/dlsym or
- * explicit NetInit prerequisite. No Net initialization error is ignored. */
+/* Direct Net calls remain ordinary imports. One fixed-path child-local load
+ * observes whether the platform binds them under the unchanged service preload.
+ * A successful load is not binding proof: every import cell is checked again.
+ * No lookup, GOT writes, NetInit, search path or privilege change is used. */
+int32_t sceKernelLoadStartModule(const char *,size_t,const void *,uint32_t,const void *,int *);
 int sceNetSocket(const char *,int,int,int);
 int sceNetConnect(int,const struct sockaddr *,socklen_t);
 int sceNetSend(int,const void *,size_t,int);
@@ -25,6 +27,34 @@ int sceNetRecv(int,void *,size_t,int);
 int sceNetSetsockopt(int,int,int,const void *,socklen_t);
 int sceNetSocketClose(int);
 int *sceNetErrnoLoc(void);
+/* Slot order is part of the diagnostic manifest. Volatile GOT loads are
+ * independently bound to actual instruction bytes by the native builder. */
+static __attribute__((noinline)) void observe_net_import_slots(uint64_t slots[8])
+{
+#ifdef __PROSPERO__
+#define READ_SLOT(index,symbol) do { uint64_t value; \
+    __asm__ volatile("movq " #symbol "@GOTPCREL(%%rip), %0" : "=r"(value) : : "memory"); \
+    slots[index]=value; } while(0)
+    READ_SLOT(0,sceNetSocket); READ_SLOT(1,sceNetConnect);
+    READ_SLOT(2,sceNetSend); READ_SLOT(3,sceNetRecv);
+    READ_SLOT(4,sceNetSetsockopt); READ_SLOT(5,sceNetSocketClose);
+    READ_SLOT(6,sceNetErrnoLoc); READ_SLOT(7,sceKernelLoadStartModule);
+#undef READ_SLOT
+#elif defined(PW_CHILD_NET_IMPORTS_TEST)
+    extern void pw_child_net_imports_test(uint64_t [8]);
+    pw_child_net_imports_test(slots);
+#else
+    /* Hosted native-boundary controls only; these are never runtime receipts. */
+    for(unsigned i=0;i<8;i++)slots[i]=1;
+#endif
+}
+static unsigned net_missing_mask(void)
+{
+    uint64_t slots[8];unsigned missing=0;
+    observe_net_import_slots(slots);
+    for(unsigned i=0;i<8;i++)if(!slots[i])missing|=1u<<i;
+    return missing;
+}
 #define HELPER_LIMIT (4u*1024u*1024u)
 #define SETTLE_MS 1000u
 #define VISIBLE_MS 5000u
@@ -321,7 +351,25 @@ int pw_wine_child_data_prepare(PwWineChildData *result,PwNativeChildIo *io,const
     size_t size=0;unsigned char *bytes=helper_bytes(&c,expected,&size);
     if(!bytes)return -1;
     int socket=-1,success=0;
-    if(data_budget(&c,NULL)||progress(&c,PW_WCP_HELPER_VERIFIED)||progress(&c,PW_WCP_NET_SOCKET_BEGIN))goto done;
+    if(data_budget(&c,NULL)||progress(&c,PW_WCP_HELPER_VERIFIED))goto done;
+    if(data_budget(&c,NULL))goto done;
+    result->net_missing_mask=net_missing_mask();
+    if(result->net_missing_mask&(1u<<7)){
+        data_fail(&c,PW_WCD_NET_LOADER_SLOT,-1,0);goto done;
+    }
+    result->net_load_attempted=1;result->net_start_result=INT32_MIN;
+    result->net_load_result=sceKernelLoadStartModule("/system/common/lib/libSceNet.sprx",
+                                                   0,NULL,0,NULL,&result->net_start_result);
+    /* Preserve the immediate signed results before any callback or error read. */
+    result->net_missing_mask=net_missing_mask();
+    if(progress(&c,PW_WCP_NET_SOCKET_BEGIN))goto done;
+    if(result->net_load_result<=0){data_fail(&c,PW_WCD_NET_LOAD,result->net_load_result,0);goto done;}
+    if(result->net_start_result){data_fail(&c,PW_WCD_MODULE_START,result->net_start_result,0);goto done;}
+    if(data_budget(&c,NULL))goto done;
+    /* Callbacks after stage5 remain independent failure sites. Re-read after
+     * them; never infer readiness solely from the already-emitted observation. */
+    result->net_missing_mask=net_missing_mask();
+    if(result->net_missing_mask&0x7fu){data_fail(&c,PW_WCD_NET_IMPORT_SLOT,-1,0);goto done;}
     socket=sceNetSocket("pw-wine-child-data",AF_INET,SOCK_STREAM,6);
     int error=net_error(socket);
     if(socket<0){data_fail(&c,PW_WCD_SOCKET,socket,error);goto done;}

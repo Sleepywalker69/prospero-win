@@ -40,6 +40,11 @@ wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
 wine_child_fixture=${PW_WINE_CHILD_FIXTURE_MODE:-0}
+derived_args=()
+if [[ -n ${PW_DERIVED_DONOR_CONTRACT:-} ]]; then
+    [[ $wine_child_fixture == 1 && -f $PW_DERIVED_DONOR_CONTRACT ]] || { echo "invalid derived native donor contract" >&2; exit 2; }
+    derived_args+=(--donor-contract "$PW_DERIVED_DONOR_CONTRACT")
+fi
 wine_child_user=${PW_WINDOWS_CHILD_USER_DIR:-}
 wine_child_network=${PW_WINDOWS_CHILD_NETWORK_DIR:-}
 wine_network_enabled=0
@@ -213,9 +218,9 @@ if [[ $wine_child_fixture == 1 ]]; then
         --foundation "${PW_WINE_CHILD_FOUNDATION:?Wine child needs the pinned PRX foundation}" \
         --runtime "${PW_WINE_CHILD_RUNTIME:?Wine child needs the matched runtime work directory}" \
         --helper-directory "$build/owned-helper" \
-        --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
+        --out "$build/wine-child" --llvm-bindir "$llvm_bindir" "${derived_args[@]}"
     python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" \
-        "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" "$wine_child_network" <<'PYWINEINPUT'
+        "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" "$wine_child_network" "${PW_DERIVED_DONOR_CONTRACT:-}" <<'PYWINEINPUT'
 import json, pathlib, sys
 root, build, fixture = map(pathlib.Path, sys.argv[1:4])
 sys.path.insert(0, str(root / 'tools'))
@@ -223,7 +228,8 @@ from build_wine_service_child import title_profiles_input_contract
 user = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
 network = pathlib.Path(sys.argv[7]) if sys.argv[7] else None
 record, header, _, _, _ = title_profiles_input_contract(root, build / 'wine-child', fixture, user,
-                                           sys.argv[5] or None, sys.argv[6] or None, network)
+                                           sys.argv[5] or None, sys.argv[6] or None, network,
+                                           donor_contract=pathlib.Path(sys.argv[8]) if sys.argv[8] else None)
 (build / 'wine-child-title-inputs.json').write_text(json.dumps(record, indent=2) + '\n')
 (build / 'wine-child-title-config.h').write_text(header)
 PYWINEINPUT
@@ -389,7 +395,7 @@ if [[ $wine_child_fixture == 1 ]]; then
         --build "$build" --app "$dist" --service-work "$build/wine-child" \
         --fixture "$PW_WINDOWS_CHILD_FIXTURE_DIR" "${user_title_args[@]}" --llvm-bindir "$llvm_bindir" \
         --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?Wine child needs the pinned SDK source archive}" \
-        --out "$build-wine-child-title-inspection"
+        --out "$build-wine-child-title-inspection" "${derived_args[@]}"
 fi
 
 sha256sum "$build/eboot.elf" "$dist/eboot.bin"
