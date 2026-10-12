@@ -150,6 +150,18 @@ def selected_flags(state):
             'x86_64_CC': compilers['x86_64-w64-mingw32-gcc']['path']}
 
 
+def compiler_provider(name):
+    # Wine infers a PE target from the selected *-gcc alias, not the resolved
+    # Debian/Ubuntu alternatives provider (*-gcc-win32 or *-gcc-posix).
+    # Preserve the invocation name while binding the actual executable bytes.
+    found = shutil.which(name)
+    require(found is not None, 'selected compiler is missing: ' + name)
+    invocation = canonical(found)
+    provider = invocation.resolve(strict=True)
+    require(os.access(invocation, os.X_OK), 'selected compiler is not executable')
+    return {'path': str(invocation), 'real_path': str(provider), **record(provider)}
+
+
 def current_inputs(state):
     p = state_paths(state)
     root, sdk = p['repo'], p['sdk']
@@ -172,11 +184,8 @@ def current_inputs(state):
     tools = tls_manifest.tree_files(p['host_tools'] / 'tools')
     require('winebuild/winebuild' in tools and 'widl/widl' in tools, 'matching host tools absent')
     make = Path(shutil.which('make') or '/missing-make').resolve(strict=True)
-    compilers = {}
-    for name in ('gcc', 'g++', 'i686-w64-mingw32-gcc', 'x86_64-w64-mingw32-gcc'):
-        provider = Path(shutil.which(name) or '/missing-compiler').resolve(strict=True)
-        require(os.access(provider, os.X_OK), 'selected compiler is not executable')
-        compilers[name] = {'path': str(provider), **record(provider)}
+    compilers = {name: compiler_provider(name) for name in
+                 ('gcc', 'g++', 'i686-w64-mingw32-gcc', 'x86_64-w64-mingw32-gcc')}
     return {'project': project, 'project_files': prefix.source_snapshot(root),
             'build_compilers': compilers,
             'wine': {'commit': focus.WINE_COMMIT, 'tree': git(p['wine_source'], 'rev-parse', 'HEAD^{tree}')},

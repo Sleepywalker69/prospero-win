@@ -101,6 +101,185 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
 
 
+CONFIGURE_SHA = '726129f423099a9fd41b3f802d4bc7e2d78763bbbf0f32825b05d09cebbb52e8'
+CONFIGURE_START = '    target=""\n    set x $CC\n'
+CONFIGURE_END = '    eval "${wine_arch}_TARGET=\\$target"\n'
+CONFIGURE_PREFIX = r'''#!/bin/sh
+# Only the middle fragment is the unmodified Wine configure body.
+# No compiler or linker is executed: the two outcome functions below are stubs.
+CC=$1
+wine_arch=$2
+mingw_cpu=$3
+as_me=configure-extraction
+as_lineno=0
+as_sed_sh='y%*+%pp%;s%[^_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]%_%g'
+wine_try_msvc=no
+enable_archs=$wine_arch
+ac_ext=c
+ac_objext=o
+ac_exeext=
+CFLAGS='-g -O2'
+CXXFLAGS=
+llvm_extra_ldflags=
+link_calls=0
+compile_calls=0
+ac_fn_c_try_link() { link_calls=$((link_calls + 1)); return 1; }
+ac_fn_c_try_compile() { compile_calls=$((compile_calls + 1)); return 0; }
+as_fn_error() {
+    printf '%s\n' "$2" >&2
+    printf 'PROBE|rejected|%s|%s|%s\n' "$target" "$link_calls" "$compile_calls"
+    exit 2
+}
+exec 5>configure-fragment.log 6>configure-fragment.stdout
+: >confdefs.h
+for one_arch in "$wine_arch"; do
+'''
+CONFIGURE_SUFFIX = r'''
+printf 'PROBE|accepted|%s|%s|%s\n' "$target" "$link_calls" "$compile_calls"
+done
+'''
+
+
+class CompilerAliases(unittest.TestCase):
+    """Real provider discovery on owned alias fixtures; no compiler is executed."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='focus-compiler-alias-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.names = ('gcc', 'g++', 'i686-w64-mingw32-gcc', 'x86_64-w64-mingw32-gcc')
+        self.aliases = {}
+        self.providers = {}
+        for name in (*self.names, 'make'):
+            provider = self.root / (name + '-win32')
+            put(provider, '#!/bin/sh\n# This identity fixture must never execute.\nexit 91\n')
+            provider.chmod(0o755)
+            alias = self.root / name
+            alias.symlink_to(provider.name)
+            self.aliases[name] = str(alias)
+            self.providers[name] = provider
+        self.lookup = patch.object(target.shutil, 'which', side_effect=self.aliases.get)
+        self.lookup.start(); self.addCleanup(self.lookup.stop)
+
+    def discover(self):
+        # Keep current_inputs and compiler_provider real. Only unrelated project,
+        # source and SDK discovery boundaries use explicitly inert test values.
+        paths = {name: str(self.root / name) for name in target.PATH_FIELDS}
+        paths.update(repo=str(ROOT), work=str(self.root / 'work'), out=str(self.root / 'out'))
+        paths['sdk'] = str(Path(paths['foundation']) / '.deps/native/ps5-payload-sdk')
+        wrapper = Path(paths['foundation']) / 'tooling/prospero-clang18'
+        put(wrapper, b'INERT source wrapper fixture\n')
+        host = Path(paths['host_tools'])
+        put(host / '.prospero-stamp', 'INERT host stamp\n')
+        put(host / 'tools/winebuild/winebuild', 'INERT tool\n')
+        put(host / 'tools/widl/widl', 'INERT tool\n')
+        write_json(host.parent / 'tools-only.json', {'schema': 'pw-wine-build-stage/1',
+                   'stage': 'host-tools', 'complete_runtime': False})
+        def git_boundary(path, *args):
+            if args[0] == 'status': return ''
+            if args[-1] == 'HEAD^{tree}': return 'a' * 40
+            if Path(path) == Path(paths['sdk_source']): return target.SDK_COMMIT
+            if Path(path) == Path(paths['foundation']): return target.TITLE_FOUNDATION
+            return target.focus.WINE_COMMIT
+        with patch.object(target.prefix, 'project', return_value={'commit': 'b'*40, 'tree': 'c'*40}), \
+                patch.object(target.prefix, 'source_snapshot', return_value={'INERT': 'fixture'}), \
+                patch.object(target, 'git', side_effect=git_boundary), \
+                patch.object(target, 'WRAPPER_SHA', hashlib.sha256(wrapper.read_bytes()).hexdigest()), \
+                patch.object(target.tls_manifest, 'inputs', return_value={'INERT': 'SDK'}), \
+                patch.object(target.tls_manifest, 'verify', return_value={'INERT': 'TLS'}), \
+                patch.object(target.focus, 'contract', return_value={'INERT': 'source contract'}):
+            return target.current_inputs({'paths': paths})
+
+    def test_actual_input_discovery_preserves_invocation_alias_and_hashes_provider(self):
+        cohort = self.discover()
+        for name in self.names:
+            row = cohort['build_compilers'][name]
+            self.assertEqual(row, {'path': self.aliases[name],
+                'real_path': str(self.providers[name]), **target.record(self.providers[name])})
+            self.assertNotEqual(row['path'], row['real_path'])
+        for neutral in (0, 1):
+            flags = target.selected_flags({'cohort': cohort, 'neutral': neutral})
+            for variable, name in (('CC', 'gcc'), ('CXX', 'g++'),
+                                   ('i386_CC', self.names[2]), ('x86_64_CC', self.names[3])):
+                self.assertEqual(flags[variable], self.aliases[name])
+
+    def test_alias_retarget_and_provider_byte_changes_remain_bound(self):
+        name = self.names[2]
+        before = self.discover()
+        other = self.root / (name + '-posix')
+        other.write_bytes(self.providers[name].read_bytes()); other.chmod(0o755)
+        alias = Path(self.aliases[name]); alias.unlink(); alias.symlink_to(other.name)
+        after = self.discover()
+        self.assertEqual(before['build_compilers'][name]['sha256'], after['build_compilers'][name]['sha256'])
+        self.assertNotEqual(before['build_compilers'][name]['real_path'], after['build_compilers'][name]['real_path'])
+        with self.assertRaises(ValueError): target.exact(before, after, 'provider retarget differs')
+        before = after
+        other.write_text('#!/bin/sh\n# Different inert provider bytes.\nexit 0\n')
+        after = self.discover()
+        with self.assertRaises(ValueError): target.exact(before, after, 'provider bytes differ')
+        self.assertNotEqual(before['build_compilers'][name]['sha256'], after['build_compilers'][name]['sha256'])
+
+    def test_missing_nonexecutable_and_nonregular_providers_are_refused(self):
+        name = self.names[2]
+        self.aliases[name] = None
+        with self.assertRaisesRegex(ValueError, 'missing'): target.compiler_provider(name)
+        self.aliases[name] = str(self.root / name)
+        self.providers[name].chmod(0o644)
+        with self.assertRaisesRegex(ValueError, 'not executable'): target.compiler_provider(name)
+        self.providers[name].unlink()
+        with self.assertRaises(FileNotFoundError): target.compiler_provider(name)
+        self.providers[name].mkdir()
+        with self.assertRaisesRegex(ValueError, 'ordinary'): target.compiler_provider(name)
+
+
+    def test_pinned_configure_body_accepts_alias_but_refuses_identical_resolved_provider(self):
+        source = os.environ.get('PROSPERO_WINE_SOURCE')
+        if not source:
+            self.skipTest('pinned Wine source not supplied for actual configure-body control')
+        raw = (Path(source) / 'configure').read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), CONFIGURE_SHA)
+        text = raw.decode()
+        first, last = CONFIGURE_START, CONFIGURE_END
+        self.assertEqual(text.count(first), 1)
+        self.assertEqual(text.count(last), 1)
+        start, end = text.index(first), text.index(last)
+        self.assertLess(start, end)
+        harness = self.root / 'configure-probe.sh'
+        # The middle body is actual pinned configure, including the real error.
+        # Link failure and basic-compile success are stubbed; no compiler runs.
+        harness.write_text(CONFIGURE_PREFIX + text[start:end] + CONFIGURE_SUFFIX)
+        for role, cpu in (('i386', 'i686'), ('x86_64', 'x86_64')):
+            name = cpu + '-w64-mingw32-gcc'
+            for threading in ('win32', 'posix'):
+                provider = self.root / (name + '-' + threading)
+                if not provider.exists():
+                    provider.write_bytes(self.providers[name].read_bytes()); provider.chmod(0o755)
+                intermediate = self.root / 'alternatives' / (name + '-' + threading)
+                intermediate.parent.mkdir(exist_ok=True); intermediate.symlink_to(provider)
+                alias = Path(self.aliases[name]); alias.unlink(); alias.symlink_to(intermediate)
+                cohort = self.discover()
+                selected = target.selected_flags({'cohort': cohort, 'neutral': 1})[role + '_CC']
+                row = cohort['build_compilers'][name]
+                self.assertEqual(selected, str(alias))
+                self.assertEqual(row['real_path'], str(provider))
+                before = target.record(provider)
+                self.assertEqual(alias.read_bytes(), provider.read_bytes())
+                for label, invocation in (('selected', selected), ('bare', name), ('resolved', row['real_path'])):
+                    with self.subTest(role=role, threading=threading, invocation=label):
+                        work = self.root / ('probe-' + role + '-' + threading + '-' + label)
+                        work.mkdir()
+                        result = subprocess.run(['/bin/sh', str(harness), invocation, role, cpu], cwd=work,
+                            env={'PATH': str(self.root) + ':/usr/bin:/bin', 'LC_ALL': 'C'},
+                            capture_output=True, text=True, timeout=10)
+                        refused = label == 'resolved'
+                        self.assertEqual(result.returncode, 2 if refused else 0, result.stderr)
+                        expected = ['PROBE', 'rejected' if refused else 'accepted',
+                                    '' if refused else cpu + '-w64-mingw32', '2', '1']
+                        self.assertEqual(result.stdout.strip().split('|'), expected)
+                        if refused: self.assertIn(role + ' PE compiler not found.', result.stderr)
+                self.assertEqual(target.record(provider), before)
+                self.assertEqual(row['sha256'], before['sha256'])
+
+
 class ObjectFormats(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='focus-format-')
