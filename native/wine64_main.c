@@ -20,6 +20,7 @@
  * deadline passes. Wine's audio driver plays its mix on the console's main
  * audio port through the title's audio sink.
  */
+#include "../wine/ps5/pw_wine_focus_neutral.h"
 #include "ps5log/ps5log.h"
 #include "pw_diagnostics.h"
 #undef PS5LOG_LOG
@@ -1168,6 +1169,8 @@ static int start_thread(void (*entry)(void *), void *arg, size_t stack_bytes)
 
 int main(int argc, char **argv)
 {
+    /* Compile-only cohort: no helper, bootstrap, log, prefix or Wine entry. */
+    if (pw_wine_focus_native_entry_refused()) return 78;
     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
     enum { WINE64_FIXED_ENV_COUNT = 6,
            WINE64_PROFILE_ENV_CAPACITY = 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX +

@@ -2,10 +2,15 @@
 #ifndef PW_WINE_CREATION_H
 #define PW_WINE_CREATION_H
 #include <stdint.h>
+#include "pw_wine_focus_neutral.h"
 /* Same-address-space owner callbacks. No pointer in this contract is a wire
  * value. Descendant clients use ordinary Wine requests, never this table. */
 #define PW_WINE_CREATION_ABI 1u
+#if PW_WINE_FOCUS_NEUTRAL
+#define PW_WINE_CREATION_PROTOCOL 963u
+#else
 #define PW_WINE_CREATION_PROTOCOL 962u
+#endif
 #define PW_WINE_CREATION_PATH_BYTES 1024u
 #define PW_WINE_CREATION_IMAGE_BYTES 2048u
 #define PW_WINE_CREATION_REQUESTS 16u

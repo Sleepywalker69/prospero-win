@@ -39,7 +39,7 @@ HEADERS = ('native/pw_wine_child_data.h', 'native/pw_wine_ipc_profile.h', 'nativ
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
            'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h', 'wine/ps5/pw_wine_creation.h',
            'native/pw_wine_child_ui_config.h', 'native/pw_wine_child_ui.h', 'native/pw_wine_child_ui_handoff.h',
-           'native/pw_wine_child_ui_channel.h', 'wine/ps5/pw_wine_sink.h')
+           'native/pw_wine_child_ui_channel.h', 'wine/ps5/pw_wine_sink.h', 'wine/ps5/pw_wine_focus_neutral.h')
 PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so',
              'libSceNet.sprx': 'libSceNet.so'}
 NET_FUNCTIONS = ('sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
@@ -86,6 +86,21 @@ def source_identity(root, commands):
                'wine/ps5/pw_wine_fixture_provider.c', 'wine/ps5/pw_wine_fixture_provider.h',
                'tools/windows_chromium_ipc_contract.py', 'tools/windows_chromium_ipc_package.py')}
     return project, sources
+
+
+def checked_focus(bound):
+    value = bound.get('focus_neutral')
+    if 'focus_neutral' in bound:
+        from wine_focus_neutral import checked
+        checked(value)
+        require(bound.get('runtime', {}).get('creation_protocol') == 963, 'focus child requires protocol963')
+    else:
+        require(bound.get('runtime', {}).get('creation_protocol') == 962, 'default child requires protocol962')
+    return value
+
+
+def focus_flags(bound):
+    return ['-DPW_WINE_FOCUS_NEUTRAL=1'] if checked_focus(bound) is not None else []
 
 
 def identity(inputs):
@@ -198,6 +213,7 @@ def inspect_code(path, bindir, commands):
 
 
 def inputs(args, commands):
+    require(type(getattr(args, 'focus_neutral', False)) is bool, 'focus selection must be an explicit boolean')
     require(getattr(args, 'ipc_fixture', None) is None or not getattr(args, 'child_ui', False),
             'child preview and IPC admission require separate matched cohorts')
     root, sdk, foundation, runtime, bindir = [Path(p).resolve(strict=True) for p in
@@ -218,19 +234,24 @@ def inputs(args, commands):
     require(re.search(r'LLVM version 18(?:\.|\b)', commands.run(bindir / 'llvm-readelf', '--version')),
             'child requires LLVM18')
     project, sources = source_identity(root, commands)
-    abi = check_build(runtime, 1, bindir / 'llvm-readelf', require_wow64=True)
+    focus = None
+    if getattr(args, 'focus_neutral', False):
+        from wine_focus_neutral import contract
+        require(getattr(args, 'ipc_fixture', None) is None, 'neutral compile cohort excludes IPC profiles')
+        focus = contract(root)
+    abi = check_build(runtime, 1, bindir / 'llvm-readelf', require_wow64=True, focus_neutral=focus)
     require(abi.get('wow64', {}).get('abi') == 1 and abi['wow64'].get('runtime_validated') is False,
             'full-CRT child requires the checked translated-I386 runtime capability')
     declaration = json.loads((runtime / 'report.json').read_text()).get('service_fixture')
     require(declaration == {'enabled': True, 'unix_define': 'PW_WINE_SERVICE_FIXTURE=1',
                             'abi': 1, 'runtime_validated': False}, 'Wine service consumers were not explicitly built')
-    require(abi.get('creation', {}).get('abi') == 1 and abi['creation'].get('protocol') == 962,
+    require(abi.get('creation', {}).get('abi') == 1 and abi['creation'].get('protocol') == (963 if focus is not None else 962),
             'child requires actual matched creation protocol and broker')
     helper = helper_inputs(args, root, project, sdk)
     net = net_inputs(sdk, bindir, commands)
     result = {'helper': helper, 'net_transport': net, 'child_ui': child_ui_contract(getattr(args, 'child_ui', False)),
               'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
-              'creation_abi': 1, 'creation_protocol': 962, 'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
+              'creation_abi': 1, 'creation_protocol': 963 if focus is not None else 962, 'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
               'candidate_capabilities': [
                   {'mode': 1, 'prefix': 'windows-child-fixture-v1', 'guest_machine': 'AMD64',
                    'backend': 'native-amd64', 'runtime_validated': False},
@@ -247,11 +268,15 @@ def inputs(args, commands):
               'libc_companion': record(title / 'runtime/libc.prx'), 'host_llvm': llvm,
               'sdk_headers': tree_files(sdk / 'target/include'), 'sdk_wrappers': tree_files(sdk / 'bin'),
               'providers': {name: record(sdk / 'target/lib' / leaf) for name, leaf in PROVIDERS.items()}}
+    if focus is not None:
+        result['focus_neutral'] = focus
+        result['candidate_capabilities'] = []  # compile-only; no prefix can launch
     return result, (root, sdk, foundation, runtime, bindir, title)
 
 
 def child_header(bound, build_id):
-    require(bound['runtime'].get('creation_abi') == 1 and bound['runtime'].get('creation_protocol') == 962 and
+    focus = checked_focus(bound)
+    require(bound['runtime'].get('creation_abi') == 1 and bound['runtime'].get('creation_protocol') == (963 if focus is not None else 962) and
             bound['runtime'].get('private_dispatch_abi') == 1 and
             bound['runtime'].get('private_dispatch_wow64_abi') == 1,
             'child header cannot assert an absent ABI capability')
@@ -259,13 +284,14 @@ def child_header(bound, build_id):
             re.fullmatch('[0-9a-f]{64}', bound['runtime']['ntdll_sha256']) and
             helper_digest(bound), 'invalid child header identity')
     child_ui = checked_child_ui(bound)
-    return ('#define PW_WINE_CHILD_UI_COHORT ' + str(int(child_ui['enabled'])) + '\n' +
+    return (('#define PW_WINE_CHILD_FOCUS_NEUTRAL 1\n' if focus is not None else '') +
+            '#define PW_WINE_CHILD_UI_COHORT ' + str(int(child_ui['enabled'])) + '\n' +
             '#define PW_WINE_CHILD_BUILD_ID "' + build_id + '"\n' +
             '#define PW_WINE_CHILD_NTDLL_SHA256 "' + bound['runtime']['ntdll_sha256'] + '"\n' +
             '#define PW_WINE_CHILD_PRIVATE_DISPATCH_ABI 1\n' +
             '#define PW_WINE_CHILD_WOW64_ABI 1\n' +
             '#define PW_WINE_CHILD_CREATION_ABI 1\n' +
-            '#define PW_WINE_CHILD_CREATION_PROTOCOL 962\n' +
+            '#define PW_WINE_CHILD_CREATION_PROTOCOL ' + str(963 if focus is not None else 962) + '\n' +
             '#define PW_WINE_CHILD_HELPER_SHA256 \"' + bound['helper']['elf']['sha256'] + '\"\n')
 
 
@@ -280,6 +306,10 @@ def build(args):
     build_id = identity(bound)
     header = out / 'wine-child-build.h'
     header.write_text(child_header(bound, build_id))
+    if checked_focus(bound) is not None:
+        from wine_focus_neutral import header as focus_header
+        (out / 'wine').mkdir()
+        (out / 'wine/pw_focus_build.h').write_text(focus_header(bound['focus_neutral']))
     environment = ['env', '-i', 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
                    'PS5_PAYLOAD_SDK=' + str(sdk), 'PS5_CLANG=' + str(bindir / 'clang'),
                    'LLVM_CONFIG=' + bound['host_llvm']['config']]
@@ -291,7 +321,7 @@ def build(args):
     for name in UNITS:
         obj = out / (name.replace('/', '_') + '.o')
         commands.run(*cc, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-ffunction-sections', '-fdata-sections',
-                     '-fasynchronous-unwind-tables', '-DPW_WINE_CHILD_UI_ENABLED=' + str(int(bound['child_ui']['enabled'])),
+                     '-fasynchronous-unwind-tables', *focus_flags(bound), '-DPW_WINE_CHILD_UI_ENABLED=' + str(int(bound['child_ui']['enabled'])),
                      '-I' + str(out), '-I' + str(root / 'include'), '-I' + str(root / 'src'), '-I' + str(root / 'native'),
                      '-I' + str(root / 'wine/ps5'), '-c', root / name, '-o', obj)
         objects.append(obj)
@@ -380,6 +410,7 @@ def verify_child(args, commands):
     manifest = json.loads((work / 'native-wine-child-build.json').read_text())
     require(manifest.get('schema') == 'pw-wine-service-child/2' and
             all(manifest.get(k) == v for k, v in bound.items()), 'service child source/runtime inputs differ')
+    require(checked_focus(manifest) == checked_focus(bound), 'worker focus selection differs')
     require(manifest['worker']['build_id'] == identity(bound), 'service child build ID differs')
     for field, name in (('worker', 'native-wine-child.self'), ('linked', 'child.linked.elf'),
                         ('converted', 'child.elf'), ('reconstructed', 'native-wine-child.after.elf')):
@@ -406,6 +437,9 @@ def verify_child(args, commands):
             manifest['zlib_headers'] == tree_files(zroot / 'usr/include'), 'converter zlib inputs differ')
     for name, leaf in PROVIDERS.items():
         require(record(work / leaf) == bound['providers'][name], 'retained service provider differs')
+    if checked_focus(bound) is not None:
+        from wine_focus_neutral import header as focus_header
+        require((work / 'wine/pw_focus_build.h').read_text() == focus_header(bound['focus_neutral']), 'worker focus header differs')
     require((work / 'wine-child-build.h').read_text() == child_header(bound, identity(bound)), 'child generated helper/ABI header differs')
     for key in ('console_execution_verified', 'windows_process_support', 'platform_authentication_verified'):
         require(manifest.get(key) is False, 'child manifest makes unsupported execution claim')
@@ -474,6 +508,8 @@ def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=
               'mode': 1, 'define': 'PW_WINE_CHILD_FIXTURE_MODE=1', 'fixture_child_sha256': child_sha,
               'child_ui': checked_child_ui(manifest),
               'build_script_sha256': sha(root / 'tools/build_native.sh'), 'service_manifest_sha256': sha(manifest_path)}
+    if 'focus_neutral' in manifest:
+        result['focus_neutral'] = checked_focus(manifest)
     user_pair = None
     if user_fixture is not None:
         require(isinstance(run_id, str) and re.fullmatch('[1-9][0-9]*', run_id) and
@@ -591,7 +627,7 @@ def title_compile_record(root, build, project, compiler, common, units):
             'native_source_inputs': {name: record(root / name) for name in TITLE_USER_SOURCES}}
 
 
-def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False, child_ui_enabled=False, *, ipc_enabled=False):
+def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False, child_ui_enabled=False, *, ipc_enabled=False, focus_neutral=None):
     require(type(ipc_enabled) is bool and type(child_ui_enabled) is bool and
             not (ipc_enabled and child_ui_enabled),
             'child preview and IPC admission require separate matched cohorts')
@@ -628,6 +664,14 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             (['-DPW_WINE_IPC_PROFILE_ENABLED=1'] if ipc_enabled else []), 'title IPC enable flags differ')
     require(not any(v.startswith(('-DPW_WINE_IPC_CHILD_SHA256', '-UPW_WINE_IPC_CHILD_SHA256')) for v in common),
             'IPC image hash must come only from the validated generated header')
+    focus_defines = [v for v in common if 'PW_FOCUS_' in v or 'PW_WINE_FOCUS_' in v]
+    require(focus_defines == (['-DPW_WINE_FOCUS_NEUTRAL=1'] if focus_neutral is not None else []),
+            'title focus compile selector differs')
+    if focus_neutral is not None:
+        from wine_focus_neutral import contract, header as focus_header
+        require(contract(root) == focus_neutral and
+                (build / 'wine-child/wine/pw_focus_build.h').read_text() == focus_header(focus_neutral),
+                'title focus source/header differs')
     from build_owned_helper import validate_owned_helper
     admitted = validate_owned_helper(build / 'owned-helper', root, project, sdk)
     require([v for v in common if v.startswith(('-DPW_LAPY_HELPER_SHA256', '-UPW_LAPY_HELPER_SHA256'))] ==
@@ -664,7 +708,7 @@ def check_title(args):
     require(title_inputs == expected_inputs and (build / 'wine-child-title-config.h').read_text() == header,
             'title fixture/USER macro/source input record differs')
     compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None,
-                                                checked_child_ui(manifest)['enabled'], ipc_enabled=ipc_fixture is not None)
+                                                checked_child_ui(manifest)['enabled'], ipc_enabled=ipc_fixture is not None, focus_neutral=checked_focus(manifest))
     # Retain actual bytes before parser/analyzer refusal for independent review.
     for name, original in (('title.linked.elf', build / 'llvm-pie.elf'), ('title.converted.elf', build / 'eboot.elf'),
                             ('title.self', app / 'eboot.bin')):
@@ -729,7 +773,7 @@ def check_title(args):
         getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture, ipc_fixture) ==
         (expected_inputs, header, pair, user_pair, network_pair), 'original/USER/network fixture changed during title inspection')
     require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None,
-                                                checked_child_ui(manifest)['enabled'], ipc_enabled=ipc_fixture is not None) == compile_inputs,
+                                                checked_child_ui(manifest)['enabled'], ipc_enabled=ipc_fixture is not None, focus_neutral=checked_focus(manifest)) == compile_inputs,
             'title compile inputs changed during inspection')
     report = {'schema': 'pw-windows-child-title/2', 'project': manifest['project'],
               'build_id': manifest['project']['commit'], 'compiler': manifest['host_llvm'],
@@ -760,6 +804,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--work', type=Path, default=ROOT)
     parser.add_argument('--check-title', action='store_true')
+    parser.add_argument('--focus-neutral', action='store_true', help='compile-only neutral963 cohort; native entry and packaging refused')
     parser.add_argument('--child-ui', action='store_true', help='opt-in matched v3 child software-frame preview; input disabled')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)

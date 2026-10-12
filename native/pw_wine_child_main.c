@@ -6,6 +6,7 @@
 #if !defined(__PROSPERO__) || !defined(PW_WINE_CHILD_UI_ENABLED) || !PW_WINE_CHILD_UI_ENABLED
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "../wine/ps5/pw_wine_focus_neutral.h"
 #include "pw_wine_child_bootstrap.h"
 #include "pw_wine_child_data.h"
 #include "../wine/ps5/pw_wine_threads.h"
@@ -38,6 +39,10 @@ _Static_assert(sizeof(PW_WINE_CHILD_HELPER_SHA256)==65,"helper hash shape");
 _Static_assert(PW_WINE_CHILD_PRIVATE_DISPATCH_ABI==1,"private dispatcher cohort");
 _Static_assert(PW_WINE_CHILD_WOW64_ABI==1,"checked translated I386 cohort");
 _Static_assert(PW_WINE_CHILD_CREATION_ABI==PW_WINE_CREATION_ABI,"creation broker cohort");
+#ifndef PW_WINE_CHILD_FOCUS_NEUTRAL
+#define PW_WINE_CHILD_FOCUS_NEUTRAL 0
+#endif
+_Static_assert(PW_WINE_CHILD_FOCUS_NEUTRAL==PW_WINE_FOCUS_NEUTRAL,"focus native matched cohort");
 _Static_assert(PW_WINE_CHILD_CREATION_PROTOCOL==PW_WINE_CREATION_PROTOCOL,"creation protocol cohort");
 static PwNativeChildIo child_io;
 static PwWineChildWireResult wire_result;
@@ -572,6 +577,8 @@ static int run_child(void)
 }
 int main(int argc,char **argv)
 {
+    /* Compile-only cohort: no helper, bootstrap, log, prefix or Wine entry. */
+    if (pw_wine_focus_native_entry_refused()) return 78;
     (void)argc;(void)argv;int result=run_child();
     record_startup_stop(result);
 #if PW_WINE_CHILD_UI_ENABLED

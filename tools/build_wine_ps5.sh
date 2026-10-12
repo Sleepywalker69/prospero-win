@@ -131,12 +131,14 @@ radv=${PROSPERO_RADV:-}
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 check_only=0
 compile_check_only=0
+compile_receipt=
 
 fail() { echo "build_wine_ps5: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case $1 in
     --check-patches) check_only=1 ;;
     --compile-check) compile_check_only=1 ;;
+    --compile-check-receipt) compile_receipt=$2; shift ;;
     --patches) patches=$2; shift ;;
     --work) work=$2; shift ;;
     --source) source_dir=$2; shift ;;
@@ -152,6 +154,21 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+[ -z "$compile_receipt" ] || [ "$compile_check_only" = 1 ] ||
+    fail "--compile-check-receipt requires --compile-check"
+
+# Source selection is explicit and checked before dependencies or filesystem setup.
+focus_neutral=${PW_WINE_FOCUS_NEUTRAL:-0}
+case "$focus_neutral" in 0|1) ;; *) fail "PW_WINE_FOCUS_NEUTRAL must be 0 or 1" ;; esac
+if [ "$focus_neutral" = 1 ]; then
+    [ "${PW_WINE_SERVICE_FIXTURE:-0}" = 1 ] && [ "${PW_WINE_PRIVATE_DISPATCH:-0}" = 1 ] ||
+        fail "focus-neutral requires the matched service/private-dispatch cohort"
+    [ "$patches" = "$root/wine/patches" ] || fail "focus-neutral requires the exact project patch series"
+fi
+case " ${CFLAGS:-} ${CPPFLAGS:-} ${CROSSCFLAGS:-} ${x86_64_CFLAGS:-} ${i386_CFLAGS:-} " in
+    *PW_FOCUS_*|*PW_WINE_FOCUS_*) fail "use PW_WINE_FOCUS_NEUTRAL selector, not manual focus definitions" ;;
+esac
 
 [ "$compile_check_only" = 0 ] || [ "${PW_WINE_SERVICE_FIXTURE:-0}" = 1 ] ||
     fail "--compile-check requires PW_WINE_SERVICE_FIXTURE=1"
@@ -286,6 +303,14 @@ for patch in $ordered; do
     echo "applied $patch"
 done
 
+if [ "$focus_neutral" = 1 ]; then
+    # This private checkout was just reset; never upgrade an existing prefix.
+    # A previous receipt is overwritten only by this build's owned work tree.
+    rm -f "$work/focus-neutral.json"
+    python3 "$root/tools/wine_focus_neutral.py" --repo "$root" --source "$tree" \
+        --output "$work/focus-neutral.json" > "$work/focus-neutral-stage.log" || fail "focus source staging failed"
+fi
+
 # Execute the actual composed consumer contracts before compiling either half.
 consumer_checks=$(mktemp -d "$work/consumer-checks.XXXXXX")
 python3 "$root/tools/check_wine_fixture_consumers.py" --wine-source "$tree" \
@@ -333,6 +358,9 @@ fi
 service_cflags=""
 if [ "$service_fixture" = 1 ]; then
     service_cflags="-DPW_WINE_SERVICE_FIXTURE=1"
+    if [ "$focus_neutral" = 1 ]; then
+        service_cflags="$service_cflags -DPW_WINE_FOCUS_NEUTRAL=1 -DPW_FOCUS_SERVER_ADAPTER=1 -DPW_FOCUS_SERVER_REQUESTS=1 -I$tree/include"
+    fi
     opengl_cflags="$opengl_cflags $service_cflags"
 fi
 if [ -n "$ps5opengl_sdk" ]; then opengl_cflags="$opengl_cflags -DWINE_PS5_OPENGL"; fi
@@ -358,6 +386,7 @@ stamp=$(
           printf '%s\n' "service-fixture-abi=1"
           cat "$root/wine/ps5/pw_wine_creation.h" "$root"/wine/ps5/pw_wine_fixture_provider.[ch] "$root"/wine/ps5/pw_wine_fixture_socket.[ch] "$root/wine/ps5/pw_wine_compat.c"
       fi
+      if [ "$focus_neutral" = 1 ]; then cat "$work/focus-neutral.json" "$tree/include/wine/pw_focus_build.h"; fi
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" "$root"/wine/ps5/pw_d3d9_window*.[ch]; } | sha256sum | cut -c1-64)
@@ -382,6 +411,15 @@ if [ "$tls_stamp" != disabled ]; then
 fi
 
 # Compile complete experimental units with the actual generated target rules.
+tu_compile() {
+    stage=$1; shift
+    if [ -n "${compile_receipt:-}" ]; then
+        python3 "$root/tools/check_focus_target_compile.py" record \
+            --receipt "$compile_receipt" --stage "$stage" -- "$@"
+    else
+        "$@"
+    fi
+}
 if [ "$service_fixture" = 1 ]; then
     set -- -C "$build" -k -j"$jobs"
     for source in dlls/ntdll/unix/creation.c dlls/ntdll/unix/loader.c dlls/ntdll/unix/process.c dlls/ntdll/unix/server.c dlls/ntdll/unix/signal_x86_64.c dlls/ntdll/unix/thread.c dlls/ntdll/unix/virtual.c dlls/wow64/syscall.c dlls/win32u/ps5drv.c dlls/win32u/window.c dlls/win32u/winstation.c dlls/win32u/syscall.c dlls/dnsapi/main.c dlls/dnsapi/query.c server/creation.c server/trace.c server/process.c server/ptrace.c server/request.c server/thread.c; do
@@ -389,7 +427,7 @@ if [ "$service_fixture" = 1 ]; then
     done
     cp "$wine_cc" "$work/user-driver-compiler" || fail "cannot retain selected USER compiler"
     cp "$sdk/bin/prospero-clang" "$work/user-driver-sdk-compiler" || fail "cannot retain USER SDK compiler"
-    make "$@" \
+    tu_compile service make "$@" \
         dlls/ntdll/unix/creation.o \
         dlls/ntdll/unix/loader.o \
         dlls/ntdll/unix/process.o \
@@ -413,18 +451,27 @@ if [ "$service_fixture" = 1 ]; then
         server/request.o \
         server/thread.o > "$work/service-translation-units.log" 2>&1 ||
         fail "real experimental Wine translation-unit gate failed; see service-translation-units.log"
+    if [ "$focus_neutral" = 1 ]; then
+        tu_compile focus make -C "$build" -j"$jobs" -W "$tree/server/pw_focus_core.c" -W "$tree/server/pw_focus_requests.c" \
+            -W "$tree/server/queue.c" -W "$tree/server/window.c" -W "$tree/server/winstation.c" \
+            -W "$tree/server/main.c" server/pw_focus_core.o server/pw_focus_requests.o server/queue.o \
+            server/window.o server/winstation.o server/user.o server/main.o >> "$work/service-translation-units.log" 2>&1 ||
+            fail "neutral focus target translation-unit gate failed"
+    fi
     # These three production units are not Makefile-owned. Preserve the actual
     # later adapter compiler recipe and its real target headers; syntax-only
     # has no output object or link side effects.
+    syntax_index=0
     for unit in pw_wine_fixture_provider pw_wine_fixture_socket pw_wine_compat; do
-        "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC $service_cflags \
+        tu_compile "syntax-$syntax_index" "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC $service_cflags \
             -fsyntax-only "$root/wine/ps5/$unit.c" >> "$work/service-translation-units.log" 2>&1 ||
             fail "real experimental adapter translation-unit gate failed: $unit"
+        syntax_index=$((syntax_index + 1))
     done
     # Child-only readiness has no generated build header. Exercise its real
     # target declarations here before the full host build; full child link,
     # provider, conversion and SELF checks still run in the final producer.
-    "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror $service_cflags \
+    tu_compile syntax-3 "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror $service_cflags \
         -fsyntax-only "$root/native/pw_wine_child_data.c" >> "$work/service-translation-units.log" 2>&1 ||
         fail "real child data-readiness translation-unit gate failed"
 fi
@@ -609,6 +656,12 @@ if [ "$prx_status" = 0 ]; then
         done
         service_ntdll_exports="__wine_ps5_creation_abi __wine_ps5_creation_protocol pw_wine_creation_install pw_wine_creation_child_install pw_wine_fixture_install pw_wine_fixture_local_threads pw_wine_fixture_socket_set_sink pw_wine_fixture_socket_failure"
         service_server_exports="__wine_ps5_creation_abi __wine_ps5_creation_protocol pw_wineserver_creation_install pw_wineserver_fixture_install pw_wine_fixture_socket_set_sink"
+    fi
+    if [ "$focus_neutral" = 1 ]; then
+        focus_exports="__wine_ps5_focus_abi __wine_ps5_focus_protocol __wine_ps5_focus_mode"
+        for word in 0 1 2 3 4 5 6 7; do focus_exports="$focus_exports __wine_ps5_focus_source_$word"; done
+        service_ntdll_exports="$service_ntdll_exports $focus_exports"
+        service_server_exports="$service_server_exports $focus_exports"
     fi
     # ntdll: the loader, compat, and the title's present and input sink; the
     # thread registry belongs to the server alone.
@@ -840,7 +893,7 @@ if PW_SOURCE_PRX_FOUNDATION=${source_prx_foundation:-} PW_SOURCE_PS5_MESA=${sour
     PW_SOURCE_PS5_VULKAN=${source_ps5_vulkan:-} PW_SOURCE_RADV_PAYLOAD_SDK=${source_radv_payload_sdk:-} \
     PW_SOURCE_PS5VK=${source_ps5vk:-} PW_SOURCE_PS5_OPENGL_SDK=${source_ps5_opengl_sdk:-} \
     PW_SOURCE_PS5_OPENGL=${source_ps5_opengl:-} PW_SOURCE_CA_BUNDLE=${source_ca_bundle:-} \
-    PW_PRIVATE_DISPATCH="$private_dispatch" PW_SERVICE_FIXTURE="$service_fixture" \
+    PW_FOCUS_NEUTRAL="$focus_neutral" PW_PRIVATE_DISPATCH="$private_dispatch" PW_SERVICE_FIXTURE="$service_fixture" \
     PW_TLS_ROOT="$tls" PW_TOOLS_ROOT="$root/tools" PW_TLS_ENABLED="$([ "$tls_stamp" = disabled ] && echo 0 || echo 1)" \
     python3 - "$build" "$work/make.log" "$work/report.json" "$sdk" "$WINE_COMMIT" "$prx" "$prx_status" \
     $ordered <<'PY'
@@ -970,9 +1023,11 @@ if os.environ.get("PW_SERVICE_FIXTURE") == "1":
         result["user_driver_fixes"] = user_driver_record(Path(build).parent)
     except (OSError, ValueError) as error:
         result["user_driver_error"] = str(error)
-    result["creation"] = {"abi": 1, "protocol": 962, "profile": 2, "maximum_depth": 2, "runtime_validated": False}
+    result["creation"] = {"abi": 1, "protocol": 963 if os.environ.get("PW_FOCUS_NEUTRAL") == "1" else 962, "profile": 2, "maximum_depth": 2, "runtime_validated": False}
     result["service_fixture"] = {"enabled": True, "unix_define": "PW_WINE_SERVICE_FIXTURE=1",
                                  "abi": 1, "runtime_validated": False}
+if os.environ.get("PW_FOCUS_NEUTRAL") == "1":
+    result["focus_neutral"] = json.loads((Path(build).parent / "focus-neutral.json").read_text())
 if os.environ.get("PW_PRIVATE_DISPATCH") == "1":
     result["private_dispatcher"] = {
         "abi": 1, "wow64_abi": 1, "scope": "matched native AMD64 and translated I386; no child provider",

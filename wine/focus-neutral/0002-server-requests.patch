@@ -1,0 +1,1188 @@
+diff --git a/include/wine/pw_focus_protocol.h b/include/wine/pw_focus_protocol.h
+new file mode 100644
+index 0000000..040866d
+--- /dev/null
++++ b/include/wine/pw_focus_protocol.h
+@@ -0,0 +1,46 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_FOCUS_PROTOCOL_H
++#define PW_FOCUS_PROTOCOL_H
++#include <stdint.h>
++#include <stddef.h>
++#define PW_FOCUS_ABI 1u
++#define PW_FOCUS_PROTOCOL 963u
++#define PW_FOCUS_CLOCK_MONOTONIC_MS 1u
++#define PW_FOCUS_NATIVE_MAX_LEASE_MS 6000u
++#define PW_FOCUS_MODE_NEUTRAL 1u
++#define PW_FOCUS_MODE_HOST_PROOF 2u
++#define PW_FOCUS_QUIESCE 1u
++#define PW_FOCUS_POLL 2u
++#define PW_FOCUS_ACK_RESULT 3u
++#define PW_FOCUS_SETTLE 4u
++#define PW_FOCUS_CLOSE 5u
++#define PW_FOCUS_ABANDON 6u
++#define PW_FOCUS_KEYBOARD 1u
++#define PW_FOCUS_RECEIPT_PHASE(value) ((value) & 0xffu)
++#define PW_FOCUS_RECEIPT_DISPOSITION(value) (((value) >> 8) & 0xffu)
++#define PW_FOCUS_RECEIPT_RESERVED_MASK 0xffff0000u
++/* Same-address-space native ABI, never a wire record. The provider is trusted
++ * native code installed before server startup; guest requests cannot install it.
++ * Snapshot is bounded, nonblocking, allocation-free and non-reentrant. It must
++ * independently resolve authority; copying the query is not authentication. */
++typedef struct {
++    uint64_t generation;
++    uint32_t native_pid, wine_pid, domain, joined;
++} PwFocusNativeQuery;
++typedef struct {
++    uint64_t snapshot_sequence, session, generation, epoch, expires, user_generation;
++    uint32_t abi, bytes, native_pid, wine_pid, domain, joined, hwnd, frame_ready;
++    uint32_t mode, clock_domain, reserved[2];
++} PwFocusNativeSnapshot;
++typedef struct {
++    uint32_t abi, bytes, protocol, mode, clock_domain, reserved;
++    char source_sha256[65];
++    void *context;
++    int (*snapshot)(void *, const PwFocusNativeQuery *, PwFocusNativeSnapshot *);
++} PwFocusNativeProvider;
++int pw_wineserver_focus_install(const PwFocusNativeProvider *);
++unsigned int __wine_ps5_focus_abi(void);
++unsigned int __wine_ps5_focus_protocol(void);
++unsigned int __wine_ps5_focus_mode(void);
++const char *__wine_ps5_focus_source(void);
++#endif
+diff --git a/include/wine/pw_wine_creation.h b/include/wine/pw_wine_creation.h
+index 798e871..3bd81b8 100644
+--- a/include/wine/pw_wine_creation.h
++++ b/include/wine/pw_wine_creation.h
+@@ -5,7 +5,7 @@
+ /* Same-address-space owner callbacks. No pointer in this contract is a wire
+  * value. Descendant clients use ordinary Wine requests, never this table. */
+ #define PW_WINE_CREATION_ABI 1u
+-#define PW_WINE_CREATION_PROTOCOL 962u
++#define PW_WINE_CREATION_PROTOCOL 963u
+ #define PW_WINE_CREATION_PATH_BYTES 1024u
+ #define PW_WINE_CREATION_IMAGE_BYTES 2048u
+ #define PW_WINE_CREATION_REQUESTS 16u
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index d598b1e..6a45d0f 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -6320,6 +6320,78 @@ struct creation_result_reply
+ };
+ 
+ 
++struct focus_open_request
++{
++    struct request_header __header;
++    unsigned int abi;
++    unsigned int domain;
++    user_handle_t hwnd;
++    unsigned __int64 session;
++    unsigned __int64 generation;
++    unsigned __int64 epoch;
++    unsigned __int64 user_generation;
++    unsigned __int64 reserved;
++};
++struct focus_open_reply
++{
++    struct reply_header __header;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 session;
++    unsigned __int64 generation;
++    unsigned int native_pid;
++    unsigned int wine_pid;
++    unsigned int slot;
++    unsigned int consumer_tid;
++    unsigned __int64 server_window_generation;
++};
++
++struct focus_control_request
++{
++    struct request_header __header;
++    unsigned int abi;
++    unsigned int opcode;
++    unsigned int slot;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 sequence;
++    unsigned __int64 client_sequence;
++    unsigned __int64 reserved;
++};
++struct focus_control_reply
++{
++    struct reply_header __header;
++    unsigned int abi;
++    unsigned int phase_disposition;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 sequence;
++    unsigned __int64 client_sequence;
++    unsigned __int64 desktop_serial;
++    unsigned int key_edge;
++    unsigned int hook_error;
++};
++
++struct focus_input_request
++{
++    struct request_header __header;
++    unsigned int abi;
++    unsigned int slot;
++    unsigned int type;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 client_sequence;
++    unsigned int code;
++    unsigned int x;
++    unsigned int y;
++    unsigned int down;
++};
++struct focus_input_reply
++{
++    struct reply_header __header;
++};
++
++
+ enum request
+ {
+     REQ_new_process,
+@@ -6634,6 +6706,9 @@ enum request
+     REQ_creation_query,
+     REQ_creation_spawn,
+     REQ_creation_result,
++    REQ_focus_open,
++    REQ_focus_control,
++    REQ_focus_input,
+     REQ_NB_REQUESTS
+ };
+ 
+@@ -6953,6 +7028,9 @@ union generic_request
+     struct creation_query_request creation_query_request;
+     struct creation_spawn_request creation_spawn_request;
+     struct creation_result_request creation_result_request;
++    struct focus_open_request focus_open_request;
++    struct focus_control_request focus_control_request;
++    struct focus_input_request focus_input_request;
+ };
+ union generic_reply
+ {
+@@ -7270,8 +7348,11 @@ union generic_reply
+     struct creation_query_reply creation_query_reply;
+     struct creation_spawn_reply creation_spawn_reply;
+     struct creation_result_reply creation_result_reply;
++    struct focus_open_reply focus_open_reply;
++    struct focus_control_reply focus_control_reply;
++    struct focus_input_reply focus_input_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 962
++#define SERVER_PROTOCOL_VERSION 963
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git a/server/Makefile.in b/server/Makefile.in
+index 888d541..1734a40 100644
+--- a/server/Makefile.in
++++ b/server/Makefile.in
+@@ -30,6 +30,8 @@ SOURCES = \
+ 	process.c \
+ 	procfs.c \
+ 	ptrace.c \
++	pw_focus_core.c \
++	pw_focus_requests.c \
+ 	queue.c \
+ 	region.c \
+ 	registry.c \
+diff --git a/server/main.c b/server/main.c
+index 301f7b1..c50f113 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -40,6 +40,9 @@
+ #include "file.h"
+ #include "thread.h"
+ #include "request.h"
++#ifdef PW_FOCUS_SERVER_REQUESTS
++#include "pw_focus_requests.h"
++#endif
+ #include "unicode.h"
+ 
+ /* command-line options */
+@@ -260,6 +263,9 @@ static void start_inprocess_server(void)
+     pthread_attr_t attr;
+     pthread_t thread;
+ 
++    #ifdef PW_FOCUS_SERVER_REQUESTS
++    pw_focus_requests_init();
++    #endif
+     sock_init();
+     open_master_socket();
+     set_current_time();
+@@ -303,6 +309,9 @@ int main( int argc, char *argv[] )
+     signal( SIGABRT, sigterm_handler );
+     init_limits();
+ 
++    #ifdef PW_FOCUS_SERVER_REQUESTS
++    pw_focus_requests_init();
++    #endif
+     sock_init();
+     open_master_socket();
+ 
+diff --git a/server/process.c b/server/process.c
+index 056dd81..29089ad 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -61,6 +61,9 @@
+ #include "process.h"
+ #include "thread.h"
+ #include "request.h"
++#ifdef PW_FOCUS_SERVER_REQUESTS
++#include "pw_focus_requests.h"
++#endif
+ #include "user.h"
+ #include "security.h"
+ 
+@@ -973,6 +976,9 @@ void kill_console_processes( struct thread *renderer, int exit_code )
+ /* a process has been killed (i.e. its last thread died) */
+ static void process_killed( struct process *process )
+ {
++#ifdef PW_FOCUS_SERVER_REQUESTS
++    pw_focus_requests_process_dead( process );
++#endif
+ #ifdef PW_WINE_SERVICE_FIXTURE
+     pw_creation_process_dead( process );
+ #endif
+diff --git a/server/protocol.def b/server/protocol.def
+index 7a540b1..e6fca89 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -4386,3 +4386,59 @@ enum inproc_sync_type
+     int transfer_error;
+     unsigned int transfer_uncertain;
+ @END
++
++/* Matched focus protocol, explicit optional source cohort only. */
++@REQ(focus_open)
++    unsigned int abi;
++    unsigned int domain;
++    user_handle_t hwnd;
++    unsigned __int64 session;
++    unsigned __int64 generation;
++    unsigned __int64 epoch;
++    unsigned __int64 user_generation;
++    unsigned __int64 reserved;
++@REPLY
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 session;
++    unsigned __int64 generation;
++    unsigned int native_pid;
++    unsigned int wine_pid;
++    unsigned int slot;
++    unsigned int consumer_tid;
++    unsigned __int64 server_window_generation;
++@END
++
++@REQ(focus_control)
++    unsigned int abi;
++    unsigned int opcode;
++    unsigned int slot;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 sequence;
++    unsigned __int64 client_sequence;
++    unsigned __int64 reserved;
++@REPLY
++    unsigned int abi;
++    unsigned int phase_disposition;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 sequence;
++    unsigned __int64 client_sequence;
++    unsigned __int64 desktop_serial;
++    unsigned int key_edge;
++    unsigned int hook_error;
++@END
++
++@REQ(focus_input)
++    unsigned int abi;
++    unsigned int slot;
++    unsigned int type;
++    unsigned __int64 cookie;
++    unsigned __int64 epoch;
++    unsigned __int64 client_sequence;
++    unsigned int code;
++    unsigned int x;
++    unsigned int y;
++    unsigned int down;
++@END
+diff --git a/server/pw_focus_requests.c b/server/pw_focus_requests.c
+new file mode 100644
+index 0000000..853b6ed
+--- /dev/null
++++ b/server/pw_focus_requests.c
+@@ -0,0 +1,459 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later
++ * Optional matched server request boundary. No native routing or USER receipt
++ * consumer is installed here. Generic Wine framing remains unchanged. */
++#include "config.h"
++#include <stdint.h>
++#include <stddef.h>
++#include <limits.h>
++#include <string.h>
++#include <stdatomic.h>
++#include <time.h>
++#include "ntstatus.h"
++#include "windef.h"
++#include "winbase.h"
++#include "winternl.h"
++#include "file.h"
++#include "process.h"
++#include "thread.h"
++#include "request.h"
++#include "user.h"
++#include "pw_focus_requests.h"
++#include "wine/pw_focus_protocol.h"
++
++_Static_assert(CHAR_BIT == 8 && sizeof(unsigned int) == 4 && sizeof(uint64_t) == 8, "focus widths");
++_Static_assert(sizeof(struct focus_open_request) == 64, "focus OPEN request");
++_Static_assert(sizeof(struct focus_open_reply) == 64, "focus OPEN reply");
++_Static_assert(sizeof(struct focus_control_request) == 64, "focus CONTROL request");
++_Static_assert(sizeof(struct focus_control_reply) == 64, "focus CONTROL reply");
++_Static_assert(sizeof(struct focus_input_request) == 64, "focus INPUT request");
++_Static_assert(offsetof(struct focus_open_request, session) == 24, "focus OPEN offset");
++_Static_assert(offsetof(struct focus_control_request, cookie) == 24, "focus CONTROL offset");
++_Static_assert(offsetof(struct focus_control_reply, cookie) == 16, "focus receipt offset");
++_Static_assert(offsetof(struct focus_input_request, cookie) == 24, "focus INPUT offset");
++_Static_assert(offsetof(struct focus_control_reply, desktop_serial) == 48, "full 64-bit serial");
++_Static_assert(offsetof(struct focus_control_reply, key_edge) == 56, "key/edge offset");
++_Static_assert(offsetof(struct focus_control_reply, hook_error) == 60, "hook error offset");
++_Static_assert(SERVER_PROTOCOL_VERSION == PW_FOCUS_PROTOCOL, "matched focus protocol");
++
++#ifdef PW_FOCUS_SERVER_REQUESTS
++#if !defined(PW_FOCUS_SERVER_ADAPTER) || !defined(PW_WINE_SERVICE_FIXTURE) || !defined(WINE_INPROCESS_SERVER)
++#error focus requests require the matched adapter, fixture and in-process cohort
++#endif
++#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
++#error focus cohort requires little-endian wire
++#endif
++#include "pw_focus_adapter.h"
++#include "wine/pw_focus_build.h" /* source-selected generated build evidence */
++_Static_assert(sizeof(PW_FOCUS_BUILD_SOURCE_SHA256) == 65, "source SHA256 encoding");
++_Static_assert(PW_FOCUS_BUILD_MODE == PW_FOCUS_MODE_NEUTRAL ||
++               PW_FOCUS_BUILD_MODE == PW_FOCUS_MODE_HOST_PROOF, "focus mode");
++
++/* Installation uses atomics only before server startup. All remaining state is
++ * confined to Wine's serialized server domain; callbacks may not reenter it. */
++enum { FOCUS_EMPTY, FOCUS_INSTALLING, FOCUS_READY, FOCUS_STARTED, FOCUS_DISABLED };
++static atomic_uint focus_install_state;
++static PwFocusNativeProvider focus_provider;
++static unsigned int focus_snapshot_busy, focus_disabling;
++static uint64_t focus_last_clock;
++static unsigned int focus_clock_valid;
++static struct timeout_user *focus_watchdog;
++struct focus_registration {
++    struct thread *consumer;
++    uint64_t session, generation, epoch, user_generation, snapshot_sequence;
++    user_handle_t hwnd;
++    unsigned int domain;
++};
++static struct focus_registration focus_registrations[PW_FOCUS_CONTEXTS];
++static struct focus_registration *focus_opening;
++
++unsigned int DECLSPEC_EXPORT __wine_ps5_focus_abi(void) { return PW_FOCUS_ABI; }
++unsigned int DECLSPEC_EXPORT __wine_ps5_focus_protocol(void) { return SERVER_PROTOCOL_VERSION; }
++unsigned int DECLSPEC_EXPORT __wine_ps5_focus_mode(void) { return PW_FOCUS_BUILD_MODE; }
++const char * DECLSPEC_EXPORT __wine_ps5_focus_source(void) { return PW_FOCUS_BUILD_SOURCE_SHA256; }
++
++int DECLSPEC_EXPORT pw_wineserver_focus_install(const PwFocusNativeProvider *provider)
++{
++#if PW_FOCUS_BUILD_MODE == PW_FOCUS_MODE_NEUTRAL
++    (void)provider;
++    return -1;
++#else
++    unsigned int empty = FOCUS_EMPTY, installing = FOCUS_INSTALLING;
++    if (!provider || provider->abi != PW_FOCUS_ABI || provider->bytes != sizeof(*provider) ||
++        provider->protocol != SERVER_PROTOCOL_VERSION || provider->mode != PW_FOCUS_BUILD_MODE ||
++        provider->mode != PW_FOCUS_MODE_HOST_PROOF ||
++        provider->clock_domain != PW_FOCUS_CLOCK_MONOTONIC_MS || provider->reserved ||
++        memcmp(provider->source_sha256, PW_FOCUS_BUILD_SOURCE_SHA256, 65) ||
++        !provider->context || !provider->snapshot) return -1;
++    if (!atomic_compare_exchange_strong_explicit(&focus_install_state, &empty, FOCUS_INSTALLING,
++                                                 memory_order_acq_rel, memory_order_acquire)) return -1;
++    focus_provider = *provider;
++    /* Startup may seal an incomplete installation. Never overwrite its refusal. */
++    return atomic_compare_exchange_strong_explicit(&focus_install_state, &installing, FOCUS_READY,
++                                                   memory_order_acq_rel, memory_order_acquire) ? 0 : -1;
++#endif
++}
++
++static void focus_retire(unsigned int slot)
++{
++    struct thread *thread = focus_registrations[slot].consumer;
++    memset(&focus_registrations[slot], 0, sizeof(focus_registrations[slot]));
++    if (thread) release_object(thread);
++}
++
++static void focus_sweep(void)
++{
++    unsigned int slot;
++    for (slot = 0; slot < PW_FOCUS_CONTEXTS; ++slot)
++        if (focus_registrations[slot].consumer && !pw_focus_server_core.contexts[slot].registry)
++            focus_retire(slot);
++}
++
++static void focus_disable(void)
++{
++    unsigned int slot;
++    atomic_store_explicit(&focus_install_state, FOCUS_DISABLED, memory_order_release);
++    if (focus_disabling) return;
++    focus_disabling = 1;
++    if (focus_watchdog) { remove_timeout_user(focus_watchdog); focus_watchdog = NULL; }
++    if (pw_focus_server_core.initialized)
++        for (slot = 0; slot < PW_FOCUS_CONTEXTS; ++slot)
++        {
++            PwFocusContext *context = &pw_focus_server_core.contexts[slot];
++            if (context->cookie) pw_focus_queue_abandon(slot, context->cookie, context->epoch);
++        }
++    focus_sweep();
++    focus_disabling = 0;
++}
++
++int pw_focus_requests_clock(uint64_t *out)
++{
++    struct timespec ts;
++    uint64_t value, part;
++    if (!out || atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED ||
++        clock_gettime(CLOCK_MONOTONIC, &ts) || ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000 ||
++        (uint64_t)ts.tv_sec > (UINT64_MAX - 6000) / 1000) goto failed;
++    value = (uint64_t)ts.tv_sec * 1000;
++    part = (uint64_t)ts.tv_nsec / 1000000;
++    if (part > UINT64_MAX - 6000 - value) goto failed;
++    value += part;
++    if (focus_clock_valid && value < focus_last_clock) goto failed;
++    focus_clock_valid = 1;
++    focus_last_clock = value;
++    *out = value;
++    return 1;
++failed:
++    focus_disable();
++    return 0;
++}
++
++static struct focus_registration *focus_binding(struct process *process)
++{
++    unsigned int slot;
++    if (focus_opening && focus_opening->consumer->process == process) return focus_opening;
++    for (slot = 0; slot < PW_FOCUS_CONTEXTS; ++slot)
++        if (focus_registrations[slot].consumer && pw_focus_server_core.contexts[slot].registry &&
++            focus_registrations[slot].consumer->process == process) return &focus_registrations[slot];
++    return NULL;
++}
++
++static int focus_permit(void *opaque, void *object, PwFocusPermit *out)
++{
++    struct process *process = object;
++    struct focus_registration *registration = focus_binding(process);
++    PwFocusNativeQuery query;
++    PwFocusNativeSnapshot snapshot = {0};
++    int result;
++    unsigned int saved_error;
++    (void)opaque;
++    if (!registration || registration->consumer->state != RUNNING || process->is_terminating ||
++        process->unix_pid <= 0 || focus_snapshot_busy ||
++        atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED) return -1;
++    query = (PwFocusNativeQuery){process->fixture_generation, (uint32_t)process->unix_pid,
++                                 process->id, process->fixture_generation ? PW_FOCUS_CHILD : PW_FOCUS_ROOT,
++                                 process->fixture_joined};
++    saved_error = get_error();
++    focus_snapshot_busy = 1;
++    result = focus_provider.snapshot(focus_provider.context, &query, &snapshot);
++    focus_snapshot_busy = 0;
++    if (get_error() != saved_error) { focus_disable(); return -1; }
++    if (result || atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED ||
++        snapshot.abi != PW_FOCUS_ABI || snapshot.bytes != sizeof(snapshot) ||
++        !snapshot.snapshot_sequence || (snapshot.snapshot_sequence & 1) ||
++        snapshot.snapshot_sequence < registration->snapshot_sequence ||
++        snapshot.session != registration->session || snapshot.generation != registration->generation ||
++        snapshot.epoch != registration->epoch || snapshot.native_pid != query.native_pid ||
++        snapshot.wine_pid != query.wine_pid || snapshot.domain != registration->domain ||
++        snapshot.domain != query.domain || snapshot.generation != query.generation ||
++        snapshot.joined != query.joined || (query.domain == PW_FOCUS_CHILD && query.joined != 1) ||
++        snapshot.hwnd != registration->hwnd || snapshot.user_generation != registration->user_generation ||
++        snapshot.frame_ready != 1 || snapshot.expires <= focus_last_clock ||
++        snapshot.expires - focus_last_clock > PW_FOCUS_NATIVE_MAX_LEASE_MS ||
++        snapshot.mode != PW_FOCUS_BUILD_MODE ||
++        snapshot.clock_domain != PW_FOCUS_CLOCK_MONOTONIC_MS || snapshot.reserved[0] || snapshot.reserved[1]) return -1;
++    registration->snapshot_sequence = snapshot.snapshot_sequence;
++    *out = (PwFocusPermit){{snapshot.session, snapshot.generation, snapshot.native_pid,
++                            snapshot.wine_pid, snapshot.domain}, snapshot.epoch, snapshot.expires,
++                           process, snapshot.joined, snapshot.frame_ready};
++    return 0;
++}
++
++static void *focus_pin(void *opaque, void *object)
++{ (void)opaque; return grab_object(object); }
++static void focus_unpin(void *opaque, void *object)
++{ (void)opaque; release_object(object); }
++
++void pw_focus_requests_init(void)
++{
++    unsigned int ready = FOCUS_READY;
++    PwFocusCallbacks callbacks = {NULL, focus_permit, focus_pin, focus_unpin, pw_focus_window_live};
++    uint64_t now;
++    if (!atomic_compare_exchange_strong_explicit(&focus_install_state, &ready, FOCUS_STARTED,
++                                                 memory_order_acq_rel, memory_order_acquire))
++    {
++        /* A second startup must not revoke a running instance. */
++        if (ready != FOCUS_STARTED) atomic_store_explicit(&focus_install_state, FOCUS_DISABLED, memory_order_release);
++        return;
++    }
++    if (pw_focus_init(&pw_focus_server_core, &callbacks) || !pw_focus_requests_clock(&now)) focus_disable();
++}
++
++static int focus_has_work(void)
++{
++    unsigned int slot;
++    for (slot = 0; slot < PW_FOCUS_CONTEXTS; ++slot)
++        if (focus_registrations[slot].consumer) return 1;
++    return 0;
++}
++static void focus_watchdog_tick(void *opaque);
++static int focus_arm(void)
++{
++    if (focus_watchdog) return 1;
++    focus_watchdog = add_timeout_user(-(timeout_t)100 * 10000, focus_watchdog_tick, NULL);
++    return focus_watchdog != NULL;
++}
++static void focus_watchdog_tick(void *opaque)
++{
++    uint64_t now;
++    (void)opaque;
++    focus_watchdog = NULL;
++    if (!pw_focus_requests_clock(&now)) return;
++    pw_focus_queue_watchdog();
++    focus_sweep();
++    if (focus_has_work() && !focus_arm()) focus_disable();
++}
++
++void pw_focus_requests_thread_dead(struct thread *thread)
++{
++    unsigned int slot;
++    for (slot = 0; slot < PW_FOCUS_CONTEXTS; ++slot)
++        if (focus_registrations[slot].consumer == thread)
++        {
++            PwFocusContext *context = &pw_focus_server_core.contexts[slot];
++            pw_focus_queue_abandon(slot, context->cookie, context->epoch);
++            focus_retire(slot);
++        }
++    if (!focus_has_work() && focus_watchdog) { remove_timeout_user(focus_watchdog); focus_watchdog = NULL; }
++}
++void pw_focus_requests_process_dead(struct process *process)
++{
++    unsigned int slot;
++    for (slot = 0; slot < PW_FOCUS_CONTEXTS; ++slot)
++        if (focus_registrations[slot].consumer && focus_registrations[slot].consumer->process == process)
++            pw_focus_requests_thread_dead(focus_registrations[slot].consumer);
++}
++
++static void focus_refuse(unsigned int status)
++{
++    /* No kill, signal, FD close or fabricated settlement on a focus refusal. */
++    if (current) pw_focus_requests_thread_dead(current);
++    set_error(status);
++}
++static int focus_header(unsigned int abi)
++{
++    if (focus_snapshot_busy) { focus_disable(); set_error(STATUS_INVALID_PARAMETER); return 0; }
++    if (!current || current->state != RUNNING || current->process->is_terminating ||
++        abi != PW_FOCUS_ABI || get_req_data_size() || get_reply_max_size() || focus_snapshot_busy ||
++        atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED)
++    { focus_refuse(STATUS_INVALID_PARAMETER); return 0; }
++    return 1;
++}
++static PwFocusContext *focus_owned(unsigned int slot, uint64_t cookie, uint64_t epoch)
++{
++    PwFocusContext *context;
++    if (slot >= PW_FOCUS_CONTEXTS || focus_registrations[slot].consumer != current) return NULL;
++    context = &pw_focus_server_core.contexts[slot];
++    if (!cookie || context->cookie != cookie || context->epoch != epoch || !context->registry ||
++        context->process != current->process) return NULL;
++    return context;
++}
++
++DECL_HANDLER(focus_open)
++{
++    struct focus_registration registration = {0};
++    struct desktop *desktop;
++    struct window *window;
++    PwFocusServerFacts facts;
++    PwFocusIdentity identity;
++    uint64_t now, generation, cookie;
++    uint32_t slot;
++    int result;
++    if (!focus_header(req->abi)) return;
++    if (req->reserved || !req->session || !req->epoch || !req->user_generation || !req->hwnd ||
++        (req->domain != PW_FOCUS_ROOT && req->domain != PW_FOCUS_CHILD) || current->process->unix_pid <= 0 ||
++        (req->domain == PW_FOCUS_ROOT && (req->generation || current->process->fixture_generation)) ||
++        (req->domain == PW_FOCUS_CHILD && (!req->generation || req->generation != current->process->fixture_generation ||
++                                         current->process->fixture_joined != 1)))
++    { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    if (!pw_focus_requests_clock(&now)) { set_error(STATUS_UNSUCCESSFUL); return; }
++    if (!(desktop = get_thread_desktop(current, 0))) { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    window = pw_focus_pin_window(current->process, desktop, req->hwnd, &generation);
++    if (!window) { release_object(desktop); focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    if (!focus_arm())
++    { release_object(window); release_object(desktop); focus_disable(); set_error(STATUS_NO_MEMORY); return; }
++    registration.consumer = (struct thread *)grab_object(current);
++    registration.session = req->session;
++    registration.generation = req->generation;
++    registration.epoch = req->epoch;
++    registration.user_generation = req->user_generation;
++    registration.hwnd = req->hwnd;
++    registration.domain = req->domain;
++    facts = (PwFocusServerFacts){current->process, current->process->fixture_generation,
++                                 (uint32_t)current->process->unix_pid, current->process->id,
++                                 current->process->fixture_joined};
++    identity = (PwFocusIdentity){req->session, req->generation, facts.native_pid, facts.wine_pid, req->domain};
++    focus_opening = &registration;
++    result = pw_focus_open(&pw_focus_server_core, &identity, req->epoch, &facts, desktop, window,
++                           req->hwnd, generation, now, &slot, &cookie);
++    focus_opening = NULL;
++    release_object(window);
++    release_object(desktop);
++    if (result)
++    {
++        release_object(registration.consumer);
++        if (!focus_has_work() && focus_watchdog) { remove_timeout_user(focus_watchdog); focus_watchdog = NULL; }
++        focus_refuse(STATUS_ACCESS_DENIED);
++        return;
++    }
++    focus_registrations[slot] = registration;
++    if (get_error() || atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED)
++    { focus_refuse(STATUS_ACCESS_DENIED); return; }
++    reply->cookie = cookie;
++    reply->epoch = req->epoch;
++    reply->session = req->session;
++    reply->generation = req->generation;
++    reply->native_pid = facts.native_pid;
++    reply->wine_pid = facts.wine_pid;
++    reply->slot = slot;
++    reply->consumer_tid = current->id;
++    reply->server_window_generation = generation;
++}
++
++DECL_HANDLER(focus_control)
++{
++    PwFocusContext *context;
++    PwFocusReceipt receipt = {0};
++    PwFocusPhase phase;
++    uint64_t final_sequence = 0;
++    int result = PW_FOCUS_REFUSED;
++    if (!focus_header(req->abi)) return;
++    context = focus_owned(req->slot, req->cookie, req->epoch);
++    if (!context || req->reserved || req->opcode < PW_FOCUS_QUIESCE || req->opcode > PW_FOCUS_ABANDON ||
++        (req->opcode != PW_FOCUS_ACK_RESULT && req->sequence) ||
++        (req->opcode != PW_FOCUS_ACK_RESULT && req->opcode != PW_FOCUS_SETTLE && req->client_sequence))
++    { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    switch (req->opcode)
++    {
++    case PW_FOCUS_QUIESCE:
++        result = pw_focus_queue_quiesce(req->slot, req->cookie, req->epoch);
++        break;
++    case PW_FOCUS_POLL:
++        result = pw_focus_queue_poll(req->slot, req->cookie, req->epoch, &receipt, &phase);
++        break;
++    case PW_FOCUS_ACK_RESULT:
++        if (context->normal_result)
++        {
++            PwFocusReceipt *retained = &context->operations[context->normal_result - 1].receipt;
++            if (retained->ticket.seq == req->sequence && retained->client_seq == req->client_sequence)
++                result = pw_focus_queue_ack(&retained->ticket);
++        }
++        break;
++    case PW_FOCUS_SETTLE:
++        if (req->client_sequence == context->last_client_seq)
++        { result = pw_focus_queue_settle(req->slot, req->cookie, req->epoch); final_sequence = context->issued; }
++        break;
++    case PW_FOCUS_CLOSE:
++        result = pw_focus_close(&pw_focus_server_core, req->slot, req->cookie, req->epoch);
++        if (!result) focus_retire(req->slot);
++        break;
++    case PW_FOCUS_ABANDON:
++        pw_focus_queue_abandon(req->slot, req->cookie, req->epoch);
++        focus_retire(req->slot);
++        result = 0;
++        break;
++    }
++    if (result || get_error() ||
++        atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED ||
++        context->phase > PW_FOCUS_CLOSED || receipt.outcome > PW_FOCUS_MOTION_NO_CHANGE ||
++        receipt.repeat || receipt.down > 1 || receipt.key > 255 ||
++        (receipt.ticket.seq && (!receipt.client_seq || !receipt.outcome || receipt.ticket.cookie != req->cookie ||
++                                receipt.ticket.epoch != req->epoch || receipt.ticket.slot != req->slot)) ||
++        (!receipt.ticket.seq && (receipt.client_seq || receipt.key || receipt.down || receipt.outcome ||
++                                 receipt.hook_error || receipt.desktop_serial)))
++    { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    reply->abi = PW_FOCUS_ABI;
++    reply->phase_disposition = context->phase | (receipt.outcome << 8);
++    reply->cookie = req->cookie;
++    reply->epoch = req->epoch;
++    reply->sequence = receipt.ticket.seq ? receipt.ticket.seq : final_sequence;
++    reply->client_sequence = req->opcode == PW_FOCUS_SETTLE ? context->last_client_seq : receipt.client_seq;
++    reply->desktop_serial = receipt.desktop_serial;
++    reply->key_edge = receipt.key | (receipt.down << 16);
++    reply->hook_error = receipt.hook_error;
++    if (!focus_has_work() && focus_watchdog) { remove_timeout_user(focus_watchdog); focus_watchdog = NULL; }
++}
++
++static unsigned int focus_normalized_key(unsigned int key, unsigned int flags)
++{
++    switch (key)
++    {
++    case VK_MENU: case VK_LMENU: case VK_RMENU:
++        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RMENU : VK_LMENU;
++    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
++        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RCONTROL : VK_LCONTROL;
++    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
++        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RSHIFT : VK_LSHIFT;
++    default: return key;
++    }
++}
++DECL_HANDLER(focus_input)
++{
++    PwFocusContext *context;
++    PwFocusTicket ticket;
++    union hw_input input = {0};
++    int result;
++    (void)reply;
++    if (!focus_header(req->abi)) return;
++    context = focus_owned(req->slot, req->cookie, req->epoch);
++    if (!context || req->type != PW_FOCUS_KEYBOARD || !req->code || req->code > 255 || req->x > 255 ||
++        (req->y & ~(KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY)) || req->down > 1 ||
++        req->down != !(req->y & KEYEVENTF_KEYUP))
++    { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    result = pw_focus_queue_begin(req->slot, req->cookie, req->epoch, req->client_sequence,
++                                  focus_normalized_key(req->code, req->y), req->down, &ticket);
++    if (result) { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    input.kbd.type = INPUT_KEYBOARD;
++    input.kbd.vkey = req->code;
++    input.kbd.scan = req->x;
++    input.kbd.flags = req->y;
++    result = pw_focus_queue_keyboard(&ticket, context->desktop, context->handle, &input);
++    if (result) focus_refuse(STATUS_ACCESS_DENIED);
++}
++#else
++void pw_focus_requests_init(void) {}
++void pw_focus_requests_thread_dead(struct thread *thread) { (void)thread; }
++void pw_focus_requests_process_dead(struct process *process) { (void)process; }
++int pw_focus_requests_clock(uint64_t *out) { (void)out; return 0; }
++DECL_HANDLER(focus_open) { (void)req; (void)reply; set_error(STATUS_NOT_SUPPORTED); }
++DECL_HANDLER(focus_control) { (void)req; (void)reply; set_error(STATUS_NOT_SUPPORTED); }
++DECL_HANDLER(focus_input) { (void)req; (void)reply; set_error(STATUS_NOT_SUPPORTED); }
++#endif
+diff --git a/server/pw_focus_requests.h b/server/pw_focus_requests.h
+new file mode 100644
+index 0000000..d7ff5e9
+--- /dev/null
++++ b/server/pw_focus_requests.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_FOCUS_REQUESTS_H
++#define PW_FOCUS_REQUESTS_H
++#include <stdint.h>
++struct thread;
++struct process;
++void pw_focus_requests_init(void);
++void pw_focus_requests_thread_dead(struct thread *);
++void pw_focus_requests_process_dead(struct process *);
++/* A failed sample revokes every context. No clock fallback or sentinel value. */
++int pw_focus_requests_clock(uint64_t *);
++#endif
+diff --git a/server/queue.c b/server/queue.c
+index 6f6402d..7129931 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -44,6 +44,9 @@
+ #include "process.h"
+ #include "request.h"
+ #include "user.h"
++#ifdef PW_FOCUS_SERVER_REQUESTS
++#include "pw_focus_requests.h"
++#endif
+ 
+ #define QS_DRIVER       0x80000000
+ #define QS_HARDWARE     0x40000000
+@@ -448,9 +451,14 @@ PwFocusCore pw_focus_server_core;
+ /* Single-transfer ownership, separate from the core pending/result lifecycle. */
+ static PwFocusTicket focus_submissions[PW_FOCUS_CONTEXTS][PW_FOCUS_OPS];
+ 
+-static uint64_t focus_now(void)
++static int focus_now(uint64_t *out)
+ {
+-    return monotonic_time / 10000;
++#ifdef PW_FOCUS_SERVER_REQUESTS
++    return pw_focus_requests_clock(out);
++#else
++    *out = monotonic_time / 10000;
++    return 1;
++#endif
+ }
+ 
+ static PwFocusContext *focus_context(const PwFocusTicket *ticket)
+@@ -552,7 +560,7 @@ static void focus_detach_timer(struct desktop *desktop)
+     memset(&desktop->key_repeat.focus, 0, sizeof(desktop->key_repeat.focus));
+     if (tag.active)
+     {
+-        int result = pw_focus_timer(&pw_focus_server_core, tag.slot, tag.cookie, tag.epoch, 0, NULL, focus_now());
++        int result = pw_focus_timer(&pw_focus_server_core, tag.slot, tag.cookie, tag.epoch, 0, NULL, 0);
+         assert(!result);
+         (void)result;
+     }
+@@ -562,6 +570,7 @@ static void focus_detach_timer(struct desktop *desktop)
+ static int focus_prepare_timer(struct desktop *desktop, struct pw_focus_tag *tag, int repeat)
+ {
+     PwFocusContext *context;
++    uint64_t now;
+     if (repeat)
+     {
+         if (!tag) return !desktop->key_repeat.focus.active;
+@@ -570,8 +579,9 @@ static int focus_prepare_timer(struct desktop *desktop, struct pw_focus_tag *tag
+     }
+     focus_detach_timer(desktop); /* also needed when untracked input replaces tracked */
+     if (!tag) return 1;
++    if (!focus_now(&now)) return 0;
+     if (pw_focus_timer(&pw_focus_server_core, tag->ticket.slot, tag->ticket.cookie,
+-                       tag->ticket.epoch, 1, &tag->ticket, focus_now())) return 0;
++                       tag->ticket.epoch, 1, &tag->ticket, now)) return 0;
+     desktop->key_repeat.focus = (struct pw_focus_timer_tag){tag->ticket.cookie, tag->ticket.epoch, tag->ticket.slot, 1};
+     return 1;
+ }
+@@ -582,10 +592,12 @@ int pw_focus_queue_quiesce(uint32_t slot, uint64_t cookie, uint64_t epoch)
+     PwFocusContext *context = focus_context(&ticket);
+     struct desktop *desktop;
+     int result;
++    uint64_t now;
+     if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    if (!focus_now(&now)) return PW_FOCUS_REFUSED;
+     desktop = (struct desktop *)grab_object(context->desktop);
+     /* This closes admission before physical cancellation, in one server turn. */
+-    result = pw_focus_quiesce(&pw_focus_server_core, slot, cookie, epoch, focus_now());
++    result = pw_focus_quiesce(&pw_focus_server_core, slot, cookie, epoch, now);
+     focus_sync_timer(desktop);
+     release_object(desktop);
+     return result;
+@@ -645,9 +657,11 @@ int pw_focus_queue_begin(uint32_t slot, uint64_t cookie, uint64_t epoch,
+     PwFocusContext *context = focus_context(&ticket);
+     struct desktop *desktop;
+     int result;
++    uint64_t now;
+     if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    if (!focus_now(&now)) return PW_FOCUS_REFUSED;
+     desktop = (struct desktop *)grab_object(context->desktop);
+-    result = pw_focus_begin(&pw_focus_server_core, slot, cookie, epoch, seq, key, down, 0, focus_now(), out);
++    result = pw_focus_begin(&pw_focus_server_core, slot, cookie, epoch, seq, key, down, 0, now, out);
+     focus_sync_timer(desktop);
+     release_object(desktop);
+     return result;
+@@ -660,9 +674,11 @@ int pw_focus_queue_poll(uint32_t slot, uint64_t cookie, uint64_t epoch,
+     PwFocusContext *context = focus_context(&ticket);
+     struct desktop *desktop;
+     int result;
++    uint64_t now;
+     if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    if (!focus_now(&now)) return PW_FOCUS_REFUSED;
+     desktop = (struct desktop *)grab_object(context->desktop);
+-    result = pw_focus_poll(&pw_focus_server_core, slot, cookie, epoch, focus_now(), out, phase);
++    result = pw_focus_poll(&pw_focus_server_core, slot, cookie, epoch, now, out, phase);
+     focus_sync_timer(desktop);
+     release_object(desktop);
+     return result;
+@@ -673,9 +689,11 @@ int pw_focus_queue_ack(const PwFocusTicket *ticket)
+     PwFocusContext *context = focus_context(ticket);
+     struct desktop *desktop;
+     int result;
++    uint64_t now;
+     if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    if (!focus_now(&now)) return PW_FOCUS_REFUSED;
+     desktop = (struct desktop *)grab_object(context->desktop);
+-    result = pw_focus_ack(&pw_focus_server_core, ticket, focus_now());
++    result = pw_focus_ack(&pw_focus_server_core, ticket, now);
+     focus_sync_timer(desktop);
+     release_object(desktop);
+     return result;
+@@ -687,9 +705,11 @@ int pw_focus_queue_settle(uint32_t slot, uint64_t cookie, uint64_t epoch)
+     PwFocusContext *context = focus_context(&ticket);
+     struct desktop *desktop;
+     int result;
++    uint64_t now;
+     if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    if (!focus_now(&now)) return PW_FOCUS_REFUSED;
+     desktop = (struct desktop *)grab_object(context->desktop);
+-    result = pw_focus_settle(&pw_focus_server_core, slot, cookie, epoch, focus_now());
++    result = pw_focus_settle(&pw_focus_server_core, slot, cookie, epoch, now);
+     focus_sync_timer(desktop);
+     release_object(desktop);
+     return result;
+@@ -698,14 +718,16 @@ int pw_focus_queue_settle(uint32_t slot, uint64_t cookie, uint64_t epoch)
+ void pw_focus_queue_watchdog(void)
+ {
+     uint32_t i;
++    uint64_t now;
+     if (!pw_focus_server_core.initialized) return;
++    if (!focus_now(&now)) return;
+     for (i = 0; i < PW_FOCUS_CONTEXTS; ++i)
+     {
+         PwFocusContext *context = &pw_focus_server_core.contexts[i];
+         struct desktop *desktop;
+         if (!context->desktop) continue;
+         desktop = (struct desktop *)grab_object(context->desktop);
+-        pw_focus_watchdog(&pw_focus_server_core, i, focus_now());
++        pw_focus_watchdog(&pw_focus_server_core, i, now);
+         focus_cancel_unsubmitted(i);
+         focus_sync_timer(desktop);
+         release_object(desktop);
+@@ -2665,14 +2687,16 @@ static void key_repeat_timeout( void *private )
+ #ifdef PW_FOCUS_SERVER_ADAPTER
+     struct pw_focus_timer_tag timer = desktop->key_repeat.focus;
+     struct pw_focus_tag tag = {0};
++    uint64_t now;
+     if (timer.active)
+     {
+         /* The timer pin retains desktop through the callback. Completion may
+          * detach it, so take a transient object pin across the whole emitter. */
+         grab_object(desktop);
+         desktop->key_repeat.timeout = NULL;
++        if (!focus_now(&now)) { release_object(desktop); return; }
+         if (pw_focus_begin(&pw_focus_server_core, timer.slot, timer.cookie, timer.epoch, 0,
+-                           pw_focus_server_core.contexts[timer.slot].timer_key, 1, 1, focus_now(), &tag.ticket))
++                           pw_focus_server_core.contexts[timer.slot].timer_key, 1, 1, now, &tag.ticket))
+             stop_key_repeat(desktop);
+         else
+         {
+@@ -2934,13 +2958,20 @@ int pw_focus_queue_keyboard(const PwFocusTicket *ticket, struct desktop *desktop
+                             user_handle_t win, const union hw_input *input)
+ {
+     struct pw_focus_tag tag = {0};
++    uint64_t now;
+     PwFocusContext *context = focus_context(ticket);
+     if (!context || !desktop || !input || context->desktop != desktop || !focus_claim(ticket, &tag))
+         return PW_FOCUS_BAD_ID;
+     grab_object(desktop);
+     /* A reserved but not yet emitted ticket is not authority to inject later.
+      * Revalidate its current permit, lease and exact live window here. */
+-    pw_focus_watchdog(&pw_focus_server_core, ticket->slot, focus_now());
++    if (!focus_now(&now))
++    {
++        focus_complete_tag(&tag, PW_FOCUS_FAILED, STATUS_ACCESS_DENIED, 0);
++        release_object(desktop);
++        return PW_FOCUS_REFUSED;
++    }
++    pw_focus_watchdog(&pw_focus_server_core, ticket->slot, now);
+     focus_sync_timer(desktop);
+     if (!context->registry || context->poison)
+     {
+diff --git a/server/request_handlers.h b/server/request_handlers.h
+index 8773fec..fbe9e09 100644
+--- a/server/request_handlers.h
++++ b/server/request_handlers.h
+@@ -319,6 +319,9 @@ DECL_HANDLER(creation_prepare);
+ DECL_HANDLER(creation_query);
+ DECL_HANDLER(creation_spawn);
+ DECL_HANDLER(creation_result);
++DECL_HANDLER(focus_open);
++DECL_HANDLER(focus_control);
++DECL_HANDLER(focus_input);
+ 
+ typedef void (*req_handler)( const void *req, void *reply );
+ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+@@ -635,6 +638,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+     (req_handler)req_creation_query,
+     (req_handler)req_creation_spawn,
+     (req_handler)req_creation_result,
++    (req_handler)req_focus_open,
++    (req_handler)req_focus_control,
++    (req_handler)req_focus_input,
+ };
+ 
+ C_ASSERT( sizeof(abstime_t) == 8 );
+@@ -2438,3 +2444,52 @@ C_ASSERT( offsetof(struct creation_result_request, transfer_raw) == 48 );
+ C_ASSERT( offsetof(struct creation_result_request, transfer_error) == 52 );
+ C_ASSERT( offsetof(struct creation_result_request, transfer_uncertain) == 56 );
+ C_ASSERT( sizeof(struct creation_result_request) == 64 );
++C_ASSERT( offsetof(struct focus_open_request, abi) == 12 );
++C_ASSERT( offsetof(struct focus_open_request, domain) == 16 );
++C_ASSERT( offsetof(struct focus_open_request, hwnd) == 20 );
++C_ASSERT( offsetof(struct focus_open_request, session) == 24 );
++C_ASSERT( offsetof(struct focus_open_request, generation) == 32 );
++C_ASSERT( offsetof(struct focus_open_request, epoch) == 40 );
++C_ASSERT( offsetof(struct focus_open_request, user_generation) == 48 );
++C_ASSERT( offsetof(struct focus_open_request, reserved) == 56 );
++C_ASSERT( sizeof(struct focus_open_request) == 64 );
++C_ASSERT( offsetof(struct focus_open_reply, cookie) == 8 );
++C_ASSERT( offsetof(struct focus_open_reply, epoch) == 16 );
++C_ASSERT( offsetof(struct focus_open_reply, session) == 24 );
++C_ASSERT( offsetof(struct focus_open_reply, generation) == 32 );
++C_ASSERT( offsetof(struct focus_open_reply, native_pid) == 40 );
++C_ASSERT( offsetof(struct focus_open_reply, wine_pid) == 44 );
++C_ASSERT( offsetof(struct focus_open_reply, slot) == 48 );
++C_ASSERT( offsetof(struct focus_open_reply, consumer_tid) == 52 );
++C_ASSERT( offsetof(struct focus_open_reply, server_window_generation) == 56 );
++C_ASSERT( sizeof(struct focus_open_reply) == 64 );
++C_ASSERT( offsetof(struct focus_control_request, abi) == 12 );
++C_ASSERT( offsetof(struct focus_control_request, opcode) == 16 );
++C_ASSERT( offsetof(struct focus_control_request, slot) == 20 );
++C_ASSERT( offsetof(struct focus_control_request, cookie) == 24 );
++C_ASSERT( offsetof(struct focus_control_request, epoch) == 32 );
++C_ASSERT( offsetof(struct focus_control_request, sequence) == 40 );
++C_ASSERT( offsetof(struct focus_control_request, client_sequence) == 48 );
++C_ASSERT( offsetof(struct focus_control_request, reserved) == 56 );
++C_ASSERT( sizeof(struct focus_control_request) == 64 );
++C_ASSERT( offsetof(struct focus_control_reply, abi) == 8 );
++C_ASSERT( offsetof(struct focus_control_reply, phase_disposition) == 12 );
++C_ASSERT( offsetof(struct focus_control_reply, cookie) == 16 );
++C_ASSERT( offsetof(struct focus_control_reply, epoch) == 24 );
++C_ASSERT( offsetof(struct focus_control_reply, sequence) == 32 );
++C_ASSERT( offsetof(struct focus_control_reply, client_sequence) == 40 );
++C_ASSERT( offsetof(struct focus_control_reply, desktop_serial) == 48 );
++C_ASSERT( offsetof(struct focus_control_reply, key_edge) == 56 );
++C_ASSERT( offsetof(struct focus_control_reply, hook_error) == 60 );
++C_ASSERT( sizeof(struct focus_control_reply) == 64 );
++C_ASSERT( offsetof(struct focus_input_request, abi) == 12 );
++C_ASSERT( offsetof(struct focus_input_request, slot) == 16 );
++C_ASSERT( offsetof(struct focus_input_request, type) == 20 );
++C_ASSERT( offsetof(struct focus_input_request, cookie) == 24 );
++C_ASSERT( offsetof(struct focus_input_request, epoch) == 32 );
++C_ASSERT( offsetof(struct focus_input_request, client_sequence) == 40 );
++C_ASSERT( offsetof(struct focus_input_request, code) == 48 );
++C_ASSERT( offsetof(struct focus_input_request, x) == 52 );
++C_ASSERT( offsetof(struct focus_input_request, y) == 56 );
++C_ASSERT( offsetof(struct focus_input_request, down) == 60 );
++C_ASSERT( sizeof(struct focus_input_request) == 64 );
+diff --git a/server/request_trace.h b/server/request_trace.h
+index d0c2895..d76c316 100644
+--- a/server/request_trace.h
++++ b/server/request_trace.h
+@@ -3593,6 +3593,70 @@ static void dump_creation_result_request( const struct creation_result_request *
+     fprintf( stderr, ", transfer_uncertain=%08x", req->transfer_uncertain );
+ }
+ 
++static void dump_focus_open_request( const struct focus_open_request *req )
++{
++    fprintf( stderr, " abi=%08x", req->abi );
++    fprintf( stderr, ", domain=%08x", req->domain );
++    fprintf( stderr, ", hwnd=%08x", req->hwnd );
++    dump_uint64( ", session=", &req->session );
++    dump_uint64( ", generation=", &req->generation );
++    dump_uint64( ", epoch=", &req->epoch );
++    dump_uint64( ", user_generation=", &req->user_generation );
++    dump_uint64( ", reserved=", &req->reserved );
++}
++
++static void dump_focus_open_reply( const struct focus_open_reply *req )
++{
++    dump_uint64( " cookie=", &req->cookie );
++    dump_uint64( ", epoch=", &req->epoch );
++    dump_uint64( ", session=", &req->session );
++    dump_uint64( ", generation=", &req->generation );
++    fprintf( stderr, ", native_pid=%08x", req->native_pid );
++    fprintf( stderr, ", wine_pid=%08x", req->wine_pid );
++    fprintf( stderr, ", slot=%08x", req->slot );
++    fprintf( stderr, ", consumer_tid=%08x", req->consumer_tid );
++    dump_uint64( ", server_window_generation=", &req->server_window_generation );
++}
++
++static void dump_focus_control_request( const struct focus_control_request *req )
++{
++    fprintf( stderr, " abi=%08x", req->abi );
++    fprintf( stderr, ", opcode=%08x", req->opcode );
++    fprintf( stderr, ", slot=%08x", req->slot );
++    dump_uint64( ", cookie=", &req->cookie );
++    dump_uint64( ", epoch=", &req->epoch );
++    dump_uint64( ", sequence=", &req->sequence );
++    dump_uint64( ", client_sequence=", &req->client_sequence );
++    dump_uint64( ", reserved=", &req->reserved );
++}
++
++static void dump_focus_control_reply( const struct focus_control_reply *req )
++{
++    fprintf( stderr, " abi=%08x", req->abi );
++    fprintf( stderr, ", phase_disposition=%08x", req->phase_disposition );
++    dump_uint64( ", cookie=", &req->cookie );
++    dump_uint64( ", epoch=", &req->epoch );
++    dump_uint64( ", sequence=", &req->sequence );
++    dump_uint64( ", client_sequence=", &req->client_sequence );
++    dump_uint64( ", desktop_serial=", &req->desktop_serial );
++    fprintf( stderr, ", key_edge=%08x", req->key_edge );
++    fprintf( stderr, ", hook_error=%08x", req->hook_error );
++}
++
++static void dump_focus_input_request( const struct focus_input_request *req )
++{
++    fprintf( stderr, " abi=%08x", req->abi );
++    fprintf( stderr, ", slot=%08x", req->slot );
++    fprintf( stderr, ", type=%08x", req->type );
++    dump_uint64( ", cookie=", &req->cookie );
++    dump_uint64( ", epoch=", &req->epoch );
++    dump_uint64( ", client_sequence=", &req->client_sequence );
++    fprintf( stderr, ", code=%08x", req->code );
++    fprintf( stderr, ", x=%08x", req->x );
++    fprintf( stderr, ", y=%08x", req->y );
++    fprintf( stderr, ", down=%08x", req->down );
++}
++
+ typedef void (*dump_func)( const void *req );
+ 
+ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
+@@ -3909,6 +3973,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_creation_query_request,
+     (dump_func)dump_creation_spawn_request,
+     (dump_func)dump_creation_result_request,
++    (dump_func)dump_focus_open_request,
++    (dump_func)dump_focus_control_request,
++    (dump_func)dump_focus_input_request,
+ };
+ 
+ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+@@ -4225,6 +4292,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_creation_query_reply,
+     NULL,
+     NULL,
++    (dump_func)dump_focus_open_reply,
++    (dump_func)dump_focus_control_reply,
++    NULL,
+ };
+ 
+ static const char * const req_names[REQ_NB_REQUESTS] =
+@@ -4541,6 +4611,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
+     "creation_query",
+     "creation_spawn",
+     "creation_result",
++    "focus_open",
++    "focus_control",
++    "focus_input",
+ };
+ 
+ static const struct
+diff --git a/server/thread.c b/server/thread.c
+index f846a61..2922ad5 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -61,6 +61,9 @@
+ #include "wine/pw_wine_fixture_socket.h"
+ #endif
+ #include "request.h"
++#ifdef PW_FOCUS_SERVER_REQUESTS
++#include "pw_focus_requests.h"
++#endif
+ #include "user.h"
+ #include "security.h"
+ 
+@@ -628,6 +631,9 @@ static void cleanup_thread( struct thread *thread )
+ {
+     int i;
+     pw_creation_thread_dead( thread );
++#ifdef PW_FOCUS_SERVER_REQUESTS
++    pw_focus_requests_thread_dead( thread );
++#endif
+ 
+     cleanup_thread_completion( thread );
+     if (thread->context)

@@ -12,13 +12,15 @@ import shlex
 import shutil
 import subprocess
 import time
+import types
 
-SCHEMA = 'pw-wine-compiler-cache/2'
+SCHEMA = 'pw-wine-compiler-cache/3'
 SETTINGS = {'compiler_check': 'content', 'hard_link': 'false', 'sloppiness': '',
             'hash_dir': 'true', 'direct_mode': 'false', 'run_second_cpp': 'true',
             'remote_storage': '', 'ignore_options': '', 'ignore_headers_in_manifest': ''}
 FLAGS = ('CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CROSSCFLAGS', 'i386_CFLAGS',
-         'x86_64_CFLAGS', 'PW_WINE_PRIVATE_DISPATCH', 'PW_WINE_SERVICE_FIXTURE')
+         'x86_64_CFLAGS', 'PW_WINE_PRIVATE_DISPATCH', 'PW_WINE_SERVICE_FIXTURE',
+         'PW_WINE_FOCUS_NEUTRAL')
 # Explicit public ABI identifiers remain global partition boundaries. Structure
 # and ordinary source/header changes are checked by current preprocessing too.
 ABI_INPUTS = {
@@ -112,35 +114,192 @@ def compiler_record(path, kind):
     return result
 
 
-def abi_contracts(repo):
+def selected_focus(phase):
+    if phase not in ('host', 'ps5'):
+        raise ValueError('invalid compiler cache phase')
+    value = os.environ.get('PW_WINE_FOCUS_NEUTRAL', '0')
+    if value not in ('0', '1'):
+        raise ValueError('PW_WINE_FOCUS_NEUTRAL must be 0 or 1')
+    # Host tools are always the default cohort, even when preparing a neutral
+    # target afterwards. Do not silently reinterpret an explicit neutral request.
+    if phase == 'host' and value != '0':
+        raise ValueError('host compiler cache requires default focus mode 0')
+    if value == '1' and any(os.environ.get(k) != '1' for k in
+                          ('PW_WINE_PRIVATE_DISPATCH', 'PW_WINE_SERVICE_FIXTURE')):
+        raise ValueError('focus-neutral requires private-dispatch and service fixture')
+    for name in FLAGS:
+        if name.startswith('PW_WINE_'):
+            continue
+        if re.search(r'PW_FOCUS_|PW_WINE_FOCUS_|PW_WINE_CREATION_PROTOCOL|SERVER_PROTOCOL_VERSION',
+                     os.environ.get(name, '')):
+            raise ValueError('use the focus selector, not manual focus/protocol definitions')
+    return int(value)
+
+
+def preprocessor_text(text):
+    text = text.replace('\\\n', '')
+    return re.sub(r'/\*.*?\*/|//[^\n]*', '', text, flags=re.S)
+
+
+def definitions(text, macro):
+    # Count malformed/function-like definitions and undefs too. A numeric-only
+    # regex must never overlook an extra conflicting preprocessor declaration.
+    text = preprocessor_text(text)
+    return re.findall(r'^\s*#\s*(?:define|undef)\s+' + re.escape(macro) + r'\b[^\n]*', text, re.M)
+
+
+def single_number(text, macro):
+    declarations = definitions(text, macro)
+    match = re.fullmatch(r'\s*#define\s+' + re.escape(macro) + r'\s+([0-9]+)[uU]?\s*',
+                         declarations[0]) if len(declarations) == 1 else None
+    if not match:
+        raise ValueError('missing or ambiguous compiler ABI identifier: ' + macro)
+    return int(match.group(1))
+
+
+def creation_protocol(text, mode):
+    text = preprocessor_text(text)
+    macro = 'PW_WINE_CREATION_PROTOCOL'
+    block = ('#if PW_WINE_FOCUS_NEUTRAL\n#define PW_WINE_CREATION_PROTOCOL 963u\n'
+             '#else\n#define PW_WINE_CREATION_PROTOCOL 962u\n#endif')
+    if text.count(block) != 1 or len(definitions(text, macro)) != 2 or definitions(text, 'PW_WINE_FOCUS_NEUTRAL'):
+        raise ValueError('missing or ambiguous compiler ABI identifier or unknown focus condition: ' + macro)
+    # Only the actual header guard may enclose this exact conditional. In
+    # particular, an outer #if, #else or #elif cannot alter the chosen branch.
+    stack = []
+    prefix = text[:text.index(block)]
+    for line in prefix.splitlines():
+        directive = re.match(r'^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)', line)
+        if not directive:
+            continue
+        op, arg = directive.groups()
+        if op == 'endif':
+            if not stack:
+                raise ValueError('unbalanced creation header condition')
+            stack.pop()
+        elif op in ('else', 'elif'):
+            if not stack:
+                raise ValueError('unbalanced creation header condition')
+            stack[-1] = (op, arg.strip())
+        else:
+            stack.append((op, arg.strip()))
+    if stack != [('ifndef', 'PW_WINE_CREATION_H')]:
+        raise ValueError('unknown creation protocol conditional structure')
+    return 963 if mode else 962
+
+
+def patched_protocol(path, previous, selected):
+    text = path.read_text()
+    added = '\n'.join(line[1:] for line in text.splitlines() if line.startswith('+'))
+    value = single_number(added, 'SERVER_PROTOCOL_VERSION')
+    declaration = '+#define SERVER_PROTOCOL_VERSION ' + str(selected) + '\n'
+    if value != selected or text.count(declaration) != 1:
+        raise ValueError('compiler creation/server protocol identifiers differ')
+    offset = text.index(declaration)
+    section = text.rfind('diff --git ', 0, offset)
+    if not text[section:].startswith('diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h\n'):
+        raise ValueError('unknown server protocol patch target')
+    section_end = text.find('\ndiff --git ', offset)
+    body = text[section:section_end if section_end >= 0 else len(text)]
+    for sign in ('+', '-'):
+        changed = preprocessor_text('\n'.join(line[1:] for line in body.splitlines() if line.startswith(sign)))
+        if re.search(r'^\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b', changed, re.M):
+            raise ValueError('unknown server protocol conditional structure')
+    start = text.rfind('\n@@ ', section, offset)
+    ends = [p for p in (text.find('\n@@ ', offset), text.find('\ndiff --git ', offset)) if p >= 0]
+    hunk = text[start:min(ends) if ends else len(text)]
+    directives = [line for line in hunk.splitlines() if re.match(r'^[ +\-]\s*#', line)]
+    if directives != ['-#define SERVER_PROTOCOL_VERSION ' + str(previous),
+                      '+#define SERVER_PROTOCOL_VERSION ' + str(selected),
+                      ' #endif /* __WINE_WINE_SERVER_PROTOCOL_H */']:
+        raise ValueError('unknown server protocol conditional structure')
+    return value
+
+
+def checked_focus_selector(repo):
+    text = preprocessor_text((repo / 'wine/ps5/pw_wine_focus_neutral.h').read_text()).lstrip()
+    preamble = ('#ifndef PW_WINE_FOCUS_NEUTRAL_H\n#define PW_WINE_FOCUS_NEUTRAL_H\n'
+                '#ifndef PW_WINE_FOCUS_NEUTRAL\n#define PW_WINE_FOCUS_NEUTRAL 0\n#endif\n')
+    if not text.startswith(preamble) or single_number(text, 'PW_WINE_FOCUS_NEUTRAL') != 0:
+        raise ValueError('unknown focus selector default/conditional structure')
+
+
+def abi_contracts(repo, mode=0):
+    if type(mode) is not int or mode not in (0, 1):
+        raise ValueError('invalid compiler focus mode')
+    checked_focus_selector(repo)
     contracts = {}
     for name, (path, macro) in ABI_INPUTS.items():
-        prefix = r'^\+' if path.endswith('.patch') else '^'
-        values = re.findall(prefix + r'#define\s+' + re.escape(macro) + r'\s+([0-9]+)[uU]?\s*$',
-                            (repo / path).read_text(), re.M)
-        if len(values) != 1:
-            raise ValueError('missing or ambiguous compiler ABI identifier: ' + macro)
-        contracts[name] = {'source': path, 'macro': macro, 'value': int(values[0])}
+        text = (repo / path).read_text()
+        if name == 'server_protocol':
+            value = patched_protocol(repo / path, 961, 962)
+        elif path.endswith('.patch'):
+            text = '\n'.join(line[1:] for line in text.splitlines() if line.startswith('+'))
+        if name != 'server_protocol':
+            value = creation_protocol(text, mode) if name == 'creation_protocol' else single_number(text, macro)
+        contracts[name] = {'source': path, 'macro': macro, 'value': value}
+    for later in (repo / 'wine/patches').glob('*.patch'):
+        if later.name > Path(ABI_INPUTS['server_protocol'][0]).name:
+            added = '\n'.join(line[1:] for line in later.read_text().splitlines() if line.startswith('+'))
+            if definitions(added, 'SERVER_PROTOCOL_VERSION'):
+                raise ValueError('unexpected later server protocol declaration')
+    default = contracts['server_protocol']['value']
+    if default != 962:
+        raise ValueError('compiler creation/server protocol identifiers differ')
+    if mode:
+        path = 'wine/focus-neutral/0002-server-requests.patch'
+        patches = sorted((repo / 'wine/focus-neutral').glob('*.patch'))
+        added = '\n'.join(line[1:] for patch in patches for line in patch.read_text().splitlines()
+                          if line.startswith('+'))
+        selected = patched_protocol(repo / path, 962, 963)
+        if single_number(added, 'SERVER_PROTOCOL_VERSION') != selected:
+            raise ValueError('optional server protocol identifiers differ')
+        # The accepted optional patch must replace this exact default value.
+        replacement = '-#define SERVER_PROTOCOL_VERSION 962\n+#define SERVER_PROTOCOL_VERSION 963\n'
+        if replacement not in (repo / path).read_text() or selected != 963:
+            raise ValueError('unknown optional server protocol replacement')
+        contracts['server_protocol'] = {'source': path, 'macro': 'SERVER_PROTOCOL_VERSION', 'value': selected}
     if contracts['creation_protocol']['value'] != contracts['server_protocol']['value']:
         raise ValueError('compiler creation/server protocol identifiers differ')
     return contracts
 
 
-def compatibility(repo, phase, providers, ccache, *, sdk=None, tls=None):
-    names = command(['git', '-C', repo, 'ls-files', 'wine/patches', 'wine/ps5',
+def source_selection(repo, phase):
+    mode = selected_focus(phase)
+    focus = {'mode': mode, 'protocol': 963 if mode else 962}
+    if mode:
+        path = repo / 'tools/wine_focus_neutral.py'
+        helper = types.ModuleType('cache_focus_contract')
+        # Read current source bytes; timestamp-based .pyc reuse is not identity.
+        exec(compile(path.read_bytes(), str(path), 'exec'), helper.__dict__)
+        contract = helper.checked(helper.contract(repo))
+        focus.update(contract=contract,
+                     optional_patches={name: sha(repo / 'wine/focus-neutral' / name) for name in helper.OPTIONAL},
+                     generated_header_sha256=hashlib.sha256(helper.header(contract).encode()).hexdigest())
+    return {'focus': focus, 'abi_contracts': abi_contracts(repo, mode)}
+
+
+def recipe_inputs(repo):
+    names = command(['git', '-C', repo, 'ls-files', 'wine/patches', 'wine/ps5', 'wine/focus-neutral',
                      'tools/build_host_wine.sh', 'tools/build_wine_ps5.sh',
                      'tools/stage_vk_batch.py', 'tools/generate_vk_codecs.py',
-                     'tools/wine_compile_cache.py', '.github/workflows/windows-child-fixture.yml']).splitlines()
-    # Include this helper while the new file is being reviewed before its first commit.
-    names = sorted(set(names) | {'tools/wine_compile_cache.py'})
-    recipe = {name: sha(repo / name) for name in names}
+                     'tools/wine_compile_cache.py', 'tools/wine_focus_neutral.py',
+                     '.github/workflows/windows-child-fixture.yml']).splitlines()
+    # Explicit required helpers also bind fresh review copies before first commit.
+    names = sorted(set(names) | {'tools/wine_compile_cache.py', 'tools/wine_focus_neutral.py'})
+    return {name: sha(repo / name) for name in names}
+
+
+def compatibility(repo, phase, providers, ccache, *, sdk=None, tls=None):
+    selection = source_selection(repo, phase)
+    recipe = recipe_inputs(repo)
     pin = re.search(r'^WINE_COMMIT=([0-9a-f]{40})$', (repo / 'tools/build_wine_ps5.sh').read_text(), re.M)
     if not pin:
         raise ValueError('missing Wine pin')
     value = {'schema': SCHEMA, 'phase': phase, 'os': Path('/etc/os-release').read_text(),
              'machine': platform.machine(), 'wine_commit': pin.group(1), 'recipe': recipe,
-             'abi_contracts': abi_contracts(repo),
-             'settings': SETTINGS, 'flags': {name: os.environ.get(name, '') for name in FLAGS},
+             **selection,
+             'settings': SETTINGS, 'flags': {name: os.environ.get(name, '0' if name == 'PW_WINE_FOCUS_NEUTRAL' else '') for name in FLAGS},
              'ccache': {'file': file_record(ccache), 'version': command([ccache, '--version'])},
              'compilers': providers, 'system_headers': tree_record('/usr/include'),
              'packages': command(['dpkg-query', '-W', '-f=${Package}=${Version}\n'])}
@@ -168,27 +327,37 @@ def cache_partition(identity):
 
 def cache_keys(identity):
     partition_hash = hashlib.sha256(canonical(cache_partition(identity))).hexdigest()
-    partition_key = 'wine-ccache-v2-' + identity['phase'] + '-' + partition_hash
+    partition_key = 'wine-ccache-v3-' + identity['phase'] + '-focus' + str(identity['focus']['mode']) + '-' + partition_hash
     recipe_hash = hashlib.sha256(canonical(identity)).hexdigest()
     return partition_key, partition_key + '-', partition_key + '-' + recipe_hash
 
 
 def checked_identity(directory, state):
     """Both receipts are per-run inputs, never restored compiler-cache content."""
+    if state.get('schema') != SCHEMA:
+        raise ValueError('stale compiler cache state schema')
     if sha(directory / 'compatibility.json') != state['compatibility_sha256']:
         raise ValueError('cache compatibility input changed')
     if sha(directory / 'partition.json') != state['partition_sha256']:
         raise ValueError('cache partition input changed')
     identity = json.loads((directory / 'compatibility.json').read_text())
+    if identity.get('schema') != SCHEMA or state['phase'] != identity['phase']:
+        raise ValueError('stale or mismatched compiler cache identity')
     if (directory / 'partition.json').read_bytes() != canonical(cache_partition(identity)):
         raise ValueError('cache partition disagrees with compatibility input')
     partition_key, restore_prefix, key = cache_keys(identity)
     if (state['partition_key'], state['restore_prefix'], state['key']) != (partition_key, restore_prefix, key):
         raise ValueError('cache key disagrees with current inputs')
+    repo = Path(state['repo']).resolve(strict=True)
+    selection = source_selection(repo, state['phase'])
+    if any(identity.get(name) != value for name, value in selection.items()):
+        raise ValueError('compiler cache focus selection/source contract changed')
+    if identity['recipe'] != recipe_inputs(repo):
+        raise ValueError('compiler cache recipe source changed')
     return identity
 
 
-def write_state(out, cache_dir, identity, compilers, ccache, project):
+def write_state(out, cache_dir, identity, compilers, ccache, project, *, repo):
     out = Path(out).resolve()
     cache_dir = Path(cache_dir).resolve()
     if out == cache_dir or out in cache_dir.parents or cache_dir in out.parents:
@@ -211,6 +380,7 @@ def write_state(out, cache_dir, identity, compilers, ccache, project):
         target.chmod(0o755)
         mapping[role] = str(target)
     state = {'schema': SCHEMA, 'key': key, 'project': project, 'phase': identity['phase'],
+             'repo': str(Path(repo).resolve(strict=True)),
              'partition_key': partition_key, 'restore_prefix': restore_prefix,
              'partition_sha256': sha(out / 'partition.json'),
              'cache_dir': str(cache_dir), 'ccache': str(ccache), 'launchers': mapping,
@@ -236,8 +406,9 @@ def run_stage(directory, stage, argv):
         raise ValueError('invalid cache stage')
     directory = Path(directory).resolve()
     state = json.loads((directory / 'state.json').read_text())
-    checked_identity(directory, state)
+    identity = checked_identity(directory, state)
     env = cache_env(state, directory)
+    env['PW_WINE_FOCUS_NEUTRAL'] = str(identity['focus']['mode'])
     cc = state['launchers']
     env.update(i386_CC=cc['i386'], x86_64_CC=cc['x86_64'])
     if state['phase'] == 'host':
@@ -254,11 +425,11 @@ def run_stage(directory, stage, argv):
         result = subprocess.run(argv, env=env)
         return result.returncode
     finally:
-        record = {'schema': 'pw-wine-cache-stage/2', 'key': state['key'], 'project': state['project'],
+        record = {'schema': 'pw-wine-cache-stage/3', 'key': state['key'], 'project': state['project'],
                   'partition_key': state['partition_key'], 'partition_sha256': state['partition_sha256'],
                   'compatibility_sha256': state['compatibility_sha256'],
                   'restore_prefix': state['restore_prefix'],
-                  'phase': state['phase'], 'stage': stage, 'argv': argv,
+                  'focus': identity['focus'], 'phase': state['phase'], 'stage': stage, 'argv': argv,
                   'elapsed_seconds': time.monotonic() - started,
                   'exit': result.returncode if result else None,
                   'cache_restore_hit': os.environ.get('PW_CACHE_RESTORE_HIT', ''),
@@ -291,7 +462,7 @@ def compiler_smoke(directory, out, objects):
     identity = checked_identity(directory, state)
     if Path(objects).exists():
         raise ValueError('compiler smoke requires a fresh, uncached object directory')
-    probe = write_state(out, objects, identity, state['compilers'], state['ccache'], state['project'])
+    probe = write_state(out, objects, identity, state['compilers'], state['ccache'], state['project'], repo=state['repo'])
     out = Path(out).resolve()
     source = out / 'original-cache-control.c'
     source.write_text('#include <stdint.h>\nuint32_t pw_original_cache_control(uint32_t n) { return n ^ 0x512aU; }\n')
@@ -360,7 +531,7 @@ def main():
     identity = compatibility(repo, args.phase, providers, ccache, sdk=args.sdk, tls=args.tls)
     project = {k: command(['git', '-C', repo, 'rev-parse', v]) for k, v in
                [('commit', 'HEAD'), ('tree', 'HEAD^{tree}')]}
-    state = write_state(args.out, args.cache_dir, identity, compilers, ccache, project)
+    state = write_state(args.out, args.cache_dir, identity, compilers, ccache, project, repo=repo)
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write('key=' + state['key'] + '\n')

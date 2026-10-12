@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "pw_wine_sink.h"
+#include "pw_wine_focus_neutral.h"
 #include <fcntl.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -26,6 +27,18 @@ static PwWineAudioSink audio_sink;
 static void *audio_context;
 static uint64_t grains,grains_dropped;
 
+/* This compile-time cohort cannot inherit an untracked queue or XInput cache.
+ * Clear under the existing lock before any input API can expose old state.
+ * There is no runtime toggle back to the legacy producer/consumer paths. */
+static int neutral_locked(void)
+{
+    if (!PW_WINE_FOCUS_NEUTRAL) return 0;
+    memset(queue,0,sizeof(queue));head=count=0;
+    memset(&pad_state,0,sizeof(pad_state));
+    rumble_left=rumble_right=rumble_changed=0;
+    return 1;
+}
+
 static void create_wake_pipe(void)
 {
     int pair[2];
@@ -38,6 +51,9 @@ static void create_wake_pipe(void)
 }
 int pw_wine_input_fd(void)
 {
+    int neutral;
+    pthread_mutex_lock(&lock);neutral=neutral_locked();pthread_mutex_unlock(&lock);
+    if(neutral)return -1;
     pthread_once(&wake_once,create_wake_pipe);
     return wake[0];
 }
@@ -105,7 +121,7 @@ int pw_wine_post_input(const PwWineInput *event)
 {
     int status=-1;
     pthread_mutex_lock(&lock);
-    if(event && valid(event) && count<PW_WINE_INPUT_QUEUE) {
+    if(!neutral_locked() && event && valid(event) && count<PW_WINE_INPUT_QUEUE) {
         queue[(head+count)%PW_WINE_INPUT_QUEUE]=*event;count++;
         stats.inputs_posted++;status=0;
     }
@@ -124,7 +140,7 @@ int pw_wine_next_input(PwWineInput *event)
     int found=0;
     if(!event)return 0;
     pthread_mutex_lock(&lock);
-    if(count) {
+    if(!neutral_locked() && count) {
         *event=queue[head];head=(head+1)%PW_WINE_INPUT_QUEUE;count--;
         stats.inputs_delivered++;found=1;
     }
@@ -177,7 +193,8 @@ static int same_pad(const PwWinePad *a,const PwWinePad *b)
 void pw_wine_set_pad(const PwWinePad *pad)
 {
     pthread_mutex_lock(&lock);
-    if(!pad)pad_state.connected=0;
+    if(neutral_locked()){}
+    else if(!pad)pad_state.connected=0;
     else if(!pad_state.connected || !same_pad(pad,&pad_state)) {
         uint32_t packet=pad_state.packet+1;
         pad_state=*pad;pad_state.connected=1;
@@ -190,7 +207,7 @@ int pw_wine_pad(PwWinePad *pad)
     int connected;
     if(!pad)return 0;
     pthread_mutex_lock(&lock);
-    connected=pad_state.connected!=0;
+    connected=!neutral_locked() && pad_state.connected!=0;
     if(connected)*pad=pad_state;
     else memset(pad,0,sizeof(*pad));
     pthread_mutex_unlock(&lock);
@@ -201,7 +218,7 @@ void pw_wine_set_rumble(uint32_t left,uint32_t right)
     if(left>0xffffu)left=0xffffu;
     if(right>0xffffu)right=0xffffu;
     pthread_mutex_lock(&lock);
-    if(left!=rumble_left || right!=rumble_right) {
+    if(!neutral_locked() && (left!=rumble_left || right!=rumble_right)) {
         rumble_left=left;rumble_right=right;rumble_changed=1;
     }
     pthread_mutex_unlock(&lock);
@@ -210,6 +227,7 @@ int pw_wine_rumble(uint32_t *left,uint32_t *right)
 {
     int changed;
     pthread_mutex_lock(&lock);
+    (void)neutral_locked();
     changed=(int)rumble_changed;rumble_changed=0;
     if(left)*left=rumble_left;
     if(right)*right=rumble_right;

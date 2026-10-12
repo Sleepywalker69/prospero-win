@@ -1135,3 +1135,23 @@ tools/windows_chromium_ipc_package.py
 # IPC and preview composition refusal controls
 tests/test_wine_ipc_preview_handoff.c
 tests/test_wine_ipc_preview_composition.py
+
+# Optional compile-only focus cohort; not part of default Wine patch series
+docs/focus-neutral-build.md
+tools/wine_focus_neutral.py
+wine/ps5/pw_wine_focus_neutral.h
+tests/test_pw_wine_focus_neutral_sink.c
+tests/test_wine_focus_neutral.py
+tests/test_wine_focus_identity.py
+tests/test_wine_focus_source.py
+wine/focus-neutral/0001-server-adapter.patch
+wine/focus-neutral/0002-server-requests.patch
+wine/focus-neutral/0003-neutral-cohort.patch
+
+# Narrow uncached neutral target translation-unit gate.
+.github/workflows/focus-neutral-target-compile.yml
+tests/test_focus_target_workflow.py
+
+# Exact uncached target compile-only command and object receipts
+tools/check_focus_target_compile.py
+tests/test_focus_target_compile.py

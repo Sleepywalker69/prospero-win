@@ -12,6 +12,19 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def flag_selection(source):
+    start = ('case " ${CFLAGS:-} ${CPPFLAGS:-} ${CROSSCFLAGS:-} '
+             '${x86_64_CFLAGS:-} ${i386_CFLAGS:-} " in\n'
+             '    *WINE_PS5_PRIVATE_DISPATCH*)')
+    end = '# Reconfigure whenever'
+    if source.count(start) != 1 or source.count(end) != 1:
+        raise ValueError('dispatcher flag block must have unique boundaries')
+    begin, finish = source.index(start), source.index(end)
+    if finish <= begin:
+        raise ValueError('dispatcher flag block boundaries are reversed')
+    return source[begin:finish]
+
+
 def added_header(patch, name):
     section = patch.read_text().split('+++ b/' + name + '\n', 1)[1]
     section = section.split('\ndiff --git ', 1)[0].split('\n--- ', 1)[0]
@@ -43,7 +56,7 @@ class PrivateDispatchWow64Contract(unittest.TestCase):
 
     def test_actual_build_flag_selection(self):
         source = (ROOT / 'tools/build_wine_ps5.sh').read_text()
-        block = source[source.index('case " ${CFLAGS:-}'):source.index('# Reconfigure whenever')]
+        block = flag_selection(source)
         program = 'set -eu\nfail() { exit 73; }\nps5opengl_sdk=\n' + block + \
             "\nexport opengl_cflags\npython3 -c 'import os,json; print(json.dumps({k:os.environ.get(k) for k in [\"opengl_cflags\",\"x86_64_CFLAGS\",\"i386_CFLAGS\"]}))'\n"
         for mode in ('0', '1'):
@@ -61,6 +74,18 @@ class PrivateDispatchWow64Contract(unittest.TestCase):
             env[name] = '-DWINE_PS5_PRIVATE_DISPATCH=0'
             result = subprocess.run(['sh'], input=program, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 73)
+
+    def test_flag_selection_boundaries_are_unique_and_ordered(self):
+        source = (ROOT / 'tools/build_wine_ps5.sh').read_text()
+        block = flag_selection(source)
+        self.assertNotIn('compile_check_only', block)
+        self.assertNotIn('use PW_WINE_FOCUS_NEUTRAL selector', block)
+        self.assertIn('use PW_WINE_PRIVATE_DISPATCH, not a manual compiler definition', block)
+        self.assertEqual(flag_selection('case " ${CFLAGS:-} " in *) :;; esac\n' + source), block)
+        for malformed in (source + block, source.replace('# Reconfigure whenever', '# removed'),
+                          '# Reconfigure whenever\n' + block.split('# Reconfigure whenever')[0]):
+            with self.assertRaises(ValueError):
+                flag_selection(malformed)
 
 
 if __name__ == '__main__':

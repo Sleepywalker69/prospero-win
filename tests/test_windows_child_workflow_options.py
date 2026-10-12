@@ -187,6 +187,28 @@ class WorkflowOptions(unittest.TestCase):
         self.assertIn('::error::', result.stdout)
         check_context(flow, base_context(**{'labels': [IPC, PREVIEW]}), False, False, False, True)
 
+    def test_neutral_label_excludes_every_heavy_job_and_accepted_group(self):
+        # The dedicated neutral workflow owns explicit mixed-cohort refusal.
+        # Keep all established fixture/preview/IPC assertions above intact.
+        flow = workflow()
+        neutral = 'build-focus-neutral-target-compile-only'
+        for label, action in itertools.product((REGULAR, PREVIEW, IPC),
+                                               ('opened', 'synchronize', 'reopened', 'labeled')):
+            context = base_context(**{'labels': [neutral, label], 'github.event.action': action,
+                                      'github.event.label.name': label})
+            for name in (*HEAVY, 'chromium-ipc-reference'):
+                self.assertFalse(actual_gate(flow['jobs'][name]['if'], context), (name, context))
+            prefix = 'windows-child-fixture-'
+            self.assertEqual(actual_gate(flow['concurrency']['group'][len(prefix):], context),
+                             context['github.run_id'])
+        guard = "!contains(github.event.pull_request.labels.*.name, '" + neutral + "')"
+        for name in (*HEAVY, 'chromium-ipc-reference'):
+            label = IPC if name == 'chromium-ipc-reference' else REGULAR
+            context = base_context(**{'labels': [neutral, label], 'github.event.action': 'synchronize'})
+            expression = flow['jobs'][name]['if']
+            self.assertIn(guard, expression)
+            self.assertTrue(actual_gate(expression.replace(guard, 'true'), context), name)
+
     def test_strict_ipc_option_and_same_cohort_references_are_preserved(self):
         flow = workflow()
         option = flow['on']['workflow_dispatch']['inputs']['enable_chromium_ipc']
