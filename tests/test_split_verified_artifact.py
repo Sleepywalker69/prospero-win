@@ -68,25 +68,25 @@ class NetworkOriginTests(unittest.TestCase):
     setUp = SplitTests.setUp
     run_split = SplitTests.run_split
     def test_production_pins_and_exact_part_bounds(self):
-        self.assertEqual(m.EXPECTED_BYTES, 754335831)
+        self.assertEqual(m.EXPECTED_BYTES, 754312820)
         self.assertEqual(m.EXPECTED_SHA256,
-                         'f548992085393039f938cd5991589be588590911629b70b447f252a2f087a235')
+                         '9c583cd046c2c49248338d2901e9e246b6c9aea077e19283017ddfb1ff6c4b98')
         self.assertEqual(m.PART_BYTES, 209715200)
         sizes = [min(m.PART_BYTES, m.EXPECTED_BYTES - i) for i in range(0, m.EXPECTED_BYTES, m.PART_BYTES)]
-        self.assertEqual(sizes, [209715200, 209715200, 209715200, 125190231])
+        self.assertEqual(sizes, [209715200, 209715200, 209715200, 125167220])
 
     def test_original_and_transport_identities_are_separate(self):
         with patch.dict(os.environ, {'GITHUB_RUN_ID': 'transport-only',
                                      'GITHUB_RUN_ATTEMPT': '3',
                                      'GITHUB_SHA': 'transport-merge'}):
             report = self.run_split()
-        self.assertEqual(report['source_artifact_id'], 11723016800)
-        self.assertEqual(report['source_run_id'], 38190493657)
+        self.assertEqual(report['source_artifact_id'], 11739595515)
+        self.assertEqual(report['source_run_id'], 38223633711)
         self.assertEqual(report['source_run_attempt'], 1)
         self.assertEqual(report['source_candidate_commit'],
-                         '7b208eeb137905dabf12869040974d08a1466af1')
+                         'f5172ae2bc6ef0bea1b359f381b1c66609e14538')
         self.assertEqual(report['source_compiled_commit'],
-                         'f114a370f55f5de70c00d19b12fac8f95fee5a5b')
+                         '706d8d7f2cfbfbe2aee596eb06425d38b6dd84cb')
         self.assertEqual(report['transport'], {'run_id': 'transport-only',
                          'run_attempt': '3', 'commit': 'transport-merge'})
         self.assertEqual(json.loads((self.out / 'MANIFEST.json').read_text()), report)
@@ -97,17 +97,17 @@ class NetworkOriginTests(unittest.TestCase):
 
     def test_workflow_exact_transfer_routes_and_no_rebuild(self):
         value = self.workflow()
-        self.assertIn('name: Transfer exact existing UI settings runtime\n', value)
-        self.assertIn("github.event.label.name == 'transfer-existing-ui-settings-runtime'", value)
+        self.assertIn('name: Transfer exact existing parent bootstrap runtime\n', value)
+        self.assertIn("github.event.label.name == 'transfer-existing-parent-bootstrap-runtime'", value)
         self.assertIn('permissions:\n  contents: read\n  actions: read\n', value)
         self.assertIn('persist-credentials: false', value)
         self.assertIn('types: [labeled]', value)
         self.assertEqual(value.count('actions/checkout@11d5960a326750d5838078e36cf38b85af677262'), 1)
         self.assertEqual(value.count('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'), 5)
         for i in range(1, 5):
-            self.assertIn('name: ui-settings-runtime-byte-part%02d-${{ github.run_id }}' % i, value)
+            self.assertIn('name: parent-bootstrap-runtime-byte-part%02d-${{ github.run_id }}' % i, value)
             self.assertIn('path: ${{ runner.temp }}/byte-parts/runtime.zip.part%02d' % i, value)
-        self.assertIn('name: ui-settings-runtime-byte-manifest-${{ github.run_id }}', value)
+        self.assertIn('name: parent-bootstrap-runtime-byte-manifest-${{ github.run_id }}', value)
         self.assertEqual(value.count('compression-level: 0'), 4)
         self.assertEqual(value.count('if-no-files-found: error'), 5)
         for forbidden in ('make ', 'unzip ', 'tar ', 'workflow_call:', 'always()',
@@ -123,16 +123,16 @@ class NetworkOriginTests(unittest.TestCase):
                     '81cccfdf9300789eaf707ee544e6059682ca147853394a53efba3df4bf281e20',
                     'transfer-existing-user-runtime', 'user-runtime-byte'):
             self.assertNotIn(old, value)
-        endpoint = 'gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11723016800'
+        endpoint = 'gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11739595515'
         self.assertEqual(self.workflow().count(endpoint), 2)
 
     def test_actual_inline_check_refuses_every_mismatched_origin_field(self):
         raw = self.workflow().split("<<'PYCODE'\n", 1)[1].split('\n          PYCODE', 1)[0]
         code = textwrap.dedent(raw)
-        good = {'id': 11723016800, 'workflow_run': {'id': 38190493657,
-                'head_sha': '7b208eeb137905dabf12869040974d08a1466af1'},
-                'name': 'windows-child-fixture-f114a370f55f5de70c00d19b12fac8f95fee5a5b-1',
-                'expired': False, 'size_in_bytes': 754335831,
+        good = {'id': 11739595515, 'workflow_run': {'id': 38223633711,
+                'head_sha': 'f5172ae2bc6ef0bea1b359f381b1c66609e14538'},
+                'name': 'windows-child-fixture-706d8d7f2cfbfbe2aee596eb06425d38b6dd84cb-1',
+                'expired': False, 'size_in_bytes': 754312820,
                 'digest': 'sha256:' + m.EXPECTED_SHA256}
         cases = [good, good | {'id': 11695207767},
                  good | {'workflow_run': good['workflow_run'] | {'id': 38120712135}},
