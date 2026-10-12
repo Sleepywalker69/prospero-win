@@ -15,12 +15,20 @@ from unittest import mock
 import yaml
 
 sys.dont_write_bytecode = True
+from test_wine_build_performance import actual_job_gate
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import collect_child_ui_preview_validation as collector
 
 WORKFLOW = ROOT / '.github/workflows/windows-child-fixture.yml'
-GATE = "${{ github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true }}"
+GATE = """${{ (github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+    (github.event_name == 'pull_request' &&
+     github.event.pull_request.head.repo.full_name == github.repository &&
+     github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+     contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+     (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+      github.event.action == 'reopened' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static'))) }}"""
 BUILD = 'Build the opt-in enabled preview in fresh isolated outputs'
 COLLECT = 'Recheck both modes and collect static-only preview evidence with exact sources'
 UPLOAD = 'Upload the isolated preview static-validation artifact'
@@ -45,7 +53,8 @@ def recipe_contract(flow, native):
             'PW_WINE_CHILD_UI_ENABLED' not in job['env'], 'preview cannot replace shared/default control')
     selected = steps(flow)
     build, collect, upload = (selected[name] for name in (BUILD, COLLECT, UPLOAD))
-    require(all(s.get('if') == GATE and 'continue-on-error' not in s for s in (build, collect, upload)),
+    require(all(''.join(s.get('if', '').split()) == ''.join(GATE.split()) and
+                'continue-on-error' not in s for s in (build, collect, upload)),
             'preview success stages must retain opt-in and failure gates')
     require(build['env']['PW_WINE_CHILD_UI_ENABLED'] == '1' and
             build['env']['PW_WINE_CHILD_FIXTURE_MODE'] == '1' and
@@ -93,6 +102,75 @@ def recipe_contract(flow, native):
             'preview title/worker reuse forbidden')
 
 
+def event_contract(flow):
+    """Evaluate actual YAML expressions against bounded event truth tables."""
+    selected = steps(flow)
+    label = 'build-child-ui-preview-static'
+    regular = 'build-windows-child-fixture'
+    base = {'github.event_name': 'pull_request', 'github.repository': 'Sleepywalker69/prospero-win',
+            'github.ref': 'refs/pull/123/merge', 'github.run_id': '987654', 'github.event.deleted': False,
+            'github.event.action': 'labeled', 'github.event.label.name': label,
+            'github.event.pull_request.head.repo.full_name': 'Sleepywalker69/prospero-win',
+            'github.event.pull_request.head.ref': 'reviewed-change',
+            'inputs.child_ui_preview': False, 'labels': [label]}
+    cases = [
+        ('explicit preview label', {}, True, True),
+        ('preview and ordinary labels together', {'labels': [label, regular]}, True, True),
+        ('dispatch true', {'github.event_name': 'workflow_dispatch', 'inputs.child_ui_preview': True,
+                           'labels': []}, True, True),
+        ('dispatch false', {'github.event_name': 'workflow_dispatch'}, True, False),
+        ('dispatch missing input', {'github.event_name': 'workflow_dispatch',
+                                    'inputs.child_ui_preview': ''}, True, False),
+        ('ordinary PR label only', {'github.event.label.name': regular, 'labels': [regular]}, True, False),
+        ('ordinary label added to preview PR', {'github.event.label.name': regular,
+                                               'labels': [label, regular]}, True, False),
+        ('unrelated label on preview PR', {'github.event.label.name': 'documentation'}, False, False),
+        ('unrelated label on ordinary PR', {'github.event.label.name': 'documentation',
+                                            'labels': [regular, 'documentation']}, False, False),
+        ('wrong similar label', {'github.event.label.name': label + '-other'}, False, False),
+        ('trigger label missing from current list', {'labels': []}, False, False),
+        ('preview trigger with only ordinary current label', {'labels': [regular]}, False, False),
+        ('ordinary trigger with only preview current label', {'github.event.label.name': regular}, False, False),
+        ('missing event label', {'github.event.label.name': ''}, False, False),
+        ('removed preview label', {'github.event.action': 'unlabeled', 'labels': [regular]}, False, False),
+        ('unlabeled event with preview still present', {'github.event.action': 'unlabeled'}, False, False),
+        ('closed PR', {'github.event.action': 'closed'}, False, False),
+        ('external fork preview', {'github.event.pull_request.head.repo.full_name': 'fork/prospero-win'}, False, False),
+        ('duplicate seed-head PR', {'github.event.pull_request.head.ref': 'perf/windows-child-incremental-cache'}, False, False),
+        ('untrusted event with copied fields', {'github.event_name': 'pull_request_target'}, False, False),
+        ('seed branch push', {'github.event_name': 'push',
+                              'github.ref': 'refs/heads/perf/windows-child-incremental-cache'}, True, False),
+        ('unrelated branch push', {'github.event_name': 'push', 'github.ref': 'refs/heads/unrelated'}, False, False),
+    ]
+    for action in ('opened', 'synchronize', 'reopened'):
+        cases.extend([(action + ' opted-in PR', {'github.event.action': action}, True, True),
+                      (action + ' ordinary PR', {'github.event.action': action, 'labels': [regular]}, True, False),
+                      (action + ' no opt-in label', {'github.event.action': action, 'labels': []}, False, False)])
+    for name, changes, heavy, preview in cases:
+        context = dict(base, **changes)
+        for job in ('original-x64-reference', 'original-user-x64-reference',
+                    'original-network-x64-reference', 'matched-runtime'):
+            collector.require(actual_job_gate(flow['jobs'][job]['if'], context) is heavy,
+                              name + ': heavy job admission differs: ' + job)
+        for step in (BUILD, COLLECT, UPLOAD):
+            collector.require(actual_job_gate(selected[step]['if'], context) is preview,
+                              name + ': preview step admission differs: ' + step)
+        evidence = selected[EVIDENCE]['if'].replace('always()', 'true')
+        collector.require(actual_job_gate(evidence, context) is preview,
+                          name + ': preview evidence selection differs')
+        prefix = 'windows-child-fixture-'
+        group = flow['concurrency']['group']
+        collector.require(group.startswith(prefix), 'concurrency prefix differs')
+        selected_group = prefix + actual_job_gate(group[len(prefix):], context)
+        expected_group = prefix + (context['github.ref'] if heavy else context['github.run_id'])
+        collector.require(selected_group == expected_group,
+                          name + ': ignored event must not displace pending admitted build')
+    collector.require(flow['concurrency']['cancel-in-progress'] == 'false',
+                      'preview must keep non-cancelling build concurrency')
+    collector.require(flow['on']['pull_request']['types'] == ['opened', 'synchronize', 'reopened', 'labeled'],
+                      'removal/other events must not subscribe new heavy jobs')
+
+
 class WorkflowRecipe(unittest.TestCase):
     def setUp(self):
         self.flow = workflow()
@@ -104,6 +182,29 @@ class WorkflowRecipe(unittest.TestCase):
             if 'run' in step:
                 result = subprocess.run(['bash', '-n'], input=step['run'], text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_actual_dispatch_and_label_event_truth_table(self):
+        event_contract(self.flow)
+
+    def test_broad_label_or_removed_current_label_guards_are_rejected(self):
+        label = 'build-child-ui-preview-static'
+        mutations = [
+            lambda f: steps(f)[BUILD].update(**{'if': steps(f)[BUILD]['if'].replace(
+                "github.event.label.name == '" + label + "'", 'true')}),
+            lambda f: steps(f)[BUILD].update(**{'if': steps(f)[BUILD]['if'].replace(
+                "contains(github.event.pull_request.labels.*.name, '" + label + "')", 'true')}),
+            lambda f: f['jobs']['matched-runtime'].update(**{'if': f['jobs']['matched-runtime']['if'].replace(
+                "github.event.label.name == 'build-windows-child-fixture'", 'true')}),
+            lambda f: steps(f)[BUILD].update(**{'if': steps(f)[BUILD]['if'].replace(
+                "github.event.pull_request.head.repo.full_name == github.repository", 'true')}),
+            lambda f: f['concurrency'].update(**{'cancel-in-progress': 'true'}),
+            lambda f: f['concurrency'].update(group='windows-child-fixture-${{ github.ref }}'),
+            lambda f: f['concurrency'].update(group='windows-child-fixture-${{ github.run_id }}'),
+        ]
+        for index, change in enumerate(mutations):
+            with self.subTest(index=index):
+                mutant = copy.deepcopy(self.flow); change(mutant)
+                with self.assertRaises(ValueError): event_contract(mutant)
 
     def test_omitted_recipe_controls_are_rejected(self):
         for name, text in ((BUILD, '--check-title --child-ui'), (BUILD, 'git worktree add --detach'),

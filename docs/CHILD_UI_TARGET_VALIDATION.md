@@ -1,10 +1,31 @@
 # Opt-in hosted child preview static validation
 
 `windows-child-fixture.yml` has one optional boolean dispatch input,
-`child_ui_preview`, defaulting to `false`. Pushes and labeled pull requests do
-not enable it. Normal dispatches still produce only the existing default-off
-fixture package and evidence. The normal title recipe, deployment packager,
-source pins, reference joins and runtime admission are unchanged.
+`child_ui_preview`, defaulting to `false`. Normal dispatches and pushes still
+produce only the existing default-off fixture package and evidence. An
+explicit alternative is the PR label `build-child-ui-preview-static` on a
+same-repository, non-seed-head pull request. The normal title recipe, deployment
+packager, source pins, reference joins and runtime admission are unchanged.
+
+The preview label's own `labeled` event must name that label and include it in
+the PR's current label list. Later `opened`, `synchronize` and `reopened` events
+also retain the opt-in while that current label remains. Applying ordinary or
+unrelated labels does not enable preview. Missing, removed or different labels,
+external forks and the already push-built seed branch are refused. Label
+removal is not a subscribed build event and does not cancel an already-running
+build. Admitted builds keep the existing non-cancelling per-ref concurrency
+group. Ignored events get a unique run-ID group so an unrelated label cannot
+replace a pending admitted build; GitHub otherwise permits a newer pending run
+to replace the existing pending run in the same group even with cancellation of
+running builds disabled ([concurrency reference](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency)).
+
+All four heavy/reference job gates now also verify the exact triggering label
+and current label list for `labeled` events. Adding an unrelated label cannot
+start another expensive runtime build just because a build label is already
+present. The existing `build-windows-child-fixture` label keeps its default-off
+behavior. Adding the preview label explicitly requests the ordinary control
+plus the extra static preview in the same workflow run. Labels are an opt-in
+build route only; they do not authorize console execution or deployment.
 
 When explicitly enabled, the workflow first completes and uploads the ordinary
 **default-off** control package. Only then it makes a fresh detached worktree
@@ -21,7 +42,7 @@ are not repeated. Their same-run inputs are reused. Compiler caches remain
 restricted to their existing host/target runtime stages, with their current
 source/recipe/ABI keys and revalidation. Neither title nor worker build output
 is cached or copied between modes. The additional cost is the enabled native
-title/helper/worker build and static inspections, only on an explicit opt-in.
+title/helper/worker build and static inspections, only on an explicit dispatch or label opt-in.
 
 ## Evidence gate and artifact
 

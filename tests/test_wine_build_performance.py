@@ -47,8 +47,9 @@ def actual_job_gate(expression, context):
     if not expression.strip().startswith('${{') or not expression.strip().endswith('}}'):
         raise AssertionError('job gate is not an Actions expression')
     value = expression.strip()[3:-2]
-    label_call = "contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')"
-    value = value.replace(label_call, repr('build-windows-child-fixture' in context['labels']))
+    for label in ('build-windows-child-fixture', 'build-child-ui-preview-static'):
+        label_call = "contains(github.event.pull_request.labels.*.name, '" + label + "')"
+        value = value.replace(label_call, repr(label in context['labels']))
     for name in sorted((key for key in context if key != 'labels'), key=len, reverse=True):
         value = value.replace(name, repr(context[name]))
     value = value.replace('&&', ' and ').replace('||', ' or ')
@@ -59,8 +60,14 @@ def actual_job_gate(expression, context):
         if isinstance(node, ast.Constant) and isinstance(node.value, (str, bool)):
             return node.value
         if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
-            values = [visit(item) for item in node.values]
-            return all(values) if isinstance(node.op, ast.And) else any(values)
+            result = visit(node.values[0])
+            for item in node.values[1:]:
+                if isinstance(node.op, ast.And) and not result:
+                    return result
+                if isinstance(node.op, ast.Or) and result:
+                    return result
+                result = visit(item)
+            return result
         if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators) == 1:
             left, right = visit(node.left), visit(node.comparators[0])
             if isinstance(node.ops[0], ast.Eq):
@@ -167,16 +174,26 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         self.assertEqual(actual['jobs']['matched-runtime']['permissions'],
                          {'contents': 'read', 'actions': 'read'})
         self.assertNotIn('permissions', actual['jobs']['original-x64-reference'])
-        self.assertEqual(actual['concurrency'],
-                         {'group': 'windows-child-fixture-${{ github.ref }}', 'cancel-in-progress': 'false'})
+        self.assertEqual(set(actual['concurrency']), {'group', 'cancel-in-progress'})
+        self.assertEqual(actual['concurrency']['cancel-in-progress'], 'false')
         expected = """${{ github.event_name == 'workflow_dispatch' ||
-            (github.event_name == 'push' &&
-             github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
-             github.event.deleted == false) ||
-            (github.event_name == 'pull_request' &&
-             github.event.pull_request.head.repo.full_name == github.repository &&
-             github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-             contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}"""
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+           github.event.deleted == false) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}"""
+        expected_group = 'windows-child-fixture-${{ (' + expected.strip()[3:-2].strip() + ') && github.ref || github.run_id }}'
+        self.assertEqual(''.join(actual['concurrency']['group'].split()), ''.join(expected_group.split()))
         for name in ('original-x64-reference', 'matched-runtime'):
             self.assertEqual(''.join(actual['jobs'][name]['if'].split()), ''.join(expected.split()))
 
@@ -184,6 +201,7 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         seed = 'perf/windows-child-incremental-cache'
         base = {'github.event_name': 'pull_request', 'github.repository': 'Sleepywalker69/prospero-win',
                 'github.ref': 'refs/pull/123/merge', 'github.event.deleted': False,
+                'github.event.action': 'labeled', 'github.event.label.name': 'build-windows-child-fixture',
                 'github.event.pull_request.head.repo.full_name': 'Sleepywalker69/prospero-win',
                 'github.event.pull_request.head.ref': 'reviewed-change',
                 'github.event.pull_request.base.ref': 'main', 'labels': ['build-windows-child-fixture']}
