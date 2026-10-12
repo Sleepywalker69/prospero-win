@@ -17,6 +17,30 @@
 #define IO_KEY ((ULONG_PTR)0x50494331)
 static const char *case_names[]={"invalid","self-memory","live-memory","suspended-memory",
     "section-readonly","section-duplicate","section-close-source","mojo-pipe","page-regression"};
+/* Empty-argument profile aliases are exact names, not a generic executable
+ * allowance. Native path/hash admission is a separate, presently absent gate. */
+static const wchar_t *entry_aliases[]={L"",L"pw-ipc-self-memory.exe",L"pw-ipc-live-memory.exe",
+    L"pw-ipc-suspended-memory.exe",L"pw-ipc-section-readonly.exe",L"pw-ipc-section-duplicate.exe",
+    L"pw-ipc-section-close-source.exe",L"pw-ipc-mojo-pipe.exe",L"pw-ipc-page-regression.exe"};
+static int choose_entry(const wchar_t *image,int argc,char **argv,unsigned *which,int *is_worker)
+{
+    const wchar_t *name=image;unsigned alias=0,i;int canonical;uint64_t requested;
+    *which=0;*is_worker=0;
+    if(!image||argc<1||!argv)return 0;
+    for(const wchar_t *p=image;*p;++p)if(*p==L'\\'||*p==L'/')name=p+1;
+    canonical=!wcscmp(name,L"chromium-ipc.exe");
+    for(i=PW_IPC_SELF;i<=PW_IPC_PAGES;++i)if(!wcscmp(name,entry_aliases[i]))alias=i;
+    if(!canonical&&!alias)return 0;
+    if(argc>1&&!strcmp(argv[1],"--worker")){
+        if(argc!=11||!pw_ipc_number(argv[2],PW_IPC_PIPE,&requested)||requested<PW_IPC_LIVE||
+            (alias&&requested!=alias))return 0;
+        *which=(unsigned)requested;*is_worker=1;return 1;
+    }
+    if(alias){if(argc!=1)return 0;*which=alias;return 1;}
+    if(argc!=2)return 0;
+    for(i=PW_IPC_SELF;i<=PW_IPC_PAGES;++i)if(!strcmp(argv[1],case_names[i]))*which=i;
+    return *which!=0;
+}
 static DWORD nonce, parent_pid;
 static unsigned selected, handles, log_bytes;
 static int worker, log_failed, close_failed, unsettled, stage_failed;
@@ -789,11 +813,12 @@ static int pages(void)
 }
 int main(int argc,char **argv)
 {
-    struct child c;DWORD exit_code=0;int stages=0,waited=1,ok;unsigned i;
-    if(argc>1&&!strcmp(argv[1],"--worker"))return worker_main(argc,argv);
-    if(argc!=2)return 2;
-    for(i=1;i<=PW_IPC_PAGES;++i)if(!strcmp(argv[1],case_names[i]))selected=i;
-    if(!selected)return 2;
+    struct child c;DWORD exit_code=0,path_size;int stages=0,waited=1,ok,is_worker;
+    wchar_t image[MAX_PATH];
+    /* Trust the loaded module path, never caller-controlled argv[0]. */
+    path_size=GetModuleFileNameW(NULL,image,MAX_PATH);
+    if(!path_size||path_size>=MAX_PATH||!choose_entry(image,argc,argv,&selected,&is_worker))return 2;
+    if(is_worker)return worker_main(argc,argv);
     memset(&c,0,sizeof(c));epoch=GetTickCount64();parent_pid=GetCurrentProcessId();
     nonce=(DWORD)epoch^parent_pid^0x51cc8123u;if(!nonce)nonce=1;
     start_log();trace("begin","observation_only",0,0,0,0,0);

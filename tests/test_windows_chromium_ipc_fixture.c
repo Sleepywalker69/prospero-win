@@ -216,6 +216,45 @@ int main(void)
 {
     HANDLE pipe=(HANDLE)(uintptr_t)2,port=(HANDLE)(uintptr_t)3;unsigned checks=0;
 #define CHECK(x) do { ++checks;assert(x); } while(0)
+    {
+        unsigned which;int is_worker;
+        char *args[]={"caller-can-spoof-this", "self-memory", "2", "1", "100", "14", "15", "11", "0", "10", "13"};
+        for(unsigned c=PW_IPC_SELF;c<=PW_IPC_PAGES;++c){
+            CHECK(choose_entry(entry_aliases[c],1,args,&which,&is_worker)&&which==c&&!is_worker);
+            args[1]=(char *)case_names[c];
+            CHECK(choose_entry(L"C:\\fixed\\chromium-ipc.exe",2,args,&which,&is_worker)&&which==c&&!is_worker);
+            CHECK(!choose_entry(entry_aliases[c],2,args,&which,&is_worker)&&!which&&!is_worker);
+            for(unsigned other=c+1;other<=PW_IPC_PAGES;++other)CHECK(wcscmp(entry_aliases[c],entry_aliases[other]));
+        }
+        CHECK(!choose_entry(L"chromium-ipc.exe",1,args,&which,&is_worker));
+        CHECK(!choose_entry(L"unknown.exe",1,args,&which,&is_worker));
+        CHECK(!choose_entry(L"unknown.exe",2,args,&which,&is_worker));
+        CHECK(!choose_entry(L"pw-ipc-live-memory.exe.extra",1,args,&which,&is_worker));
+        CHECK(!choose_entry(L"PW-IPC-LIVE-MEMORY.EXE",1,args,&which,&is_worker));
+        CHECK(!choose_entry(L"C:\\fixed\\",1,args,&which,&is_worker));
+        CHECK(choose_entry(L"C:/fixed/pw-ipc-live-memory.exe",1,args,&which,&is_worker)&&which==PW_IPC_LIVE);
+        args[1]="--worker";
+        {
+            char number[12];
+            for(unsigned c=PW_IPC_LIVE;c<=PW_IPC_PIPE;++c){
+                (void)snprintf(number,sizeof(number),"%u",c);args[2]=number;
+                CHECK(choose_entry(entry_aliases[c],11,args,&which,&is_worker)&&which==c&&is_worker);
+                CHECK(!choose_entry(entry_aliases[c==PW_IPC_PIPE?PW_IPC_LIVE:c+1],11,args,&which,&is_worker));
+            }
+            args[2]="2";
+        }
+        CHECK(choose_entry(L"chromium-ipc.exe",11,args,&which,&is_worker)&&which==PW_IPC_LIVE&&is_worker);
+        CHECK(choose_entry(entry_aliases[PW_IPC_LIVE],11,args,&which,&is_worker)&&which==PW_IPC_LIVE&&is_worker);
+        CHECK(!choose_entry(entry_aliases[PW_IPC_SUSPENDED],11,args,&which,&is_worker));
+        CHECK(!choose_entry(entry_aliases[PW_IPC_SELF],11,args,&which,&is_worker));
+        CHECK(!choose_entry(entry_aliases[PW_IPC_PAGES],11,args,&which,&is_worker));
+        CHECK(!choose_entry(L"unknown.exe",11,args,&which,&is_worker));
+        CHECK(!choose_entry(entry_aliases[PW_IPC_LIVE],10,args,&which,&is_worker));
+        args[2]="4294967296";CHECK(!choose_entry(L"chromium-ipc.exe",11,args,&which,&is_worker));
+        args[2]="garbage";CHECK(!choose_entry(L"chromium-ipc.exe",11,args,&which,&is_worker));
+        args[1]="unknown-mode";CHECK(!choose_entry(L"chromium-ipc.exe",2,args,&which,&is_worker));
+        args[1]="self-memory";CHECK(!choose_entry(L"chromium-ipc.exe",3,args,&which,&is_worker));
+    }
     reset();m.io_ok=1;m.completion_ok=1;m.completion_bytes=sizeof(struct pw_ipc_packet);
     CHECK(submit_io(pipe,&slots[0],0,0));CHECK(slots[0].pending);
     CHECK(complete_io(port,&slots[0],sizeof(struct pw_ipc_packet),0));CHECK(!slots[0].pending&&!stage_failed);
