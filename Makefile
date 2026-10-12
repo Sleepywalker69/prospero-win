@@ -413,6 +413,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_child_integration.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_server_fatal.py
 	python3 tests/test_wine_build_performance.py
+	python3 tests/test_windows_child_workflow_options.py
 	python3 tests/test_wine_compile_cache.py
 	python3 tests/test_wine_cache_incremental.py
 	python3 tests/test_windows_child_package.py

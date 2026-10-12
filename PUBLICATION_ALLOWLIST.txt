@@ -939,6 +939,7 @@ tools/retain_windows_child_failure.py
 tools/wine_workflow_join.py
 tools/wine_compile_cache.py
 tests/test_wine_build_performance.py
+tests/test_windows_child_workflow_options.py
 tests/test_wine_compile_cache.py
 tests/test_wine_cache_incremental.py
 tests/bootstrap_diagnostic_bridge.h

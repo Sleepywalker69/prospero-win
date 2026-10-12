@@ -235,8 +235,14 @@ class WineChildIntegration(unittest.TestCase):
         workflow = yaml.load((ROOT / '.github/workflows/windows-child-fixture.yml').read_text(),
                              Loader=yaml.BaseLoader)
         job = workflow['jobs']['matched-runtime']
-        self.assertEqual(job['env'], {'BUILD_JOBS': '2', 'PW_IPC_REQUESTED':
-            "${{ github.event_name == 'workflow_dispatch' && inputs.enable_chromium_ipc == true && '1' || '0' }}"})
+        self.assertEqual(set(job['env']), {'BUILD_JOBS', 'PW_IPC_REQUESTED'})
+        self.assertEqual(job['env']['BUILD_JOBS'], '2')
+        from test_windows_child_workflow_options import actual_gate, base_context
+        for selected in (False, True):
+            context = base_context(**{'github.event_name': 'workflow_dispatch',
+                                      'inputs.enable_chromium_ipc': selected, 'labels': []})
+            self.assertEqual(actual_gate(job['env']['PW_IPC_REQUESTED'], context),
+                             '1' if selected else '0')
         step = job['steps'][0]
         self.assertEqual(step.get('id'), 'runtime-paths')
         self.assertNotIn('if', step)
