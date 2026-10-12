@@ -1167,3 +1167,6 @@ tests/focus_mouse_fixture/disabled.c
 # Host-only proposed controller stream reference model; no runtime activation.
 tests/reference_controller_stream.h
 tests/test_controller_stream_contract.c
+
+# Actual native reader observation tests; no production consumer activation.
+tests/test_pw_pad_ps5_observed.c

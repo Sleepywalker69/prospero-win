@@ -77,7 +77,8 @@ failed:
 }
 
 /* One native read converted to samples; count<0 reports a read error. */
-static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
+static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH],
+                      PwPadPs5ObservedBatch *observed)
 {
     PwPadPs5Data raw[PW_PAD_PS5_BATCH];pad->polls++;
     /* Edge fields describe exactly one native read, including an empty one.
@@ -85,6 +86,11 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
      * consumed repeatedly by the title lifecycle adapter. */
     pad->core.pressed_edges=0;pad->core.released_edges=0;
     int count=pad->ops.pad_read(pad->pad_handle,raw,PW_PAD_PS5_BATCH);pad->last_read_rc=count;
+    if(observed) {
+        observed->native_read_rc=count;
+        if(count<0)observed->loss_flags|=PW_PAD_OBS_READ_ERROR;
+        if(count>PW_PAD_PS5_BATCH)observed->loss_flags|=PW_PAD_OBS_INVALID_COUNT;
+    }
     if(count<0){pad->read_errors++;pad->discontinuities++;centre_analog(pad);return count;}
     if(!count){pad->empty_reads++;return 0;}
     if(count>PW_PAD_PS5_BATCH)count=PW_PAD_PS5_BATCH;
@@ -96,6 +102,12 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
         if(raw[i].connected && !intercepted && pad->timestamp_valid &&
            pad->last_generation==raw[i].connected_count &&
            raw[i].timestamp && raw[i].timestamp<=pad->last_timestamp)continue;
+        if(observed) {
+            if(intercepted)observed->loss_flags|=PW_PAD_OBS_INTERCEPTED;
+            if(!raw[i].connected)observed->loss_flags|=PW_PAD_OBS_DISCONNECTED;
+            if(pad->generation_valid && pad->last_generation!=raw[i].connected_count)
+                observed->loss_flags|=PW_PAD_OBS_GENERATION;
+        }
         pad->last_timestamp=raw[i].timestamp;pad->timestamp_valid=raw[i].timestamp!=0;
         pad->sample_serial++;
         samples[used++]=(PwPadSample){.buttons=raw[i].buttons&~PW_PAD_INTERCEPTED,
@@ -117,20 +129,35 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
             if(pad->touch_data.fingers>2)pad->touch_data.fingers=0;
         }
         else{pad->discontinuities++;pad->disconnected_samples++;centre_analog(pad);}
+        if(observed) {
+            PwPadPs5ObservedRecord *record=&observed->records[used-1];
+            record->sample=samples[used-1];
+            record->left_stick=pad->left_stick;record->right_stick=pad->right_stick;
+            record->l2=pad->l2;record->r2=pad->r2;
+            record->touch_data=pad->touch_data;
+        }
     }
+    if(observed && !(observed->loss_flags&PW_PAD_OBS_INVALID_COUNT))
+        observed->count=(uint32_t)used;
     return used;
 }
 
-int pw_pad_ps5_read(PwPadPs5 *pad)
+int pw_pad_ps5_read_observed(PwPadPs5 *pad,PwPadPs5ObservedBatch *observed)
 {
+    if(observed)memset(observed,0,sizeof(*observed));
     if(!pad || !pad->opened)return PW_ERR_PRECONDITION;
-    PwPadSample samples[PW_PAD_PS5_BATCH];int count=read_batch(pad,samples);
+    PwPadSample samples[PW_PAD_PS5_BATCH];int count=read_batch(pad,samples,observed);
     if(count<0) {
         const PwPadSample released={.connected=0};
         return pw_pad_track(&pad->core,&released,1);
     }
     if(!count)return PW_OK;
     return pw_pad_track(&pad->core,samples,(size_t)count);
+}
+
+int pw_pad_ps5_read(PwPadPs5 *pad)
+{
+    return pw_pad_ps5_read_observed(pad,NULL);
 }
 
 int pw_pad_ps5_close(PwPadPs5 *pad)
