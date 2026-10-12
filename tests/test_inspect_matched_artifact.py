@@ -195,5 +195,28 @@ class ArchiveEvidence(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.selected_native(bad, files)
 
+    def test_title_chain_is_bound_to_actual_members(self):
+        child = 'console/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe'
+        files = {m.NATIVE: {'sha256': 'a' * 64},
+                 'provenance/title-compile.json': {'bytes': 20, 'sha256': 'b' * 64},
+                 'PPSA99995/eboot.bin': {'bytes': 30, 'sha256': 'c' * 64, 'mode': 0o755},
+                 child: {'sha256': 'd' * 64}}
+        value = {'schema': 'pw-windows-child-title/2', 'project': {'commit': m.COMPILED, 'tree': m.TREE},
+                 'build_id': m.COMPILED, 'console_execution_verified': False, 'embedded_child': {},
+                 'service_manifest_sha256': 'a' * 64, 'title_compile_receipt': files['provenance/title-compile.json'],
+                 'files': {'eboot.bin': files['PPSA99995/eboot.bin']}, 'fixture_child_sha256': 'd' * 64}
+        self.assertEqual(m.selected_title(value, files)['build_id'], m.COMPILED)
+        for name in files:
+            bad = copy.deepcopy(files)
+            bad[name]['sha256'] = '0' * 64
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                m.selected_title(value, bad)
+        for key, replacement in [('schema', 'wrong'), ('build_id', m.CANDIDATE),
+                                 ('console_execution_verified', True)]:
+            bad = copy.deepcopy(value)
+            bad[key] = replacement
+            with self.assertRaises(ValueError):
+                m.selected_title(bad, files)
+
 if __name__ == '__main__':
     unittest.main()

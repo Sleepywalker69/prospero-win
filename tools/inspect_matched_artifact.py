@@ -207,6 +207,27 @@ def selected_native(value, values):
     require(len(canonical(result)) <= 192 << 10, 'selected native log exceeds bound')
     return result
 
+def selected_title(value, values):
+    require(value.get('schema') == 'pw-windows-child-title/2' and
+            value['project']['commit'] == COMPILED and value['project']['tree'] == TREE and
+            value['build_id'] == COMPILED and value['console_execution_verified'] is False,
+            'title source/schema/claims differ')
+    require(value['service_manifest_sha256'] == values[NATIVE]['sha256'], 'title child manifest differs')
+    require(value['title_compile_receipt'] ==
+            {k: values['provenance/title-compile.json'][k] for k in ('bytes', 'sha256')},
+            'title compiler receipt differs')
+    require(value['files']['eboot.bin'] ==
+            {k: values['PPSA99995/eboot.bin'][k] for k in ('bytes', 'sha256', 'mode')},
+            'title eboot identity differs')
+    child = 'console/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe'
+    require(value['fixture_child_sha256'] == values[child]['sha256'], 'title original fixture differs')
+    result = {k: value[k] for k in ('schema', 'project', 'build_id', 'embedded_child',
+                                  'service_manifest_sha256', 'title_compile_receipt',
+                                  'fixture_child_sha256', 'console_execution_verified')}
+    result['files'] = {'eboot.bin': value['files']['eboot.bin']}
+    require(len(canonical(result)) <= 64 << 10, 'selected title log exceeds bound')
+    return result
+
 def inspect(source, output):
     require(not output.exists() and not output.is_symlink(), 'evidence output exists')
     output.mkdir()
@@ -221,6 +242,7 @@ def inspect(source, output):
             package['run_url'] == 'https://github.com/Sleepywalker69/prospero-win/actions/runs/' + str(RUN) and
             str(package['run_attempt']) == '1', 'package source/run identity differs')
     native = selected_native(parsed[NATIVE], values)
+    title = selected_title(parsed['provenance/title.json'], values)
     deployment, included, omitted = deployment_inventory(values)
     for name, data in contents.items():
         target = output / 'selected' / name
@@ -241,7 +263,7 @@ def inspect(source, output):
     (output / 'EVIDENCE-RECEIPT.json').write_bytes(canonical(receipt))
     # Every line begins with a fixed prefix. JSON escapes all embedded line breaks.
     # No environment, arbitrary build logs, registry content or binaries are printed.
-    for kind, data in [('receipt', receipt), ('native', native), ('deployment', deployment)]:
+    for kind, data in [('receipt', receipt), ('native', native), ('title', title), ('deployment', deployment)]:
         encoded = canonical(data).decode().rstrip('\n')
         print('PW_MATCHED_EVIDENCE ' + json.dumps({'kind': kind, 'data': strict_json(encoded.encode())},
                                                 ensure_ascii=True, separators=(',', ':')))
