@@ -2,6 +2,7 @@
 name: Original Chromium IPC Windows reference
 on:
   workflow_dispatch:
+  workflow_call:
   pull_request:
     paths:
       - .gitattributes
@@ -12,6 +13,9 @@ on:
       - tests/chromium_ipc_mock/windows.h
       - tools/build_windows_chromium_ipc.ps1
       - tools/check_windows_chromium_ipc.py
+      - tools/windows_chromium_ipc_contract.py
+      - tools/windows_chromium_ipc_package.py
+      - tools/join_windows_chromium_ipc.py
       - .github/workflows/windows-chromium-ipc-reference.yml
 permissions:
   contents: read

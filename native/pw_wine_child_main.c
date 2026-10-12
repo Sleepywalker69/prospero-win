@@ -155,7 +155,7 @@ static void socket_failure_sink(void *context,const PwWineFixtureSocketResult *f
 static int directory(void *unused,const char *path)
 {
     struct stat st;(void)unused;
-    unsigned which=!strcmp(path,PW_WINE_CHILD_PREFIX)||!strcmp(path,PW_WINE_CHILD_BATTLENET_PREFIX)||!strcmp(path,PW_WINE_CHILD_USER_PREFIX)||!strcmp(path,PW_WINE_CHILD_NET_PREFIX)?
+    unsigned which=!strcmp(path,PW_WINE_CHILD_PREFIX)||!strcmp(path,PW_WINE_CHILD_BATTLENET_PREFIX)||!strcmp(path,PW_WINE_CHILD_USER_PREFIX)||!strcmp(path,PW_WINE_CHILD_NET_PREFIX)||!strcmp(path,PW_WINE_IPC_PREFIX)?
                    PW_WC_DIRECTORY_PREFIX:PW_WC_DIRECTORY_CWD;
     if(boot_budget())return -1;
     errno=0;int rc=stat(path,&st),error=rc<0?errno:0;
@@ -369,7 +369,9 @@ static int run_child(void)
     case PW_WC_PROFILE_BATTLENET:lifetime=PW_WC_BATTLENET_LIFETIME_MS;break;
     case PW_WC_PROFILE_USER:lifetime=PW_WC_USER_LIFETIME_MS;break;
     case PW_WC_PROFILE_NET:lifetime=PW_WC_NET_LIFETIME_MS;break;
-    default:pw_wine_child_wire_close(&fd,&wire_result);return 13;
+    default:
+        if(!pw_wine_ipc_profile(session->profile)){pw_wine_child_wire_close(&fd,&wire_result);return 13;}
+        lifetime=PW_WC_LIFETIME_MS;break;
     }
     child_io.total_end=begun+lifetime;
     child_cleanup_end=child_io.total_end-child_io.stage_end<PW_WINE_CHILD_CLEANUP_MS?

@@ -18,3 +18,10 @@ tests/fixtures/windows_chromium_ipc_contract.h text eol=lf
 tools/build_windows_chromium_ipc.ps1 text eol=lf
 tools/check_windows_chromium_ipc.py text eol=lf
 .github/workflows/windows-chromium-ipc-reference.yml text eol=lf
+
+# IPC admission and optional cohort wiring are byte-bound across platforms.
+tools/windows_chromium_ipc_contract.py text eol=lf
+tools/windows_chromium_ipc_package.py text eol=lf
+tools/join_windows_chromium_ipc.py text eol=lf
+native/pw_wine_ipc_profile.h text eol=lf
+.github/workflows/windows-child-fixture.yml text eol=lf

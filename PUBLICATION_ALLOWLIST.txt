@@ -1083,3 +1083,22 @@ tests/test_windows_chromium_ipc_fixture.c
 tests/test_windows_chromium_ipc_reference.py
 tools/build_windows_chromium_ipc.ps1
 tools/check_windows_chromium_ipc.py
+
+# Exact opt-in original IPC profile, evidence and admission controls.
+docs/windows-chromium-ipc-native-admission.md
+docs/windows-chromium-ipc-package.md
+native/pw_wine_ipc_profile.h
+tests/test_windows_chromium_ipc_package.py
+tests/test_wine_ipc_bootstrap.c
+tests/test_wine_ipc_disabled.c
+tests/test_wine_ipc_installer.c
+tests/test_wine_ipc_main.c
+tests/test_wine_ipc_owner.c
+tests/test_wine_ipc_owner_disabled.c
+tests/test_wine_ipc_title.c
+tests/test_wine_ipc_title_build.py
+tests/test_wine_ipc_wire.c
+tests/wine_ipc_admission_child.c
+tools/join_windows_chromium_ipc.py
+tools/windows_chromium_ipc_contract.py
+tools/windows_chromium_ipc_package.py

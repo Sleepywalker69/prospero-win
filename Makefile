@@ -269,6 +269,27 @@ $(BUILD)/test_wine_net_owner: tests/test_pw_wine_fixture_owner.c native/pw_wine_
 $(BUILD)/test_wine_net_wire: tests/test_pw_wine_child_wire.c native/pw_wine_child_wire.c
 $(BUILD)/test_wine_net_bootstrap: tests/test_pw_wine_child_bootstrap.c
 $(BUILD)/test_wine_net_main: native/pw_wine_child_main.c
+
+# Opt-in exact IPC profiles. Native callbacks are exercised only through mocks.
+PW_WINE_IPC_TITLE_FLAGS := $(PW_WINE_NET_TEST_FLAGS) -DPW_WINE_IPC_PROFILE_ENABLED=1
+PW_WINE_IPC_FLOW_FLAGS := $(PW_WINE_NET_CHILD_FLAGS) -DPW_IPC_COMPOSED -DPW_WINE_IPC_PROFILE_ENABLED=1
+$(eval $(call test_rule,test_wine_ipc_admission_flow,tests/test_wine_ipc_owner.c tests/wine_ipc_admission_child.c native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_IPC_FLOW_FLAGS)))
+$(BUILD)/test_wine_ipc_admission_flow: tests/test_pw_wine_fixture_owner.c tests/test_wine_ipc_bootstrap.c tests/test_pw_wine_child_bootstrap.c native/pw_wine_fixture_owner.c native/pw_wine_child_wire.c native/pw_wine_ipc_profile.h wine/ps5/pw_wine_fixture_provider.c wine/ps5/pw_wine_creation.h
+$(eval $(call test_rule,test_wine_ipc_installer,tests/test_wine_ipc_installer.c,-Iwine/ps5))
+$(BUILD)/test_wine_ipc_installer: tests/test_pw_wine_creation_install.c wine/ps5/pw_wine_fixture_provider.c wine/ps5/pw_wine_creation.h
+$(eval $(call test_rule,test_wine_ipc_title,tests/test_wine_ipc_title.c,$(PW_WINE_IPC_TITLE_FLAGS)))
+$(eval $(call test_rule,test_wine_ipc_disabled,tests/test_wine_ipc_disabled.c,$(PW_WINE_NET_TEST_FLAGS)))
+$(eval $(call test_rule,test_wine_ipc_owner_disabled,tests/test_wine_ipc_owner_disabled.c,$(PW_WINE_NET_TEST_FLAGS)))
+$(eval $(call test_rule,test_wine_ipc_owner,tests/test_wine_ipc_owner.c,$(PW_WINE_IPC_TITLE_FLAGS)))
+$(eval $(call test_rule,test_wine_ipc_wire,tests/test_wine_ipc_wire.c native/pw_native_child_protocol.c,$(PW_WINE_NET_CHILD_FLAGS)))
+$(eval $(call test_rule,test_wine_ipc_bootstrap,tests/test_wine_ipc_bootstrap.c native/pw_native_child_protocol.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_NET_CHILD_FLAGS)))
+$(BUILD)/test_wine_ipc_title $(BUILD)/test_wine_ipc_disabled: tests/test_pw_wine_child_title.c native/pw_wine_child_title.c native/pw_wine_child_title.h
+$(BUILD)/test_wine_ipc_owner $(BUILD)/test_wine_ipc_owner_disabled: tests/test_pw_wine_fixture_owner.c native/pw_wine_fixture_owner.c native/pw_wine_fixture_owner.h
+$(BUILD)/test_wine_ipc_wire: tests/test_pw_wine_child_wire.c native/pw_wine_child_wire.c
+$(eval $(call test_rule,test_wine_ipc_main,tests/test_wine_ipc_main.c native/pw_native_child_protocol.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_NET_CHILD_FLAGS)))
+$(BUILD)/test_wine_ipc_main: native/pw_wine_child_main.c
+$(BUILD)/test_wine_ipc_bootstrap: tests/test_pw_wine_child_bootstrap.c wine/ps5/pw_wine_fixture_provider.c wine/ps5/pw_wine_creation.h
+$(BUILD)/test_wine_ipc_title $(BUILD)/test_wine_ipc_disabled $(BUILD)/test_wine_ipc_owner $(BUILD)/test_wine_ipc_owner_disabled $(BUILD)/test_wine_ipc_wire $(BUILD)/test_wine_ipc_bootstrap $(BUILD)/test_wine_ipc_main: native/pw_wine_ipc_profile.h native/pw_wine_child_wire.h native/pw_wine_child_bootstrap.h
 $(BUILD)/test_wine_net_title $(BUILD)/test_wine_net_disabled $(BUILD)/test_wine_net_installer $(BUILD)/test_wine_net_owner $(BUILD)/test_wine_net_wire $(BUILD)/test_wine_net_bootstrap $(BUILD)/test_wine_net_main: wine/ps5/pw_wine_creation.h wine/ps5/pw_wine_fixture_provider.h wine/ps5/pw_wine_fixture_socket.h wine/ps5/pw_wine_threads.h tests/wine_child_fixture/wine-child-build.h tests/wine_child_fixture/sys/socket.h wine/ps5/pw_wine_prx.h
 
 PW_NATIVE_PEER_TEST_FLAGS := -Itests/native_peer_fixture -MMD -MP -MF $(BUILD)/native-peer-probe-test.d
@@ -329,7 +350,11 @@ $(eval $(call test_rule,test_pw_diagnostics,tests/test_pw_diagnostics.c native/p
 $(eval $(call test_rule,test_pw_qpc_clock,tests/test_pw_qpc_clock.c,))
 $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
 
-TESTS := test_windows_chromium_ipc_contract test_windows_chromium_ipc_fixture test_wine_net_title test_wine_net_disabled test_wine_net_installer test_wine_net_owner test_wine_net_wire test_wine_net_bootstrap test_wine_net_main test_wine_user_title test_wine_user_disabled test_wine_user_installer test_wine_user_owner test_wine_user_wire test_wine_user_bootstrap test_wine_user_main test_pw_wine_creation_install test_wine_child_data test_wine_child_data_owner test_wine_child_data_flow test_bootstrap_diagnostic_flow test_pw_wine_child_title test_pw_wine_fixture_owner test_pw_wine_child_wire test_pw_wine_child_bootstrap test_pw_wine_child_main test_pw_wine_fixture_provider test_pw_wine_fixture_socket test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
+# Changes to the shared fixed-profile table must invalidate every source-coupled
+# owner/title/wire/bootstrap/main regression, including the older controls.
+$(BUILD)/test_pw_wine_fixture_owner $(BUILD)/test_pw_wine_child_title $(BUILD)/test_pw_wine_child_wire $(BUILD)/test_pw_wine_child_bootstrap $(BUILD)/test_pw_wine_child_main $(BUILD)/test_bootstrap_diagnostic_flow $(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_wine_child_data_flow $(BUILD)/test_wine_user_title $(BUILD)/test_wine_user_disabled $(BUILD)/test_wine_user_owner $(BUILD)/test_wine_user_wire $(BUILD)/test_wine_user_bootstrap $(BUILD)/test_wine_user_main $(BUILD)/test_wine_net_title $(BUILD)/test_wine_net_disabled $(BUILD)/test_wine_net_owner $(BUILD)/test_wine_net_wire $(BUILD)/test_wine_net_bootstrap $(BUILD)/test_wine_net_main: native/pw_wine_ipc_profile.h
+
+TESTS := test_wine_ipc_admission_flow test_wine_ipc_installer test_wine_ipc_main test_wine_ipc_owner_disabled test_wine_ipc_title test_wine_ipc_disabled test_wine_ipc_owner test_wine_ipc_wire test_wine_ipc_bootstrap test_windows_chromium_ipc_contract test_windows_chromium_ipc_fixture test_wine_net_title test_wine_net_disabled test_wine_net_installer test_wine_net_owner test_wine_net_wire test_wine_net_bootstrap test_wine_net_main test_wine_user_title test_wine_user_disabled test_wine_user_installer test_wine_user_owner test_wine_user_wire test_wine_user_bootstrap test_wine_user_main test_pw_wine_creation_install test_wine_child_data test_wine_child_data_owner test_wine_child_data_flow test_bootstrap_diagnostic_flow test_pw_wine_child_title test_pw_wine_fixture_owner test_pw_wine_child_wire test_pw_wine_child_bootstrap test_pw_wine_child_main test_pw_wine_fixture_provider test_pw_wine_fixture_socket test_windows_child_fixture test_d3d9_object_getter test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog \
 	test_pw_present test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch \
 	test_pw_script_input test_pw_game_profile test_pw_controller_settings test_pw_wine_controller_settings test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
 	test_d3d9_bridge_wire test_vk_replay test_d3d9_objects test_d3d9_program_query test_d3d9_program_wire test_d3d9_factory_wire test_d3d9_resource_wire \
@@ -394,6 +419,8 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_windows_child_user_contract.py
 	python3 tests/test_windows_child_network_contract.py
 	python3 tests/test_windows_chromium_ipc_reference.py
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/test_windows_chromium_ipc_package.py
+	PYTHONDONTWRITEBYTECODE=1 python3 tests/test_wine_ipc_title_build.py
 	python3 tests/test_wine_user_title_build.py
 	python3 tests/test_wine_network_title_build.py
 	python3 tests/test_windows_child_user_package.py
