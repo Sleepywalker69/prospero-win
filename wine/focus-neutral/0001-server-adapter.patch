@@ -1,0 +1,1075 @@
+diff --git a/server/pw_focus_adapter.h b/server/pw_focus_adapter.h
+new file mode 100644
+index 0000000..3c86055
+--- /dev/null
++++ b/server/pw_focus_adapter.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_FOCUS_ADAPTER_H
++#define PW_FOCUS_ADAPTER_H
++#include "pw_focus_core.h"
++struct pw_focus_tag { PwFocusTicket ticket; unsigned int active, hook_error; };
++struct pw_focus_timer_tag { uint64_t cookie, epoch; uint32_t slot, active; };
++extern PwFocusCore pw_focus_server_core;
++extern struct window *pw_focus_pin_window(struct process *, struct desktop *, user_handle_t, uint64_t *);
++extern int pw_focus_window_live(void *, void *, void *, void *, uint64_t, uint64_t);
++extern void pw_focus_window_detached(struct window *);
++extern int pw_focus_queue_quiesce(uint32_t, uint64_t, uint64_t);
++extern void pw_focus_queue_abandon(uint32_t, uint64_t, uint64_t);
++extern int pw_focus_queue_keyboard(const PwFocusTicket *, struct desktop *, user_handle_t, const union hw_input *);
++extern void pw_focus_stop_key_repeat(struct desktop *);
++extern int pw_focus_queue_begin(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, unsigned int, PwFocusTicket *);
++extern int pw_focus_queue_poll(uint32_t, uint64_t, uint64_t, PwFocusReceipt *, PwFocusPhase *);
++extern int pw_focus_queue_ack(const PwFocusTicket *);
++extern int pw_focus_queue_settle(uint32_t, uint64_t, uint64_t);
++extern void pw_focus_queue_watchdog(void);
++#endif
+diff --git a/server/pw_focus_core.c b/server/pw_focus_core.c
+new file mode 100644
+index 0000000..0c5ab55
+--- /dev/null
++++ b/server/pw_focus_core.c
+@@ -0,0 +1,223 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "pw_focus_core.h"
++#include <limits.h>
++#include <string.h>
++#define LEASE 6000u
++static int same(const PwFocusIdentity *a,const PwFocusIdentity *b)
++{return a->session==b->session&&a->generation==b->generation&&a->native_pid==b->native_pid&&a->wine_pid==b->wine_pid&&a->domain==b->domain;}
++static int identity_ok(const PwFocusIdentity *i)
++{return i&&i->session&&i->native_pid&&i->wine_pid&&((i->domain==PW_FOCUS_ROOT&&!i->generation)||(i->domain==PW_FOCUS_CHILD&&i->generation));}
++static PwFocusContext *find(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch)
++{if(!c||!c->initialized||n>=PW_FOCUS_CONTEXTS)return NULL;PwFocusContext *x=&c->contexts[n];return cookie&&x->cookie==cookie&&epoch==x->epoch?x:NULL;}
++static void unpin_binding(PwFocusCore *c,PwFocusContext *x)
++{
++    if(x->window)c->callbacks.unpin(c->callbacks.context,x->window);
++    if(x->desktop)c->callbacks.unpin(c->callbacks.context,x->desktop);
++    if(x->process)c->callbacks.unpin(c->callbacks.context,x->process);
++    x->window=x->desktop=x->process=NULL;
++}
++static void drop(PwFocusCore *c,PwFocusContext *x)
++{if(x->refs&&!--x->refs)unpin_binding(c,x);}
++static void timer_off(PwFocusCore *c,PwFocusContext *x)
++{if(x->timer){x->timer=0;x->timer_parent=0;x->timer_key=0;drop(c,x);}}
++static void poison(PwFocusCore *c,PwFocusContext *x,unsigned why)
++{if(!x->poison)x->poison=why?why:1;x->phase=PW_FOCUS_POISONED;timer_off(c,x);}
++static void advance(PwFocusContext *x)
++{if((x->phase==PW_FOCUS_DRAINING||x->phase==PW_FOCUS_RELEASING)&&!x->outstanding&&!x->normal_result)x->phase=PW_FOCUS_RELEASE_READY;}
++static int permit_ok(PwFocusCore *c,PwFocusContext *x,uint64_t now)
++{
++    PwFocusPermit p={0};
++    return now>=x->last_clock&&now<x->lease_deadline&&x->process&&
++        !c->callbacks.permit(c->callbacks.context,x->process,&p)&&
++        p.process==x->process&&same(&p.identity,&x->identity)&&p.epoch==x->epoch&&
++        p.frame_ready==1&&p.expires>now&&
++        (p.identity.domain==PW_FOCUS_ROOT||p.joined==1)&&
++        c->callbacks.window_live(c->callbacks.context,x->process,x->desktop,x->window,x->handle,x->user_generation);
++}
++static int check(PwFocusCore *c,PwFocusContext *x,uint64_t now)
++{
++    if(!x||!x->registry||x->poison||x->phase==PW_FOCUS_CLOSED)return PW_FOCUS_REFUSED;
++    if(!permit_ok(c,x,now)){poison(c,x,1);return PW_FOCUS_REFUSED;}
++    x->last_clock=now;return 0;
++}
++int pw_focus_init(PwFocusCore *c,const PwFocusCallbacks *b)
++{
++    if(!c||c->initialized||!b||!b->permit||!b->pin||!b->unpin||!b->window_live)return PW_FOCUS_REFUSED;
++    memset(c,0,sizeof(*c));c->callbacks=*b;c->next_cookie=1;c->initialized=1;return 0;
++}
++int pw_focus_open(PwFocusCore *c,const PwFocusIdentity *id,uint64_t epoch,const PwFocusServerFacts *actual,void *desktop,void *window,uint64_t handle,uint64_t gen,uint64_t now,uint32_t *slot,uint64_t *cookie)
++{
++    PwFocusPermit p={0};PwFocusContext *x=NULL;uint32_t n;
++    void *process=actual?actual->process:NULL;
++    if(!c||!c->initialized||!identity_ok(id)||!epoch||!process||!desktop||!window||process==desktop||process==window||desktop==window||!handle||!gen||!slot||!cookie||now>UINT64_MAX-LEASE||!c->next_cookie||c->next_cookie==UINT64_MAX)return PW_FOCUS_REFUSED;
++    if(id->native_pid!=actual->native_pid||id->wine_pid!=actual->wine_pid||
++       (id->domain==PW_FOCUS_CHILD&&(id->generation!=actual->fixture_generation||actual->fixture_joined!=1))||
++       (id->domain==PW_FOCUS_ROOT&&actual->fixture_generation))return PW_FOCUS_BAD_ID;
++    if(c->callbacks.permit(c->callbacks.context,process,&p)||p.process!=process||!same(id,&p.identity)||p.epoch!=epoch||p.frame_ready!=1||p.expires<=now||(id->domain==PW_FOCUS_CHILD&&p.joined!=1))return PW_FOCUS_BAD_ID;
++    /* A trusted permit cannot bypass an unsettled server epoch. */
++    for(n=0;n<PW_FOCUS_CONTEXTS;n++)
++        if(c->contexts[n].cookie&&c->contexts[n].phase!=PW_FOCUS_CLOSED)return PW_FOCUS_REFUSED;
++    for(n=0;n<PW_FOCUS_CONTEXTS;n++){
++        PwFocusContext *old=&c->contexts[n];
++        if(old->cookie&&old->identity.session==id->session&&old->identity.domain==id->domain&&old->identity.generation==id->generation){
++            if(!same(&old->identity,id))return PW_FOCUS_BAD_ID;
++            if(old->phase!=PW_FOCUS_CLOSED||old->refs||epoch<=old->epoch)return PW_FOCUS_REFUSED;
++            x=old;break;
++        }
++    }
++    if(!x)for(n=0;n<PW_FOCUS_CONTEXTS;n++)if(!c->contexts[n].cookie){x=&c->contexts[n];break;}
++    if(!x)return PW_FOCUS_LIMIT;
++    void *pp=c->callbacks.pin(c->callbacks.context,process);
++    void *dd=pp?c->callbacks.pin(c->callbacks.context,desktop):NULL;
++    void *ww=dd?c->callbacks.pin(c->callbacks.context,window):NULL;
++    if(pp!=process||dd!=desktop||ww!=window||!c->callbacks.window_live(c->callbacks.context,process,desktop,window,handle,gen)){
++        if(ww)c->callbacks.unpin(c->callbacks.context,ww);
++        if(dd)c->callbacks.unpin(c->callbacks.context,dd);
++        if(pp)c->callbacks.unpin(c->callbacks.context,pp);
++        return PW_FOCUS_REFUSED;
++    }
++    memset(x,0,sizeof(*x));x->identity=*id;x->epoch=epoch;x->cookie=c->next_cookie++;
++    x->process=pp;x->desktop=dd;x->window=ww;x->handle=handle;x->user_generation=gen;
++    x->last_clock=now;x->lease_deadline=now+LEASE;x->registry=x->refs=1;x->phase=PW_FOCUS_ACTIVE;
++    *slot=n;*cookie=x->cookie;return 0;
++}
++int pw_focus_begin(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch,uint64_t seq,uint32_t key,unsigned down,unsigned repeat,uint64_t now,PwFocusTicket *ticket)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);unsigned free_slot=PW_FOCUS_OPS,used=0;
++    if(!ticket||!key||key>PW_FOCUS_KEYS||(key==PW_FOCUS_KEYS&&(down||repeat))||down>1||repeat>1||check(c,x,now))return PW_FOCUS_REFUSED;
++    if(repeat){if(x->phase!=PW_FOCUS_ACTIVE||!x->timer||!down||key>=PW_FOCUS_KEYS||key!=x->timer_key||!x->timer_parent||seq)return PW_FOCUS_REFUSED;}
++    else{
++        if(x->normal_result)return PW_FOCUS_BUSY;
++        for(unsigned i=0;i<PW_FOCUS_OPS;i++)if(x->operations[i].used&&!x->operations[i].receipt.repeat)return PW_FOCUS_BUSY;
++        if(x->last_client_seq==UINT64_MAX||seq!=x->last_client_seq+1){poison(c,x,2);return PW_FOCUS_BAD_ID;}
++        if(x->phase==PW_FOCUS_RELEASE_READY){if(down||key>=PW_FOCUS_KEYS||!x->held[key])return PW_FOCUS_REFUSED;}
++        else if(x->phase!=PW_FOCUS_ACTIVE)return PW_FOCUS_REFUSED;
++    }
++    for(unsigned i=0;i<PW_FOCUS_OPS;i++){if(x->operations[i].used)used++;else if(free_slot==PW_FOCUS_OPS)free_slot=i;}
++    if(x->issued==UINT64_MAX||free_slot==PW_FOCUS_OPS||(repeat&&used>=PW_FOCUS_OPS-1)){
++        poison(c,x,3);return PW_FOCUS_LIMIT;
++    }
++    PwFocusOperation *o=&x->operations[free_slot];memset(o,0,sizeof(*o));o->used=o->pending=1;
++    o->receipt.ticket=(PwFocusTicket){cookie,epoch,++x->issued,n,free_slot};
++    o->receipt.client_seq=seq;o->receipt.parent_seq=repeat?x->timer_parent:0;o->receipt.key=key;o->receipt.down=down;o->receipt.repeat=repeat;
++    x->outstanding++;x->refs++;
++    if(!repeat)x->last_client_seq=seq;
++    if(x->phase==PW_FOCUS_RELEASE_READY)x->phase=PW_FOCUS_RELEASING;
++    *ticket=o->receipt.ticket;return 0;
++}
++static PwFocusOperation *operation(PwFocusCore *c,const PwFocusTicket *t,PwFocusContext **xp)
++{
++    if(!t||t->operation>=PW_FOCUS_OPS)return NULL;
++    PwFocusContext *x=find(c,t->slot,t->cookie,t->epoch);if(!x)return NULL;
++    PwFocusOperation *o=&x->operations[t->operation];
++    if(!o->used||o->receipt.ticket.seq!=t->seq)return NULL;
++    *xp=x;return o;
++}
++int pw_focus_complete(PwFocusCore *c,const PwFocusTicket *t,PwFocusOutcome outcome,uint32_t error,uint64_t serial)
++{
++    PwFocusContext *x;PwFocusOperation *o=operation(c,t,&x);
++    if(!o||!o->pending)return PW_FOCUS_BAD_ID;
++    if(outcome<PW_FOCUS_CLEAN||outcome>PW_FOCUS_MOTION_NO_CHANGE||((outcome==PW_FOCUS_CLEAN||outcome==PW_FOCUS_MOTION_NO_CHANGE)&&error)||(outcome==PW_FOCUS_MOTION_NO_CHANGE&&(o->receipt.key!=PW_FOCUS_KEYS||serial))||(outcome==PW_FOCUS_SUPPRESSED&&error)||(outcome==PW_FOCUS_APPLIED_EXCEPTION&&!error))return PW_FOCUS_REFUSED;
++    o->pending=0;x->outstanding--;o->receipt.outcome=outcome;o->receipt.hook_error=error;o->receipt.desktop_serial=serial;
++    if((outcome==PW_FOCUS_CLEAN||outcome==PW_FOCUS_APPLIED_EXCEPTION)&&o->receipt.key<PW_FOCUS_KEYS)x->held[o->receipt.key]=(unsigned char)o->receipt.down;
++    if(outcome!=PW_FOCUS_CLEAN&&outcome!=PW_FOCUS_MOTION_NO_CHANGE)poison(c,x,4);
++    if(o->receipt.repeat||!x->registry){o->used=0;advance(x);drop(c,x);return 0;}
++    if(x->normal_result){poison(c,x,5);return PW_FOCUS_REFUSED;}
++    x->normal_result=t->operation+1;advance(x);return 0;
++}
++int pw_focus_poll(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch,uint64_t now,PwFocusReceipt *out,PwFocusPhase *phase)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);
++    if(!x||!out||!phase||!x->registry)return PW_FOCUS_BAD_ID;
++    if(!x->poison&&check(c,x,now)){} /* poison is observable; never a success fence */
++    if(!x->poison&&now<=UINT64_MAX-LEASE)x->lease_deadline=now+LEASE;
++    *phase=(PwFocusPhase)x->phase;memset(out,0,sizeof(*out));
++    if(x->normal_result)*out=x->operations[x->normal_result-1].receipt;
++    return 0;
++}
++int pw_focus_ack(PwFocusCore *c,const PwFocusTicket *t,uint64_t now)
++{
++    PwFocusContext *x;PwFocusOperation *o=operation(c,t,&x);
++    if(!o||o->pending||o->receipt.repeat||x->normal_result!=t->operation+1)return PW_FOCUS_BAD_ID;
++    if(!x->poison&&check(c,x,now)){} /* factual result still consumable after failure */
++    o->used=0;x->normal_result=0;advance(x);drop(c,x);return 0;
++}
++int pw_focus_quiesce(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch,uint64_t now)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);if(check(c,x,now)||x->phase!=PW_FOCUS_ACTIVE)return PW_FOCUS_REFUSED;
++    x->phase=PW_FOCUS_DRAINING;timer_off(c,x);advance(x);return 0;
++}
++int pw_focus_settle(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch,uint64_t now)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);if(check(c,x,now)||x->phase!=PW_FOCUS_RELEASE_READY||x->outstanding||x->normal_result||x->timer)return PW_FOCUS_REFUSED;
++    for(unsigned i=0;i<PW_FOCUS_KEYS;i++)if(x->held[i])return PW_FOCUS_REFUSED;
++    x->phase=PW_FOCUS_SETTLED;return 0;
++}
++int pw_focus_close(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);
++    if(!x||x->phase!=PW_FOCUS_SETTLED||x->refs!=1||!x->registry)return PW_FOCUS_REFUSED;
++    x->phase=PW_FOCUS_CLOSED;x->registry=0;drop(c,x);return 0;
++}
++int pw_focus_timer(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch,unsigned attach,const PwFocusTicket *parent,uint64_t now)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);if(!x||attach>1)return PW_FOCUS_BAD_ID;
++    if(!attach){timer_off(c,x);return 0;}
++    if(check(c,x,now)||x->phase!=PW_FOCUS_ACTIVE||x->timer)return PW_FOCUS_REFUSED;
++    PwFocusContext *owner;PwFocusOperation *o=operation(c,parent,&owner);
++    if(!o||owner!=x||!o->receipt.down||o->receipt.repeat||o->receipt.key>=PW_FOCUS_KEYS)return PW_FOCUS_BAD_ID;
++    x->timer=1;x->timer_key=o->receipt.key;x->timer_parent=o->receipt.ticket.seq;x->refs++;return 0;
++}
++int pw_focus_abandon(PwFocusCore *c,uint32_t n,uint64_t cookie,uint64_t epoch,unsigned reason)
++{
++    PwFocusContext *x=find(c,n,cookie,epoch);if(!x||!x->registry)return PW_FOCUS_BAD_ID;
++    poison(c,x,reason);x->registry=0;
++    if(x->normal_result){x->operations[x->normal_result-1].used=0;x->normal_result=0;drop(c,x);}
++    drop(c,x);return 0;
++}
++int pw_focus_watchdog(PwFocusCore *c,uint32_t n,uint64_t now)
++{
++    if(!c||!c->initialized||n>=PW_FOCUS_CONTEXTS)return PW_FOCUS_REFUSED;
++    PwFocusContext *x=&c->contexts[n];
++    if(!x->registry)return 0;
++    if(x->poison||!permit_ok(c,x,now))return pw_focus_abandon(c,n,x->cookie,x->epoch,6);
++    x->last_clock=now;return 0;
++}
++int pw_focus_invariants(const PwFocusCore *c)
++{
++    if(!c||!c->initialized)return 0;
++    for(unsigned n=0;n<PW_FOCUS_CONTEXTS;n++){
++        const PwFocusContext *x=&c->contexts[n];unsigned used=0,pending=0,normal=0;
++        for(unsigned i=0;i<PW_FOCUS_OPS;i++)if(x->operations[i].used){used++;pending+=x->operations[i].pending;
++            if(!x->operations[i].receipt.repeat)normal++;
++        }
++        if(x->refs!=x->registry+x->timer+used||x->outstanding!=pending||normal>1)return 0;
++        if(x->refs&&(!x->process||!x->desktop||!x->window))return 0;
++        if(!x->refs&&(x->process||x->desktop||x->window))return 0;
++        if(x->normal_result){unsigned i=x->normal_result-1;if(i>=PW_FOCUS_OPS||!x->operations[i].used||x->operations[i].pending||x->operations[i].receipt.repeat)return 0;}
++        if(x->timer&&(x->phase!=PW_FOCUS_ACTIVE||x->poison||!x->timer_parent||!x->timer_key))return 0;
++        if(x->phase==PW_FOCUS_SETTLED||x->phase==PW_FOCUS_CLOSED){if(used||x->timer||x->poison)return 0;for(unsigned i=0;i<PW_FOCUS_KEYS;i++)if(x->held[i])return 0;}
++        if(x->phase==PW_FOCUS_RELEASE_READY&&(used||x->timer||x->poison))return 0;
++    }
++    return 1;
++}
++static unsigned eligible(const PwFocusSources *s,unsigned key)
++{unsigned down=0;for(unsigned n=0;n<PW_FOCUS_SOURCES;n++)down|=s->connected[n]&&s->physical[n][key]&&!s->blocked[n][key];return down;}
++void pw_focus_sources_block(PwFocusSources *s)
++{if(s)for(unsigned n=0;n<PW_FOCUS_SOURCES;n++)for(unsigned k=0;k<PW_FOCUS_KEYS;k++)s->blocked[n][k]=s->physical[n][k];}
++int pw_focus_sources_attach(PwFocusSources *s,unsigned n,uint64_t generation)
++{
++    if(!s||n>=PW_FOCUS_SOURCES||!generation||s->connected[n]||generation<=s->generation[n])return -1;
++    s->generation[n]=generation;s->connected[n]=1;
++    for(unsigned k=0;k<PW_FOCUS_KEYS;k++)if(s->physical[n][k])s->blocked[n][k]=1;
++    return 0;
++}
++int pw_focus_sources_observe(PwFocusSources *s,unsigned n,uint64_t generation,unsigned key,unsigned down,unsigned *merged)
++{
++    if(!s||!merged||n>=PW_FOCUS_SOURCES||!s->connected[n]||generation!=s->generation[n]||!key||key>=PW_FOCUS_KEYS||down>1)return -1;
++    unsigned before=eligible(s,key);s->physical[n][key]=(unsigned char)down;
++    if(!down)s->blocked[n][key]=0;
++    *merged=eligible(s,key);return before!=*merged;
++}
++int pw_focus_sources_disconnect(PwFocusSources *s,unsigned n,uint64_t generation)
++{if(!s||n>=PW_FOCUS_SOURCES||!s->connected[n]||generation!=s->generation[n])return -1;s->connected[n]=0;for(unsigned k=0;k<PW_FOCUS_KEYS;k++)if(s->physical[n][k])s->blocked[n][k]=1;return 0;}
+diff --git a/server/pw_focus_core.h b/server/pw_focus_core.h
+new file mode 100644
+index 0000000..22141f1
+--- /dev/null
++++ b/server/pw_focus_core.h
+@@ -0,0 +1,123 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later
++ * Isolated server-core prototype. No native routing, protocol registration or
++ * target enablement. Caller MUST serialize every call in Wine's server domain. */
++#ifndef PW_FOCUS_CORE_H
++#define PW_FOCUS_CORE_H
++#include <stddef.h>
++#include <stdint.h>
++#define PW_FOCUS_CONTEXTS 17u
++#define PW_FOCUS_OPS 64u
++#define PW_FOCUS_KEYS 259u
++#define PW_FOCUS_SOURCES 8u
++
++typedef enum { PW_FOCUS_ROOT=1, PW_FOCUS_CHILD=2 } PwFocusDomain;
++typedef struct {
++    uint64_t session, generation;
++    uint32_t native_pid, wine_pid, domain;
++} PwFocusIdentity;
++typedef struct {
++    PwFocusIdentity identity;
++    uint64_t epoch, expires;
++    void *process;
++    unsigned joined, frame_ready;
++} PwFocusPermit;
++/* Populated by the server adapter from current->process, not request bytes. */
++typedef struct {
++    void *process;
++    uint64_t fixture_generation;
++    uint32_t native_pid, wine_pid, fixture_joined;
++} PwFocusServerFacts;
++typedef struct {
++    void *context;
++    /* Return a trusted native permit for the ACTUAL process, never echo request. */
++    int (*permit)(void *, void *process, PwFocusPermit *);
++    void *(*pin)(void *, void *object);
++    void (*unpin)(void *, void *object);
++    int (*window_live)(void *, void *process, void *desktop, void *window,
++                       uint64_t handle, uint64_t user_generation);
++} PwFocusCallbacks;
++typedef enum { PW_FOCUS_EMPTY, PW_FOCUS_ACTIVE, PW_FOCUS_DRAINING,
++    PW_FOCUS_RELEASE_READY, PW_FOCUS_RELEASING, PW_FOCUS_SETTLED,
++    PW_FOCUS_POISONED, PW_FOCUS_CLOSED } PwFocusPhase;
++typedef enum { PW_FOCUS_CLEAN=1, PW_FOCUS_SUPPRESSED=2,
++    PW_FOCUS_APPLIED_EXCEPTION=3, PW_FOCUS_FAILED=4, PW_FOCUS_MOTION_NO_CHANGE=5 } PwFocusOutcome;
++typedef enum { PW_FOCUS_OK=0, PW_FOCUS_REFUSED=-1, PW_FOCUS_BUSY=-2,
++    PW_FOCUS_BAD_ID=-3, PW_FOCUS_LIMIT=-4 } PwFocusResult;
++typedef struct {
++    uint64_t cookie, epoch, seq;
++    uint32_t slot, operation;
++} PwFocusTicket;
++typedef struct {
++    PwFocusTicket ticket;
++    uint64_t client_seq, desktop_serial, parent_seq;
++    uint32_t key, down, repeat, outcome, hook_error;
++} PwFocusReceipt;
++typedef struct {
++    PwFocusReceipt receipt;
++    unsigned used, pending;
++} PwFocusOperation;
++typedef struct {
++    PwFocusIdentity identity;
++    uint64_t epoch, cookie, handle, user_generation, last_client_seq, issued;
++    uint64_t last_clock, lease_deadline, timer_parent;
++    uint32_t timer_key;
++    void *process, *desktop, *window;
++    PwFocusOperation operations[PW_FOCUS_OPS];
++    unsigned char held[PW_FOCUS_KEYS];
++    uint32_t refs, outstanding, phase, poison, registry, timer, normal_result;
++} PwFocusContext;
++typedef struct {
++    unsigned initialized;
++    PwFocusCallbacks callbacks;
++    PwFocusContext contexts[PW_FOCUS_CONTEXTS];
++    uint64_t next_cookie;
++} PwFocusCore;
++/* Normal-result indexes use index+1; zero means absent. Motion key is 259 and
++ * never contributes to owned held state. Each receipt describes desktop state,
++ * not application delivery. Key normalization occurs in the real server adapter. */
++/* Zero-initialized server-lifetime storage; initialize exactly once. No reset
++ * or destruction while any callback, ticket or consumer can reference it. */
++int pw_focus_init(PwFocusCore *, const PwFocusCallbacks *);
++int pw_focus_open(PwFocusCore *, const PwFocusIdentity *, uint64_t epoch,
++                  const PwFocusServerFacts *actual, void *desktop, void *window,
++                  uint64_t handle, uint64_t user_generation, uint64_t now,
++                  uint32_t *slot, uint64_t *cookie);
++int pw_focus_begin(PwFocusCore *, uint32_t slot, uint64_t cookie, uint64_t epoch,
++                   uint64_t client_seq, uint32_t key, unsigned down,
++                   unsigned repeat, uint64_t now, PwFocusTicket *);
++int pw_focus_complete(PwFocusCore *, const PwFocusTicket *, PwFocusOutcome,
++                      uint32_t hook_error, uint64_t desktop_serial);
++int pw_focus_poll(PwFocusCore *, uint32_t slot, uint64_t cookie, uint64_t epoch,
++                  uint64_t now, PwFocusReceipt *, PwFocusPhase *);
++int pw_focus_ack(PwFocusCore *, const PwFocusTicket *, uint64_t now);
++int pw_focus_quiesce(PwFocusCore *, uint32_t slot, uint64_t cookie,
++                     uint64_t epoch, uint64_t now);
++int pw_focus_settle(PwFocusCore *, uint32_t slot, uint64_t cookie,
++                    uint64_t epoch, uint64_t now);
++int pw_focus_close(PwFocusCore *, uint32_t slot, uint64_t cookie, uint64_t epoch);
++int pw_focus_timer(PwFocusCore *, uint32_t slot, uint64_t cookie,
++                   uint64_t epoch, unsigned attach, const PwFocusTicket *parent, uint64_t now);
++/* Revoke without cancelling any already-emitted message. Completed receipts
++ * are dropped; outstanding tickets pin the context until they complete. */
++int pw_focus_abandon(PwFocusCore *, uint32_t slot, uint64_t cookie,
++                     uint64_t epoch, unsigned reason);
++int pw_focus_watchdog(PwFocusCore *, uint32_t slot, uint64_t now);
++int pw_focus_invariants(const PwFocusCore *);
++/* Physical-source accounting prototype. Tracks observed holds independently
++ * from serialized/USER-applied ownership. A failed output offer MUST quiesce
++ * routing; this helper cannot acknowledge a guest release. */
++typedef struct {
++    uint64_t generation[PW_FOCUS_SOURCES];
++    unsigned char connected[PW_FOCUS_SOURCES];
++    unsigned char physical[PW_FOCUS_SOURCES][PW_FOCUS_KEYS];
++    unsigned char blocked[PW_FOCUS_SOURCES][PW_FOCUS_KEYS];
++} PwFocusSources;
++void pw_focus_sources_block(PwFocusSources *);
++int pw_focus_sources_attach(PwFocusSources *, unsigned source, uint64_t generation);
++/* Returns 1 for a merged eligible edge, 0 for no edge, -1 invalid. */
++int pw_focus_sources_observe(PwFocusSources *, unsigned source, uint64_t generation, unsigned key,
++                             unsigned down, unsigned *merged_down);
++/* Caller must quiesce on disconnect. Disconnect retains a block for controls observed held; a fresh full snapshot
++ * must supply actual ups before those controls may reenter another epoch. */
++int pw_focus_sources_disconnect(PwFocusSources *, unsigned source, uint64_t generation);
++#endif
+diff --git a/server/queue.c b/server/queue.c
+index 4609402..6f6402d 100644
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -91,6 +91,10 @@ struct message
+     unsigned int           data_size; /* size of message data */
+     unsigned int           unique_id; /* unique id for nested hw message waits */
+     struct message_result *result;    /* result in sender queue */
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    struct pw_focus_tag focus;
++#endif
++
+ };
+ 
+ struct timer
+@@ -437,6 +441,279 @@ static void assign_thread_input( struct msg_queue *queue, struct thread_input *n
+ }
+ 
+ /* allocate a hardware message and its data */
++#ifdef PW_FOCUS_SERVER_ADAPTER
++/* Experimental server-private adapter; all callers execute in the serialized
++ * Wine server domain. No request handler or native input route registers it. */
++PwFocusCore pw_focus_server_core;
++/* Single-transfer ownership, separate from the core pending/result lifecycle. */
++static PwFocusTicket focus_submissions[PW_FOCUS_CONTEXTS][PW_FOCUS_OPS];
++
++static uint64_t focus_now(void)
++{
++    return monotonic_time / 10000;
++}
++
++static PwFocusContext *focus_context(const PwFocusTicket *ticket)
++{
++    PwFocusCore *core = &pw_focus_server_core;
++    PwFocusContext *context;
++    if (!core->initialized || !ticket || ticket->slot >= PW_FOCUS_CONTEXTS) return NULL;
++    context = &core->contexts[ticket->slot];
++    if (!ticket->cookie || context->cookie != ticket->cookie || context->epoch != ticket->epoch) return NULL;
++    return context;
++}
++
++static PwFocusOperation *focus_operation(const PwFocusTicket *ticket)
++{
++    PwFocusContext *context = focus_context(ticket);
++    PwFocusOperation *op;
++    if (!context || ticket->operation >= PW_FOCUS_OPS) return NULL;
++    op = &context->operations[ticket->operation];
++    if (!op->used || !op->pending || op->receipt.ticket.seq != ticket->seq) return NULL;
++    return op;
++}
++
++static int focus_claim(const PwFocusTicket *ticket, struct pw_focus_tag *tag)
++{
++    PwFocusTicket *owned;
++    if (!focus_operation(ticket)) return 0;
++    owned = &focus_submissions[ticket->slot][ticket->operation];
++    if (owned->cookie) return 0;
++    *owned = *ticket;
++    *tag = (struct pw_focus_tag){*ticket, 1, 0};
++    return 1;
++}
++
++static int focus_timer_matches(struct desktop *desktop, const PwFocusTicket *ticket)
++{
++    struct pw_focus_timer_tag *tag = &desktop->key_repeat.focus;
++    return tag->active && tag->slot == ticket->slot && tag->cookie == ticket->cookie && tag->epoch == ticket->epoch;
++}
++
++static void stop_key_repeat(struct desktop *desktop);
++
++static void focus_sync_timer(struct desktop *desktop)
++{
++    struct pw_focus_timer_tag *tag = &desktop->key_repeat.focus;
++    PwFocusTicket ticket = {tag->cookie, tag->epoch, 0, tag->slot, 0};
++    PwFocusContext *context;
++    if (!tag->active) return;
++    context = focus_context(&ticket);
++    if (!context || !context->timer || context->desktop != desktop || context->phase != PW_FOCUS_ACTIVE)
++        stop_key_repeat(desktop);
++}
++
++static void focus_complete_tag(struct pw_focus_tag *tag, PwFocusOutcome outcome,
++                               unsigned int error, uint64_t serial)
++{
++    PwFocusContext *context;
++    struct desktop *desktop;
++    PwFocusTicket ticket;
++    if (!tag->active) return;
++    ticket = tag->ticket;
++    assert(focus_submissions[ticket.slot][ticket.operation].cookie == ticket.cookie &&
++           focus_submissions[ticket.slot][ticket.operation].seq == ticket.seq);
++    memset(&focus_submissions[ticket.slot][ticket.operation], 0, sizeof(PwFocusTicket));
++    tag->active = 0; /* clear before any completion can release object pins */
++    context = focus_context(&ticket);
++    assert(context && focus_operation(&ticket));
++    desktop = (struct desktop *)grab_object(context->desktop);
++    {
++        int result = pw_focus_complete(&pw_focus_server_core, &ticket, outcome, error, serial);
++        assert(!result);
++        (void)result;
++    }
++    focus_sync_timer(desktop);
++    release_object(desktop);
++}
++
++static void focus_observe(struct message *msg, PwFocusOutcome outcome, unsigned int error, uint64_t serial)
++{
++    if (msg->type == MSG_HARDWARE) focus_complete_tag(&msg->focus, outcome, error, serial);
++}
++
++/* A missing hook timeout cannot certify release. Keep Wine's existing hook
++ * delivery semantics and the ticket alive, but close this epoch immediately. */
++static void focus_abort_pending(struct pw_focus_tag *tag)
++{
++    PwFocusContext *context = tag->active ? focus_context(&tag->ticket) : NULL;
++    struct desktop *desktop;
++    if (!context) return;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    if (context->registry)
++        pw_focus_abandon(&pw_focus_server_core, tag->ticket.slot, tag->ticket.cookie, tag->ticket.epoch, 20);
++    focus_sync_timer(desktop);
++    release_object(desktop);
++}
++
++static void focus_detach_timer(struct desktop *desktop)
++{
++    struct pw_focus_timer_tag tag = desktop->key_repeat.focus;
++    memset(&desktop->key_repeat.focus, 0, sizeof(desktop->key_repeat.focus));
++    if (tag.active)
++    {
++        int result = pw_focus_timer(&pw_focus_server_core, tag.slot, tag.cookie, tag.epoch, 0, NULL, focus_now());
++        assert(!result);
++        (void)result;
++    }
++}
++
++/* Called before replacing Wine's single physical auto-repeat timer. */
++static int focus_prepare_timer(struct desktop *desktop, struct pw_focus_tag *tag, int repeat)
++{
++    PwFocusContext *context;
++    if (repeat)
++    {
++        if (!tag) return !desktop->key_repeat.focus.active;
++        context = focus_context(&tag->ticket);
++        return context && context->timer && focus_timer_matches(desktop, &tag->ticket);
++    }
++    focus_detach_timer(desktop); /* also needed when untracked input replaces tracked */
++    if (!tag) return 1;
++    if (pw_focus_timer(&pw_focus_server_core, tag->ticket.slot, tag->ticket.cookie,
++                       tag->ticket.epoch, 1, &tag->ticket, focus_now())) return 0;
++    desktop->key_repeat.focus = (struct pw_focus_timer_tag){tag->ticket.cookie, tag->ticket.epoch, tag->ticket.slot, 1};
++    return 1;
++}
++
++int pw_focus_queue_quiesce(uint32_t slot, uint64_t cookie, uint64_t epoch)
++{
++    PwFocusTicket ticket = {cookie, epoch, 0, slot, 0};
++    PwFocusContext *context = focus_context(&ticket);
++    struct desktop *desktop;
++    int result;
++    if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    /* This closes admission before physical cancellation, in one server turn. */
++    result = pw_focus_quiesce(&pw_focus_server_core, slot, cookie, epoch, focus_now());
++    focus_sync_timer(desktop);
++    release_object(desktop);
++    return result;
++}
++
++/* No message/callback can own an unclaimed reservation. On terminal revoke,
++ * release those pins; claimed tickets still await their factual completion. */
++static void focus_cancel_unsubmitted(uint32_t slot)
++{
++    PwFocusContext *context = &pw_focus_server_core.contexts[slot];
++    uint32_t i;
++    if (context->registry || !context->poison) return;
++    for (i = 0; i < PW_FOCUS_OPS; ++i)
++    {
++        PwFocusOperation *op = &context->operations[i];
++        if (op->used && op->pending && !focus_submissions[slot][i].cookie)
++        {
++            PwFocusTicket ticket = op->receipt.ticket;
++            int result = pw_focus_complete(&pw_focus_server_core, &ticket, PW_FOCUS_FAILED, 0, 0);
++            assert(!result);
++            (void)result;
++        }
++    }
++}
++
++void pw_focus_queue_abandon(uint32_t slot, uint64_t cookie, uint64_t epoch)
++{
++    PwFocusTicket ticket = {cookie, epoch, 0, slot, 0};
++    PwFocusContext *context = focus_context(&ticket);
++    struct desktop *desktop;
++    if (!context || !context->desktop) return;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    if (context->registry) pw_focus_abandon(&pw_focus_server_core, slot, cookie, epoch, 21);
++    focus_cancel_unsubmitted(slot);
++    focus_sync_timer(desktop);
++    release_object(desktop);
++}
++
++void pw_focus_window_detached(struct window *window)
++{
++    uint32_t i;
++    if (!pw_focus_server_core.initialized) return;
++    for (i = 0; i < PW_FOCUS_CONTEXTS; ++i)
++    {
++        PwFocusContext *context = &pw_focus_server_core.contexts[i];
++        if (context->window == window)
++            pw_focus_queue_abandon(i, context->cookie, context->epoch);
++    }
++}
++
++/* Every core call that can revoke a timer is wrapped while a transient desktop
++ * pin is held. Future request handlers must use these adapter entry points. */
++int pw_focus_queue_begin(uint32_t slot, uint64_t cookie, uint64_t epoch,
++                         uint64_t seq, uint32_t key, unsigned int down, PwFocusTicket *out)
++{
++    PwFocusTicket ticket = {cookie, epoch, 0, slot, 0};
++    PwFocusContext *context = focus_context(&ticket);
++    struct desktop *desktop;
++    int result;
++    if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    result = pw_focus_begin(&pw_focus_server_core, slot, cookie, epoch, seq, key, down, 0, focus_now(), out);
++    focus_sync_timer(desktop);
++    release_object(desktop);
++    return result;
++}
++
++int pw_focus_queue_poll(uint32_t slot, uint64_t cookie, uint64_t epoch,
++                        PwFocusReceipt *out, PwFocusPhase *phase)
++{
++    PwFocusTicket ticket = {cookie, epoch, 0, slot, 0};
++    PwFocusContext *context = focus_context(&ticket);
++    struct desktop *desktop;
++    int result;
++    if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    result = pw_focus_poll(&pw_focus_server_core, slot, cookie, epoch, focus_now(), out, phase);
++    focus_sync_timer(desktop);
++    release_object(desktop);
++    return result;
++}
++
++int pw_focus_queue_ack(const PwFocusTicket *ticket)
++{
++    PwFocusContext *context = focus_context(ticket);
++    struct desktop *desktop;
++    int result;
++    if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    result = pw_focus_ack(&pw_focus_server_core, ticket, focus_now());
++    focus_sync_timer(desktop);
++    release_object(desktop);
++    return result;
++}
++
++int pw_focus_queue_settle(uint32_t slot, uint64_t cookie, uint64_t epoch)
++{
++    PwFocusTicket ticket = {cookie, epoch, 0, slot, 0};
++    PwFocusContext *context = focus_context(&ticket);
++    struct desktop *desktop;
++    int result;
++    if (!context || !context->desktop) return PW_FOCUS_BAD_ID;
++    desktop = (struct desktop *)grab_object(context->desktop);
++    result = pw_focus_settle(&pw_focus_server_core, slot, cookie, epoch, focus_now());
++    focus_sync_timer(desktop);
++    release_object(desktop);
++    return result;
++}
++
++void pw_focus_queue_watchdog(void)
++{
++    uint32_t i;
++    if (!pw_focus_server_core.initialized) return;
++    for (i = 0; i < PW_FOCUS_CONTEXTS; ++i)
++    {
++        PwFocusContext *context = &pw_focus_server_core.contexts[i];
++        struct desktop *desktop;
++        if (!context->desktop) continue;
++        desktop = (struct desktop *)grab_object(context->desktop);
++        pw_focus_watchdog(&pw_focus_server_core, i, focus_now());
++        focus_cancel_unsubmitted(i);
++        focus_sync_timer(desktop);
++        release_object(desktop);
++    }
++}
++
++#endif
++
+ static struct message *alloc_hardware_message( lparam_t info, struct hw_msg_source source,
+                                                unsigned int time, data_size_t extra_size )
+ {
+@@ -948,9 +1225,19 @@ static void store_message_result( struct message_result *res, lparam_t result, u
+     if (res->hardware_msg)
+     {
+         if (!error && result)  /* rejected by the hook */
++        {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++            focus_observe(res->hardware_msg, PW_FOCUS_SUPPRESSED, 0, 0);
++#endif
+             free_message( res->hardware_msg );
++        }
+         else
++        {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++            if (res->hardware_msg->focus.active && error) res->hardware_msg->focus.hook_error = error;
++#endif
+             queue_hardware_message( res->desktop, res->hardware_msg, 0 );
++        }
+ 
+         res->hardware_msg = NULL;
+     }
+@@ -981,6 +1268,10 @@ static void store_message_result( struct message_result *res, lparam_t result, u
+ static void free_message( struct message *msg )
+ {
+     struct message_result *result = msg->result;
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    focus_observe(msg, PW_FOCUS_FAILED, 0, 0);
++#endif
++
+     if (result)
+     {
+         result->msg = NULL;
+@@ -1879,6 +2170,11 @@ static void queue_hardware_message( struct desktop *desktop, struct message *msg
+     int flags, msg_bit;
+ 
+     update_desktop_key_state( desktop, msg->msg, msg->wparam );
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    focus_observe(msg, msg->focus.hook_error ? PW_FOCUS_APPLIED_EXCEPTION : PW_FOCUS_CLEAN,
++                  msg->focus.hook_error, desktop_shm->keystate_serial);
++#endif
++
+     last_input_time = get_tick_count();
+     if (msg->msg != WM_MOUSEMOVE) always_queue = 1;
+ 
+@@ -1952,7 +2248,13 @@ static int send_hook_ll_message( struct desktop *desktop, struct message *hardwa
+     if (!(queue = hook_thread->queue)) return 0;
+     if (is_queue_hung( queue )) return 0;
+ 
+-    if (!(msg = mem_alloc( sizeof(*msg) ))) return 0;
++    if (!(msg = mem_alloc( sizeof(*msg) )))
++    {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++        if (hardware_msg->focus.active) hardware_msg->focus.hook_error = STATUS_NO_MEMORY;
++#endif
++        return 0;
++    }
+ 
+     msg->type      = MSG_HOOK_LL;
+     msg->win       = 0;
+@@ -1968,9 +2270,19 @@ static int send_hook_ll_message( struct desktop *desktop, struct message *hardwa
+     if (!(msg->data = memdup( hardware_msg->data, hardware_msg->data_size )) ||
+         !(msg->result = alloc_message_result( sender, queue, msg, timeout )))
+     {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++        if (hardware_msg->focus.active) hardware_msg->focus.hook_error = STATUS_NO_MEMORY;
++#endif
+         free_message( msg );
+         return 0;
+     }
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    if (hardware_msg->focus.active && !msg->result->timeout)
++    {
++        hardware_msg->focus.hook_error = STATUS_NO_MEMORY;
++        focus_abort_pending(&hardware_msg->focus);
++    }
++#endif
+     msg->result->hardware_msg = hardware_msg;
+     msg->result->desktop = (struct desktop *)grab_object( desktop );
+     list_add_tail( &queue->msg_list[SEND_MESSAGE], &msg->entry );
+@@ -2330,13 +2642,55 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
+     return wait;
+ }
+ 
++static int queue_keyboard_message_impl( struct desktop *desktop, user_handle_t win, const union hw_input *input,
++                                        unsigned int origin, struct msg_queue *sender, int repeat
++#ifdef PW_FOCUS_SERVER_ADAPTER
++                                        , struct pw_focus_tag *focus
++#endif
++                                        );
++
+ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
+-                                   unsigned int origin, struct msg_queue *sender, int repeat );
++                                   unsigned int origin, struct msg_queue *sender, int repeat )
++{
++    return queue_keyboard_message_impl(desktop, win, input, origin, sender, repeat
++#ifdef PW_FOCUS_SERVER_ADAPTER
++                                       , NULL
++#endif
++                                       );
++}
+ 
+ static void key_repeat_timeout( void *private )
+ {
+     struct desktop *desktop = private;
+-
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    struct pw_focus_timer_tag timer = desktop->key_repeat.focus;
++    struct pw_focus_tag tag = {0};
++    if (timer.active)
++    {
++        /* The timer pin retains desktop through the callback. Completion may
++         * detach it, so take a transient object pin across the whole emitter. */
++        grab_object(desktop);
++        desktop->key_repeat.timeout = NULL;
++        if (pw_focus_begin(&pw_focus_server_core, timer.slot, timer.cookie, timer.epoch, 0,
++                           pw_focus_server_core.contexts[timer.slot].timer_key, 1, 1, focus_now(), &tag.ticket))
++            stop_key_repeat(desktop);
++        else
++        {
++            if (!focus_claim(&tag.ticket, &tag))
++            {
++                /* Impossible without an adapter ownership invariant failure. */
++                pw_focus_complete(&pw_focus_server_core, &tag.ticket, PW_FOCUS_FAILED, STATUS_INVALID_PARAMETER, 0);
++                stop_key_repeat(desktop);
++                release_object(desktop);
++                return;
++            }
++            queue_keyboard_message_impl(desktop, desktop->key_repeat.win, &desktop->key_repeat.input,
++                                        IMO_HARDWARE, NULL, 1, &tag);
++        }
++        release_object(desktop);
++        return;
++    }
++#endif
+     desktop->key_repeat.timeout = NULL;
+     queue_keyboard_message( desktop, desktop->key_repeat.win, &desktop->key_repeat.input, IMO_HARDWARE, NULL, 1 );
+ }
+@@ -2347,11 +2701,26 @@ static void stop_key_repeat( struct desktop *desktop )
+     desktop->key_repeat.timeout = NULL;
+     desktop->key_repeat.win = 0;
+     memset( &desktop->key_repeat.input, 0, sizeof(desktop->key_repeat.input) );
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    /* Last operation: dropping the logical timer can release desktop pins. */
++    focus_detach_timer(desktop);
++#endif
+ }
+ 
++#ifdef PW_FOCUS_SERVER_ADAPTER
++void pw_focus_stop_key_repeat(struct desktop *desktop)
++{
++    stop_key_repeat(desktop);
++}
++#endif
++
+ /* queue a hardware message for a keyboard event */
+-static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
+-                                   unsigned int origin, struct msg_queue *sender, int repeat )
++static int queue_keyboard_message_impl( struct desktop *desktop, user_handle_t win, const union hw_input *input,
++                                        unsigned int origin, struct msg_queue *sender, int repeat
++#ifdef PW_FOCUS_SERVER_ADAPTER
++                                        , struct pw_focus_tag *focus
++#endif
++                                        )
+ {
+     desktop_shm_t *desktop_shm = desktop->shared;
+     struct hw_msg_source source = { IMDT_KEYBOARD, origin };
+@@ -2392,6 +2761,25 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
+         break;
+     }
+ 
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    if (focus)
++    {
++        PwFocusContext *context = focus_context(&focus->ticket);
++        PwFocusOperation *op = focus_operation(&focus->ticket);
++        if (!focus->active || !context || !op || context->desktop != desktop || context->handle != win ||
++            !context->registry || context->poison ||
++            (context->phase != PW_FOCUS_ACTIVE &&
++             !(context->phase == PW_FOCUS_RELEASING && !op->receipt.down && !repeat)) ||
++            origin != IMO_HARDWARE || sender || unicode || (input->kbd.flags & ~(KEYEVENTF_KEYUP|KEYEVENTF_EXTENDEDKEY)) ||
++            (input->kbd.vkey & ~0xffu) || op->receipt.key != vkey ||
++            op->receipt.down != !(input->kbd.flags & KEYEVENTF_KEYUP) || op->receipt.repeat != !!repeat)
++        {
++            focus_complete_tag(focus, PW_FOCUS_FAILED, STATUS_INVALID_PARAMETER, 0);
++            return 0;
++        }
++    }
++
++#endif
+     message_code = (input->kbd.flags & KEYEVENTF_KEYUP) ? WM_KEYUP : WM_KEYDOWN;
+     switch (vkey)
+     {
+@@ -2466,11 +2854,26 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
+         if (!(input->kbd.flags & KEYEVENTF_KEYUP) && desktop->key_repeat.enable)
+         {
+             timeout_t timeout = repeat ? desktop->key_repeat.period : desktop->key_repeat.delay;
++#ifdef PW_FOCUS_SERVER_ADAPTER
++            if (!focus_prepare_timer(desktop, focus, repeat))
++            {
++                if (focus) focus_complete_tag(focus, PW_FOCUS_FAILED, STATUS_INVALID_PARAMETER, 0);
++                return 0;
++            }
++#endif
+             desktop->key_repeat.input = *input;
+             desktop->key_repeat.input.kbd.time = 0;
+             desktop->key_repeat.win = win;
+             if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
+             desktop->key_repeat.timeout = add_timeout_user( timeout, key_repeat_timeout, desktop );
++#ifdef PW_FOCUS_SERVER_ADAPTER
++            if (focus && !desktop->key_repeat.timeout)
++            {
++                focus_complete_tag(focus, PW_FOCUS_FAILED, STATUS_NO_MEMORY, 0);
++                return 0;
++            }
++#endif
++
+         }
+     }
+ 
+@@ -2489,7 +2892,17 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
+         release_object( foreground );
+     }
+ 
+-    if (!(msg = alloc_hardware_message( input->kbd.info, source, time, 0 ))) return 0;
++    if (!(msg = alloc_hardware_message( input->kbd.info, source, time, 0 )))
++    {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++        if (focus) focus_complete_tag(focus, PW_FOCUS_FAILED, STATUS_NO_MEMORY, 0);
++#endif
++        return 0;
++    }
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    if (focus) { msg->focus = *focus; focus->active = 0; }
++#endif
++
+     msg_data = msg->data;
+ 
+     msg->win       = get_user_full_handle( win );
+@@ -2516,6 +2929,32 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
+     return wait;
+ }
+ 
++#ifdef PW_FOCUS_SERVER_ADAPTER
++int pw_focus_queue_keyboard(const PwFocusTicket *ticket, struct desktop *desktop,
++                            user_handle_t win, const union hw_input *input)
++{
++    struct pw_focus_tag tag = {0};
++    PwFocusContext *context = focus_context(ticket);
++    if (!context || !desktop || !input || context->desktop != desktop || !focus_claim(ticket, &tag))
++        return PW_FOCUS_BAD_ID;
++    grab_object(desktop);
++    /* A reserved but not yet emitted ticket is not authority to inject later.
++     * Revalidate its current permit, lease and exact live window here. */
++    pw_focus_watchdog(&pw_focus_server_core, ticket->slot, focus_now());
++    focus_sync_timer(desktop);
++    if (!context->registry || context->poison)
++    {
++        focus_complete_tag(&tag, PW_FOCUS_FAILED, STATUS_ACCESS_DENIED, 0);
++        release_object(desktop);
++        return PW_FOCUS_REFUSED;
++    }
++    queue_keyboard_message_impl(desktop, win, input, IMO_HARDWARE, NULL, 0, &tag);
++    release_object(desktop);
++    /* Admission only. POLL/ACK of the exact core receipt is still required. */
++    return PW_FOCUS_OK;
++}
++#endif
++
+ struct pointer
+ {
+     struct list entry;
+diff --git a/server/user.c b/server/user.c
+index e87b30b..00305ed 100644
+--- a/server/user.c
++++ b/server/user.c
+@@ -69,7 +69,7 @@ static user_handle_t entry_to_handle( const user_entry_t *entry )
+ {
+     const user_entry_t *handles = shared_session->user_entries;
+     unsigned int index = entry - handles;
+-    return (index << 1) + FIRST_USER_HANDLE + (entry->generation << 16);
++    return (index << 1) + FIRST_USER_HANDLE + ((unsigned int)entry->generation << 16);
+ }
+ 
+ static const user_entry_t *alloc_user_entry( struct obj_locator locator, unsigned short type )
+diff --git a/server/user.h b/server/user.h
+index f1a1f07..1189850 100644
+--- a/server/user.h
++++ b/server/user.h
+@@ -51,8 +51,16 @@ struct winstation
+     unsigned __int64   monitor_serial;     /* winstation monitor update counter */
+ };
+ 
++#ifdef PW_FOCUS_SERVER_ADAPTER
++#include "pw_focus_adapter.h"
++#endif
++
+ struct key_repeat
+ {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    struct pw_focus_timer_tag focus;
++#endif
++
+     int                  enable;           /* enable auto-repeat */
+     timeout_t            delay;            /* auto-repeat delay */
+     timeout_t            period;           /* auto-repeat period */
+diff --git a/server/window.c b/server/window.c
+index 3cd82b0..d36f02f 100644
+--- a/server/window.c
++++ b/server/window.c
+@@ -63,6 +63,10 @@ struct window
+     struct list      unlinked;        /* list of children not linked in the Z-order list */
+     struct list      entry;           /* entry in parent's children list */
+     user_handle_t    handle;          /* full handle for this window */
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    uint64_t focus_generation;
++#endif
++
+     struct thread   *thread;          /* thread owning the window */
+     struct desktop  *desktop;         /* desktop that the window belongs to */
+     struct window_class *class;       /* window class */
+@@ -577,6 +581,9 @@ static void detach_window_thread( struct window *win )
+     struct thread *thread = win->thread;
+ 
+     if (!thread) return;
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    pw_focus_window_detached(win);
++#endif
+     if (thread->queue)
+     {
+         if (win->update_region) inc_queue_paint_count( thread, -1 );
+@@ -594,6 +601,40 @@ static void detach_window_thread( struct window *win )
+     win->thread = NULL;
+ }
+ 
++#ifdef PW_FOCUS_SERVER_ADAPTER
++/* The lookup itself is not a pin. Every successful bind explicitly retains the
++ * exact window object; its non-reused bind generation and pointer survive HWND
++ * reuse until all delayed message tickets release that binding. */
++static uint64_t focus_window_generation;
++
++struct window *pw_focus_pin_window(struct process *process, struct desktop *desktop,
++                                   user_handle_t handle, uint64_t *generation)
++{
++    struct window *window = get_user_object(handle, NTUSER_OBJ_WINDOW);
++    if (!generation || !window || window->handle != handle || !window->thread ||
++        window->thread->state == TERMINATED || window->thread->process != process || window->desktop != desktop) return NULL;
++    if (!window->focus_generation)
++    {
++        if (focus_window_generation == UINT64_MAX) return NULL;
++        window->focus_generation = ++focus_window_generation;
++    }
++    *generation = window->focus_generation;
++    return (struct window *)grab_object(window);
++}
++
++int pw_focus_window_live(void *opaque, void *process, void *desktop, void *object,
++                         uint64_t handle, uint64_t generation)
++{
++    struct window *window = object;
++    (void)opaque;
++    return window && handle == (user_handle_t)handle && generation &&
++        window == get_user_object((user_handle_t)handle, NTUSER_OBJ_WINDOW) &&
++        window->handle == handle && window->focus_generation == generation &&
++        window->thread && window->thread->state != TERMINATED && window->thread->process == process && window->desktop == desktop;
++}
++
++#endif
++
+ /* get the process owning the top window of a given desktop */
+ struct process *get_top_window_owner( struct desktop *desktop )
+ {
+@@ -659,6 +700,9 @@ static struct window *create_window( struct window *parent, struct window *owner
+     }
+ 
+     if (!(win = alloc_object( &window_ops ))) goto failed;
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    win->focus_generation = 0;
++#endif
+     win->parent         = parent ? (struct window *)grab_object( parent ) : NULL;
+     win->owner          = owner ? owner->handle : 0;
+     win->thread         = current;
+diff --git a/server/winstation.c b/server/winstation.c
+index e2aad1e..875dc82 100644
+--- a/server/winstation.c
++++ b/server/winstation.c
+@@ -373,7 +373,11 @@ static void desktop_destroy( struct object *obj )
+     if (desktop->msg_window) free_window_handle( desktop->msg_window );
+     if (desktop->global_hooks) release_object( desktop->global_hooks );
+     if (desktop->close_timeout) remove_timeout_user( desktop->close_timeout );
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    pw_focus_stop_key_repeat(desktop);
++#else
+     if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
++#endif
+     release_object( desktop->winstation );
+     if (desktop->shared) free_shared_object( desktop->shared );
+ }

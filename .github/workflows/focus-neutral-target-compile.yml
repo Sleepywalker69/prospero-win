@@ -1,0 +1,328 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Neutral target translation-unit compile only
+on:
+  workflow_dispatch:
+    inputs:
+      focus_neutral_target_compile_only:
+        description: Compile fresh same-source default962 then neutral963 target translation units only
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+concurrency:
+  # Ignored/refused events cannot replace a pending admitted per-ref run.
+  group: >-
+    focus-neutral-target-compile-${{ (((github.event_name == 'workflow_dispatch' && inputs.focus_neutral_target_compile_only == true) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
+           (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+            github.event.action == 'reopened' ||
+            (github.event.action == 'labeled' &&
+             github.event.label.name == 'build-focus-neutral-target-compile-only')))) &&
+          !(github.event_name == 'pull_request' &&
+           (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+            contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+            contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict')))) && github.ref || github.run_id }}
+  cancel-in-progress: false
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+  CLEAN_PATH: /usr/lib/llvm-18/bin:/usr/bin:/bin
+jobs:
+  reject-conflicting-options:
+    if: >-
+      ${{ ((github.event_name == 'workflow_dispatch' && inputs.focus_neutral_target_compile_only == true) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
+           (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+            github.event.action == 'reopened' ||
+            (github.event.action == 'labeled' &&
+             (github.event.label.name == 'build-focus-neutral-target-compile-only' ||
+              (github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          (github.event_name == 'pull_request' &&
+           (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+            contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+            contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Refuse mixed compile-only and runtime cohorts
+        shell: bash
+        run: |
+          echo '::error::Neutral target compile-only requires its own cohort. Remove all fixture, preview and strict-IPC opt-in labels.'
+          exit 1
+  target-translation-units:
+    if: >-
+      ${{ ((github.event_name == 'workflow_dispatch' && inputs.focus_neutral_target_compile_only == true) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
+           (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+            github.event.action == 'reopened' ||
+            (github.event.action == 'labeled' &&
+             github.event.label.name == 'build-focus-neutral-target-compile-only')))) &&
+          !(github.event_name == 'pull_request' &&
+           (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+            contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+            contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Bind reviewed source and create fresh external paths
+        id: paths
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$EXPECTED_SOURCE_SHA" ]]
+          [[ -z $(git status --porcelain --untracked-files=all) ]]
+          printf 'commit=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+          python3 - <<'PYINIT'
+          import os, pathlib
+          repo = pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve(strict=True)
+          parent = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          assert parent != repo and repo not in parent.parents, 'temporary paths must be outside project'
+          root = parent / ('focus-target-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'])
+          assert not root.exists() and not root.is_symlink(), 'gate paths must be fresh'
+          root.mkdir()
+          (root / 'evidence').mkdir()
+          paths = {'FOCUS_ROOT': root, 'WINE_SOURCE': root / 'wine-source', 'HOST_WORK': root / 'host-tools',
+                   'TITLE_FOUNDATION': root / 'title-foundation', 'TLS_WORK': root / 'tls',
+                   'SDK_SOURCE': root / 'sdk-source', 'CONTROL_WORK': root / 'control-work',
+                   'NEUTRAL_WORK': root / 'neutral-work', 'CONTROL_RECEIPTS': root / 'control-receipts',
+                   'NEUTRAL_RECEIPTS': root / 'neutral-receipts', 'GATE_ARTIFACT': root / 'translation-units',
+                   'XDG_CACHE_HOME': root / 'public-downloads'}
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              for key, value in paths.items(): output.write(str(key) + '=' + str(value) + '\n')
+          PYINIT
+      - name: Select bounded build concurrency from available resources
+        id: build-resources
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          def choose_jobs(cpus, available, limits):
+              headroom = available
+              for limit, current in limits:
+                  if limit is not None:
+                      headroom = min(headroom, max(0, limit - current) if limit >= 0 and current >= 0 else 0)
+              return min(cpus, 4 if cpus >= 4 and headroom >= 12 * 1024**3 else 2)
+          cpus = max(1, int(subprocess.check_output(['nproc'], text=True)))
+          available = 0
+          for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+              if line.startswith('MemAvailable:'):
+                  available = int(line.split()[1]) * 1024
+          limits = []
+          for maximum, current in [('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+                                   ('/sys/fs/cgroup/memory/memory.limit_in_bytes', '/sys/fs/cgroup/memory/memory.usage_in_bytes')]:
+              try:
+                  raw = pathlib.Path(maximum).read_text().strip()
+              except FileNotFoundError:
+                  continue
+              except OSError:
+                  limits.append((0, 0))
+                  continue
+              if raw == 'max':
+                  continue
+              try:
+                  limits.append((int(raw), int(pathlib.Path(current).read_text())))
+              except (OSError, ValueError):
+                  limits.append((0, 0))
+          jobs = choose_jobs(cpus, available, limits)
+          record = {'cpus': cpus, 'memory_available_bytes': available,
+                    'cgroup_limits_and_usage': limits, 'build_jobs': jobs}
+          evidence = pathlib.Path(os.environ['FOCUS_ROOT']) / 'evidence'
+          evidence.mkdir(exist_ok=True)
+          (evidence / 'build-resources.json').write_text(json.dumps(record, indent=2) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('BUILD_JOBS=' + str(jobs) + '\n')
+          print(json.dumps(record))
+          PY
+      - name: Prepare ordinary hosted prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang-18 lld-18 llvm-18 llvm-18-dev bison flex gcc-mingw-w64 g++-mingw-w64 pkg-config m4 patch curl wget unzip zip libx11-dev libxext-dev libfreetype-dev libfontconfig-dev libvulkan-dev libgnutls28-dev libasound2-dev libpulse-dev zlib1g-dev
+          mkdir -p "$XDG_CACHE_HOME"
+      - name: Fetch exact public Wine foundation and SDK source
+        id: sources
+        run: |
+          set -euo pipefail
+          {
+            pin=$(sed -n 's/^WINE_COMMIT=//p' tools/build_wine_ps5.sh)
+            [[ $pin == 490f6d5dcbb2a5047345b8af88d114bbcaad69a8 ]]
+            git init --quiet "$WINE_SOURCE"
+            git -C "$WINE_SOURCE" remote add origin https://github.com/wine-mirror/wine.git
+            git -C "$WINE_SOURCE" fetch --depth=1 origin "$pin"
+            git -C "$WINE_SOURCE" checkout --detach FETCH_HEAD
+            [[ $(git -C "$WINE_SOURCE" rev-parse HEAD) == "$pin" ]]
+            git init --quiet "$TITLE_FOUNDATION"
+            git -C "$TITLE_FOUNDATION" remote add origin https://github.com/mpereiraesaa/ps5-native-app-boilerplate.git
+            git -C "$TITLE_FOUNDATION" fetch --depth=1 origin 9c0b994a048521af6fb84c73ded364504fe250e9
+            git -C "$TITLE_FOUNDATION" checkout --detach FETCH_HEAD
+            [[ $(git -C "$TITLE_FOUNDATION" rev-parse HEAD) == 9c0b994a048521af6fb84c73ded364504fe250e9 ]]
+            git init --quiet "$SDK_SOURCE"
+            git -C "$SDK_SOURCE" remote add origin https://github.com/ps5-payload-dev/sdk.git
+            git -C "$SDK_SOURCE" fetch --depth=1 origin 4eb701204fc3f8d31e84cf8ca272974e2be9c867
+            git -C "$SDK_SOURCE" checkout --detach FETCH_HEAD
+            [[ $(git -C "$SDK_SOURCE" rev-parse HEAD) == 4eb701204fc3f8d31e84cf8ca272974e2be9c867 ]]
+          } 2>&1 | tee "$FOCUS_ROOT/evidence/source-fetch.log"
+      - name: Build matching host tools only without compiler caching
+        id: host-tools
+        run: |
+          set -euo pipefail
+          # The empty environment drops cached compiler launchers, all CCACHE/PW_CACHE
+          # settings, inherited flags, and unrelated preview/IPC/provider selectors.
+          env -i PATH="$CLEAN_PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+            LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 LLVM_CONFIG="$LLVM_CONFIG" \
+            CC=/usr/bin/gcc CXX=/usr/bin/g++ i386_CC=/usr/bin/i686-w64-mingw32-gcc \
+            x86_64_CC=/usr/bin/x86_64-w64-mingw32-gcc PW_WINE_FOCUS_NEUTRAL=0 \
+            timeout 20m sh tools/build_host_wine.sh --source "$WINE_SOURCE" \
+            --work "$HOST_WORK" --jobs "$BUILD_JOBS" --tools-only \
+            2>&1 | tee "$FOCUS_ROOT/evidence/host-tools.log"
+      - name: Build one selected public SDK and checked TLS input
+        id: dependencies
+        run: |
+          set -euo pipefail
+          {
+            env -i PATH="$CLEAN_PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+              XDG_CACHE_HOME="$XDG_CACHE_HOME" LC_ALL=C TZ=UTC LLVM_CONFIG="$LLVM_CONFIG" \
+              make -C "$TITLE_FOUNDATION" deps libc
+            sdk="$TITLE_FOUNDATION/.deps/native/ps5-payload-sdk"
+            python3 tools/tls_manifest.py select-llvm --sdk "$sdk"
+            printf 'PS5_PAYLOAD_SDK=%s\n' "$sdk" >> "$GITHUB_ENV"
+            env -i PATH="$CLEAN_PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+              LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 LLVM_CONFIG="$LLVM_CONFIG" \
+              timeout 35m sh tools/build_tls_ps5.sh --sdk "$sdk" --work "$TLS_WORK" --jobs "$BUILD_JOBS"
+            env -i PATH="$CLEAN_PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+              LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 LLVM_CONFIG="$LLVM_CONFIG" \
+              python3 tools/tls_manifest.py verify --root "$TLS_WORK/root" \
+              --script tools/build_tls_ps5.sh --sdk "$sdk"
+          } 2>&1 | tee "$FOCUS_ROOT/evidence/dependencies.log"
+      - name: Compile and validate fresh default962 before neutral963 translation units
+        id: paired-compile
+        run: |
+          set -euo pipefail
+          # run exits successfully only after independently checking TARGET-COMPILE.json.
+          # If default962 fails, bash/pipefail prevents any neutral963 invocation.
+          for mode in 0 1; do
+            if [[ $mode == 0 ]]; then
+              work=$CONTROL_WORK; receipts=$CONTROL_RECEIPTS; name=default962
+            else
+              work=$NEUTRAL_WORK; receipts=$NEUTRAL_RECEIPTS; name=neutral963
+            fi
+            [[ ! -e "$work" && ! -L "$work" && ! -e "$receipts" && ! -L "$receipts" ]]
+            env -i PATH="$CLEAN_PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+              LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 LLVM_CONFIG="$LLVM_CONFIG" \
+              CC=/usr/bin/gcc CXX=/usr/bin/g++ i386_CC=/usr/bin/i686-w64-mingw32-gcc \
+              x86_64_CC=/usr/bin/x86_64-w64-mingw32-gcc CFLAGS='-O2 -g' \
+              PW_WINE_PRIVATE_DISPATCH=1 PW_WINE_SERVICE_FIXTURE=1 PW_WINE_FOCUS_NEUTRAL="$mode" \
+              PROSPERO_TLS_ROOT="$TLS_WORK/root" \
+              timeout 40m python3 tools/check_focus_target_compile.py run --repo "$GITHUB_WORKSPACE" \
+              --wine-source "$WINE_SOURCE" --host-tools "$HOST_WORK/build" \
+              --foundation "$TITLE_FOUNDATION" --sdk "$PS5_PAYLOAD_SDK" --sdk-source "$SDK_SOURCE" \
+              --tls "$TLS_WORK/root" --work "$work" --out "$receipts" --neutral "$mode" \
+              --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --jobs "$BUILD_JOBS" \
+              2>&1 | tee "$FOCUS_ROOT/evidence/$name-driver.log"
+          done
+      - name: Collect checked compile-only receipt pair and exact source archives
+        id: collect
+        run: |
+          set -euo pipefail
+          [[ ! -e "$GATE_ARTIFACT" && ! -L "$GATE_ARTIFACT" ]]
+          env -i PATH="$CLEAN_PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" \
+            LC_ALL=C TZ=UTC PYTHONDONTWRITEBYTECODE=1 LLVM_CONFIG="$LLVM_CONFIG" \
+            python3 tools/check_focus_target_compile.py collect --control "$CONTROL_RECEIPTS" \
+            --neutral "$NEUTRAL_RECEIPTS" --out "$GATE_ARTIFACT"
+      - name: Upload accepted target translation-unit evidence only
+        if: ${{ success() && steps.collect.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: focus-neutral-target-translation-units-${{ steps.paths.outputs.commit }}-${{ github.run_attempt }}
+          path: ${{ env.GATE_ARTIFACT }}/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain bounded unaccepted diagnostics after failure
+        id: diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: |
+          python3 - <<'PYDIAG'
+          import json, os, pathlib, stat
+          # Fixed roots, no symlinks; at most 32 tails of 256 KiB (8 MiB total).
+          root = pathlib.Path(os.environ['FOCUS_ROOT'])
+          out = root / 'unaccepted-diagnostics'
+          out.mkdir(exist_ok=False)
+          records, seen = [], set()
+          def retain(path):
+              relative = path.relative_to(root)
+              if len(records) == 32 or relative in seen: return
+              if any(p.is_symlink() for p in (path.parent, *path.parent.parents)): return
+              try:
+                  fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                  with os.fdopen(fd, 'rb') as stream:
+                      st = os.fstat(stream.fileno())
+                      if not stat.S_ISREG(st.st_mode): return
+                      stream.seek(max(0, st.st_size - 256 * 1024))
+                      data = stream.read(256 * 1024)
+              except OSError:
+                  return
+              target = out / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              seen.add(relative)
+              records.append({'path': str(relative), 'original_bytes': st.st_size,
+                              'retained_bytes': len(data), 'truncated': st.st_size > len(data)})
+          # Reserve the inner driver/compiler/configure tails for BOTH modes
+          # before prerequisite trees can exhaust the shared 32-log budget.
+          for mode in ('neutral', 'control'):
+              retain(root / (mode + '-receipts') / 'driver.log')
+              for filename in ('service-translation-units.log', 'configure.log',
+                               'build/config.log', 'focus-neutral-stage.log'):
+                  retain(root / (mode + '-work') / filename)
+          for filename in ('neutral963-driver.log', 'default962-driver.log',
+                           'source-fetch.log', 'host-tools.log', 'dependencies.log'):
+              retain(root / 'evidence' / filename)
+          for name in ('evidence', 'neutral-receipts', 'control-receipts', 'neutral-work',
+                       'control-work', 'host-tools', 'tls'):
+              source = root / name
+              if not source.is_dir() or source.is_symlink(): continue
+              for parent, dirs, files in os.walk(source, followlinks=False):
+                  dirs[:] = sorted(d for d in dirs if not (pathlib.Path(parent) / d).is_symlink())
+                  for filename in sorted(files):
+                      if len(records) == 32: break
+                      if filename.endswith('.log'): retain(pathlib.Path(parent) / filename)
+                  if len(records) == 32: break
+          (out / 'UNACCEPTED.json').write_text(json.dumps({
+              'schema': 'pw-focus-target-translation-unit-failure/1', 'accepted': False,
+              'complete_runtime': False, 'target_executed': False, 'descendants_settled': False,
+              'note': 'Failure or timeout is not process settlement or target validation.',
+              'logs': records}, indent=2) + '\n')
+          PYDIAG
+      - name: Upload separate unaccepted bounded failure diagnostics
+        if: ${{ (failure() || cancelled()) && steps.diagnostics.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: focus-neutral-target-compile-unaccepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.FOCUS_ROOT }}/unaccepted-diagnostics/
+          retention-days: 7
+          if-no-files-found: error

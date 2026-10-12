@@ -5,8 +5,11 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+sys.dont_write_bytecode = True
+from test_private_dispatch_wow64_contract import flag_selection
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,25 +37,28 @@ class WineFixtureBuild(unittest.TestCase):
                 'with open(os.environ["CALLS"],"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
                 'raise SystemExit(9 if os.environ.get("FAIL_ADAPTER","") in sys.argv[-1] and os.environ.get("FAIL_ADAPTER") else 0)\n')
             compiler.chmod(0o755)
-            for name, service, partial, fail_make, fail_adapter in [
-                ('off',0,0,0,''), ('partial',1,1,0,''), ('full',1,0,0,''),
-                ('make-error',1,1,1,''), ('adapter-error',1,1,0,'pw_wine_fixture_socket'),
-                ('child-data-error',1,1,0,'pw_wine_child_data')]:
+            for name, service, neutral, partial, fail_make, fail_adapter in [
+                ('off',0,0,0,0,''), ('partial',1,0,1,0,''), ('full',1,0,0,0,''),
+                ('make-error',1,0,1,1,''), ('adapter-error',1,0,1,0,'pw_wine_fixture_socket'),
+                ('child-data-error',1,0,1,0,'pw_wine_child_data'),
+                ('neutral-partial',1,1,1,0,''), ('neutral-full',1,1,0,0,''),
+                ('neutral-base-error',1,1,1,1,''), ('neutral-gate-error',1,1,1,2,''),
+                ('neutral-adapter-error',1,1,1,0,'pw_wine_fixture_socket')]:
                 work = root / name; work.mkdir(); calls = work / 'calls'
                 env = dict(os.environ, SDK=str(sdk), WORK=str(work), CALLS=str(calls),
-                           SERVICE=str(service), PARTIAL=str(partial), FAIL_MAKE=str(fail_make), FAIL_ADAPTER=fail_adapter)
+                           SERVICE=str(service), NEUTRAL=str(neutral), PARTIAL=str(partial), FAIL_MAKE=str(fail_make), FAIL_ADAPTER=fail_adapter)
                 setup = ('set -eu\nsdk=$SDK\nwork=$WORK\nbuild=$work/build\ntree=$work/source\nroot=$work/repo\n'
                          'wine_cc=$sdk/bin/prospero-clang\njobs=2\nservice_cflags=-DPW_WINE_SERVICE_FIXTURE=1\nservice_fixture=$SERVICE\n'
-                         'compile_check_only=$PARTIAL\nfail() { exit 73; }\n'
-                         'make() { printf "%s\\n" "$@" > "$work/make-args"; [ "$FAIL_MAKE" = 0 ]; }\n')
+                         'compile_check_only=$PARTIAL\nfocus_neutral=$NEUTRAL\nmake_calls=0\nfail() { exit 73; }\n'
+                         'make() { make_calls=$((make_calls+1)); printf "%s\\n" "$@" > "$work/make-args-$make_calls"; [ "$FAIL_MAKE" != "$make_calls" ]; }\n')
                 result = subprocess.run(['sh'], input=setup+block+'\necho FULL_CONTINUATION\n', env=env,
                                         text=True, capture_output=True)
                 failed = bool(fail_make or fail_adapter)
                 self.assertEqual(result.returncode, 73 if failed else 0, result.stderr)
                 if not service:
-                    self.assertFalse((work/'make-args').exists()); self.assertFalse(calls.exists())
+                    self.assertFalse(list(work.glob('make-args-*'))); self.assertFalse(calls.exists())
                     self.assertIn('FULL_CONTINUATION', result.stdout); continue
-                args = (work/'make-args').read_text().splitlines()
+                args = (work/'make-args-1').read_text().splitlines()
                 self.assertEqual(len(objects), 22)
                 self.assertEqual(args[-len(objects):], objects)
                 self.assertEqual(args.count('-W'), 20)
@@ -61,6 +67,15 @@ class WineFixtureBuild(unittest.TestCase):
                     for name in objects))
                 self.assertEqual([args[i+1] for i, arg in enumerate(args) if arg == '-W'], expected_sources)
                 self.assertIn('-k', args)
+                second = bool(neutral and fail_make != 1)
+                self.assertEqual(len(list(work.glob('make-args-*'))), 2 if second else 1)
+                if second:
+                    extra = (work/'make-args-2').read_text().splitlines()
+                    self.assertEqual(extra[-7:], ['server/' + unit + '.o' for unit in
+                        ('pw_focus_core','pw_focus_requests','queue','window','winstation','user','main')])
+                    self.assertEqual([extra[i+1] for i, arg in enumerate(extra) if arg == '-W'],
+                        [str(work/'source/server'/unit)+'.c' for unit in
+                         ('pw_focus_core','pw_focus_requests','queue','window','winstation','main')])
                 compiled = [json.loads(row) for row in calls.read_text().splitlines()] if calls.exists() else []
                 self.assertEqual(len(compiled), 0 if fail_make else 2 if fail_adapter == 'pw_wine_fixture_socket' else 4)
                 adapter_names = ['pw_wine_fixture_provider.c', 'pw_wine_fixture_socket.c', 'pw_wine_compat.c', 'pw_wine_child_data.c']
@@ -103,20 +118,23 @@ class WineFixtureBuild(unittest.TestCase):
 
     def test_selector_preserves_both_architectures_and_refuses_manual_flags(self):
         source = (ROOT / 'tools/build_wine_ps5.sh').read_text()
-        block = source[source.index('case " ${CFLAGS:-}'):source.index('# Reconfigure whenever')]
-        program = 'set -eu\nfail() { exit 73; }\nps5opengl_sdk=\ncompile_check_only=0\n' + block + \
+        block = flag_selection(source)
+        program = 'set -eu\nfail() { exit 73; }\nps5opengl_sdk=\nfocus_neutral=${PW_WINE_FOCUS_NEUTRAL:-0}\ntree=/fixture/source\n' + block + \
             '\nexport opengl_cflags service_fixture\npython3 -c \'import os,json; print(json.dumps(dict(os.environ)))\'\n'
         clean = {k: v for k, v in os.environ.items() if k not in (
             'CFLAGS', 'CPPFLAGS', 'CROSSCFLAGS', 'x86_64_CFLAGS', 'i386_CFLAGS',
-            'PW_WINE_PRIVATE_DISPATCH', 'PW_WINE_SERVICE_FIXTURE')}
-        for private, service, status in [('0', '0', 0), ('1', '0', 0), ('1', '1', 0),
-                                         ('0', '1', 73), ('1', '2', 73)]:
-            env = dict(clean, PW_WINE_PRIVATE_DISPATCH=private, PW_WINE_SERVICE_FIXTURE=service)
+            'PW_WINE_PRIVATE_DISPATCH', 'PW_WINE_SERVICE_FIXTURE', 'PW_WINE_FOCUS_NEUTRAL')}
+        for private, service, neutral, status in [('0', '0', '0', 0), ('1', '0', '0', 0), ('1', '1', '0', 0),
+                                                  ('0', '1', '0', 73), ('1', '2', '0', 73), ('1', '1', '1', 0)]:
+            env = dict(clean, PW_WINE_PRIVATE_DISPATCH=private, PW_WINE_SERVICE_FIXTURE=service,
+                       PW_WINE_FOCUS_NEUTRAL=neutral)
             result = subprocess.run(['sh'], input=program, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, status, result.stderr)
             if not status:
                 values = json.loads(result.stdout)
                 self.assertEqual('PW_WINE_SERVICE_FIXTURE=1' in values['opengl_cflags'], service == '1')
+                for flag in ('PW_WINE_FOCUS_NEUTRAL=1','PW_FOCUS_SERVER_ADAPTER=1','PW_FOCUS_SERVER_REQUESTS=1','-I/fixture/source/include'):
+                    self.assertEqual(flag in values['opengl_cflags'], neutral == '1')
                 for arch in ('x86_64_CFLAGS', 'i386_CFLAGS'):
                     self.assertEqual('WINE_PS5_PRIVATE_DISPATCH=1' in values.get(arch, ''), private == '1')
                     self.assertNotIn('PW_WINE_SERVICE_FIXTURE', values.get(arch, ''))

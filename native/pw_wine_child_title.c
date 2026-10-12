@@ -34,6 +34,10 @@ extern const size_t pw_wine_child_image_size;
 _Static_assert(PW_WINE_CHILD_PRIVATE_DISPATCH_ABI == 1, "private dispatcher ABI");
 _Static_assert(PW_WINE_CHILD_WOW64_ABI == 1, "translated dispatcher ABI");
 _Static_assert(PW_WINE_CHILD_CREATION_ABI==PW_WINE_CREATION_ABI,"creation broker cohort");
+#ifndef PW_WINE_CHILD_FOCUS_NEUTRAL
+#define PW_WINE_CHILD_FOCUS_NEUTRAL 0
+#endif
+_Static_assert(PW_WINE_CHILD_FOCUS_NEUTRAL==PW_WINE_FOCUS_NEUTRAL,"focus native matched cohort");
 _Static_assert(PW_WINE_CHILD_CREATION_PROTOCOL==PW_WINE_CREATION_PROTOCOL,"creation protocol cohort");
 
 enum { TITLE_UNUSED, TITLE_PREPARING, TITLE_INACTIVE_FAILURE, TITLE_ACTIVE };

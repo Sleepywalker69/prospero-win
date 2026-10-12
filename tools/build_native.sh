@@ -42,8 +42,10 @@ wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
 wine_child_fixture=${PW_WINE_CHILD_FIXTURE_MODE:-0}
 wine_child_ui=${PW_WINE_CHILD_UI_ENABLED:-0}
+wine_focus_neutral=${PW_WINE_FOCUS_NEUTRAL:-0}
 child_ui_args=()
 [[ $wine_child_ui != 1 ]] || child_ui_args+=(--child-ui)
+[[ $wine_focus_neutral != 1 ]] || child_ui_args+=(--focus-neutral)
 wine_child_user=${PW_WINDOWS_CHILD_USER_DIR:-}
 wine_child_network=${PW_WINDOWS_CHILD_NETWORK_DIR:-}
 wine_child_ipc=${PW_WINDOWS_CHROMIUM_IPC_DIR:-}
@@ -55,6 +57,12 @@ wine_user_enabled=0
 [[ -z $wine_child_user ]] || wine_user_enabled=1
 native_child_mode=${PW_NATIVE_CHILD_MODE:-hello}
 title_id=PPSA99995
+
+[[ $wine_focus_neutral == 0 || ( $wine_focus_neutral == 1 && $wine_child_fixture == 1 && $wine_ipc_enabled == 0 ) ]] || {
+    echo "Focus-neutral requires the isolated matched child cohort without IPC; compilation only" >&2; exit 2; }
+case " ${CFLAGS:-} ${CPPFLAGS:-} ${CROSSCFLAGS:-} " in
+    *PW_FOCUS_*|*PW_WINE_FOCUS_*) echo "Use PW_WINE_FOCUS_NEUTRAL selector, not compiler overrides" >&2; exit 2 ;;
+esac
 
 [[ $wine_child_fixture == 0 || $wine_child_fixture == 1 ]] || {
     echo "PW_WINE_CHILD_FIXTURE_MODE must be 0 or 1" >&2; exit 2; }
@@ -242,6 +250,7 @@ record, header, _, _, _ = title_profiles_input_contract(root, build / 'wine-chil
 (build / 'wine-child-title-inputs.json').write_text(json.dumps(record, indent=2) + '\n')
 (build / 'wine-child-title-config.h').write_text(header)
 PYWINEINPUT
+    [[ $wine_focus_neutral != 1 ]] || common+=(-DPW_WINE_FOCUS_NEUTRAL=1)
     common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -DPW_WINE_CHILD_UI_ENABLED="$wine_child_ui" -DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled" -I"$build" -I"$build/wine-child")
     if [[ $wine_network_enabled == 1 ]]; then
         common+=(-DPW_WINE_NET_PROFILE_ENABLED=1)

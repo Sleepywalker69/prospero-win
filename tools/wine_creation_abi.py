@@ -30,17 +30,22 @@ def returns(code, value):
             'creation marker has an unrecognized constant-return body')
 
 
-def module_identity(data, name):
+def module_identity(data, name, *, protocol=PROTOCOL, focus=None):
     """Replay descriptor and marker admission on the actual packaged SELF."""
     require(name in EXPORTS, 'unexpected creation module')
+    require(protocol == (963 if focus is not None else PROTOCOL), 'creation/focus protocol selection differs')
+    marker_values = {ABI_EXPORT: ABI, PROTOCOL_EXPORT: protocol}
+    if focus is not None:
+        from wine_focus_neutral import markers
+        marker_values.update(markers(focus))
     recovered = extract_self(data, module=True)
     elf = Elf(recovered, module=True)
     exports = {}
-    for export in EXPORTS[name]:
+    for export in (*EXPORTS[name], *(k for k in marker_values if k not in EXPORTS[name])):
         table, address = descriptor(elf, export)
         elf.offset(address, 1, 1)
         exports[export] = table
-    for export, value in ((ABI_EXPORT, ABI), (PROTOCOL_EXPORT, PROTOCOL)):
+    for export, value in marker_values.items():
         address = int(exports[export]['function_address'], 16)
         # Both admitted bodies are bounded and end at ret; read each permitted
         # form separately so a short function never borrows a following body.
@@ -62,11 +67,22 @@ def module_identity(data, name):
     return {'self': record(data), 'recovered': record(recovered), 'exports': exports}
 
 
-def check_runtime(work, report):
+def check_runtime(work, report, *, focus=None):
     work = Path(work)
-    require(report.get('creation') == DECLARATION, 'matched creation capability declaration absent or different')
-    result = {'schema': 'pw-wine-creation-build/1', **DECLARATION, 'executed': False, 'modules': {}}
-    for name, exports in EXPORTS.items():
+    protocol = 963 if focus is not None else PROTOCOL
+    declaration = {**DECLARATION, 'protocol': protocol}
+    require(('focus_neutral' in report) == (focus is not None), 'focus mode requires explicit validator selection')
+    if focus is not None:
+        from wine_focus_neutral import checked, header, markers
+        require(checked(report['focus_neutral']) == checked(focus), 'focus runtime source differs')
+        require((work/'focus-neutral.json').read_text().strip() == __import__('json').dumps(focus,indent=2,sort_keys=True), 'focus staging receipt differs')
+        require((work/'source/include/wine/pw_focus_build.h').read_text() == header(focus), 'focus generated source header differs')
+    require(report.get('creation') == declaration, 'matched creation capability declaration absent or different')
+    result = {'schema': 'pw-wine-creation-build/1', **declaration, 'executed': False, 'modules': {}}
+    for name, original_exports in EXPORTS.items():
+        marker_values = {ABI_EXPORT: ABI, PROTOCOL_EXPORT: protocol}
+        if focus is not None: marker_values.update(markers(focus))
+        exports = (*original_exports, *(k for k in marker_values if k not in original_exports))
         native_path = 'dlls/ntdll/ntdll.so' if name == 'ntdll' else 'server/wineserver'
         native = (work / 'build' / native_path).read_bytes()
         require(report.get('targets', {}).get(native_path, {}).get('sha256') == sha(native),
@@ -78,7 +94,7 @@ def check_runtime(work, report):
                 'creation SELF differs from build report: ' + name)
         shared = Elf(shared_data, module=True)
         converted = Elf(converted_data, module=True)
-        packaged = module_identity(self_data, name)
+        packaged = module_identity(self_data, name, protocol=protocol, focus=focus)
         for export in exports:
             symbols = [s for s in shared.symbols if s['name'] == export]
             require(len(symbols) == 1, 'creation export missing or ambiguous: ' + export)
@@ -89,8 +105,8 @@ def check_runtime(work, report):
             require(address == symbol['value'], 'creation descriptor differs from ELF export')
             at = shared.offset(address, symbol['size'], 1)
             code = shared_data[at:at + symbol['size']]
-            if export in (ABI_EXPORT, PROTOCOL_EXPORT):
-                returns(code, ABI if export == ABI_EXPORT else PROTOCOL)
+            if export in marker_values:
+                returns(code, marker_values[export])
             converted_table, converted_address = descriptor(converted, export)
             require(table == converted_table == {k: packaged['exports'][export][k] for k in table},
                     'conversion changed creation descriptor identity')
@@ -103,9 +119,10 @@ def check_runtime(work, report):
             for p in converted.programs if p[0] == 1), 'SELF changed creation LOAD bytes')
         if name == 'ntdll':
             _, code = function(Elf(native, module=True), PROTOCOL_EXPORT)
-            returns(code, PROTOCOL)
+            returns(code, protocol)
         result['modules'][name] = {'native': record(native), 'shared': record(shared_data),
                                    'converted': record(converted_data), **packaged}
+    if focus is not None: result['focus_neutral'] = focus
     return result
 
 

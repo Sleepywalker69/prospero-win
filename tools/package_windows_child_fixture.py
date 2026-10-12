@@ -727,6 +727,7 @@ def check_retained_helper(helper, sources, values, read, project):
 
 
 def validate_manifest(manifest, values, read):
+    require('focus_neutral' not in manifest, 'compile-only focus cohort cannot be packaged')
     require(manifest.get('schema') == 'pw-windows-child-fixture/1' and
             manifest.get('fixture_executed') is False and manifest.get('console_validated') is False,
             'wrong fixture package schema/scope')
@@ -1198,6 +1199,13 @@ def retain_sources(config, output, report):
     return result
 
 
+def refuse_focus_package(runtime, worker):
+    require('focus_neutral' not in runtime and 'focus_neutral' not in worker and
+            runtime.get('creation', {}).get('protocol') != 963 and
+            worker.get('runtime', {}).get('creation_protocol') != 963,
+            'compile-only focus cohort cannot be packaged or reuse a prefix')
+
+
 def assemble(config, output):
     require(config.get('schema') == 'pw-windows-child-package-inputs/1', 'wrong assembler input schema')
     require(re.fullmatch(r'https://github\.com/Sleepywalker69/prospero-win/actions/runs/[1-9][0-9]*',
@@ -1230,6 +1238,8 @@ def assemble(config, output):
         prefix.ordinary(path, name not in {'cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive',
                                          'sdk_source_archive', 'battlenet_prefix_report', 'user_prefix_report', 'network_prefix_report', 'ipc_prefix_report'})
     repo, wine, host = p['repo'], p['wine_work'], p['host_work']
+    # Refuse before output/prefix staging; existing prefixes are protocol962.
+    refuse_focus_package(read_json(wine / 'report.json'), read_json(p['service_work'] / 'native-wine-child-build.json'))
     project = prefix.project(repo)
     out = prefix.absent(output, tuple(p.values())); out.mkdir(mode=0o755)
     stage = out / 'windows-child-fixture'; stage.mkdir(mode=0o755)

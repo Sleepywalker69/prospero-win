@@ -11,6 +11,11 @@ WINE_SOURCE ?= .deps/wine/source
 # Source-body key checks need an explicitly supplied composed checkout.
 WINE_COMPOSED_SOURCE_EXPLICIT := $(if $(filter undefined,$(origin WINE_COMPOSED_SOURCE)),0,1)
 WINE_COMPOSED_SOURCE ?=
+# Optional raw archive subset and host config for focus full-TU controls.
+# The source-index controls run even when this pair is not configured.
+FOCUS_WINE_SOURCE ?=
+FOCUS_HOST_CONFIG ?=
+FOCUS_SOURCE_ARGS = $(if $(strip $(FOCUS_WINE_SOURCE)),--wine-source "$(FOCUS_WINE_SOURCE)") $(if $(strip $(FOCUS_HOST_CONFIG)),--host-config "$(FOCUS_HOST_CONFIG)")
 HEADERS := $(wildcard include/*.h src/*.h native/*.h tests/*.h)
 
 .PHONY: all test wine-check sanitize audit check-whitespace native native-release box86-catalog clean
@@ -68,6 +73,15 @@ $(eval $(call test_rule,test_pw_wine_dmem_ps5,tests/test_pw_wine_dmem_ps5.c wine
 $(eval $(call test_rule,test_pw_wine_prx,tests/test_pw_wine_prx.c wine/ps5/pw_wine_prx.c,-I.))
 $(eval $(call test_rule,test_pw_wine_threads,tests/test_pw_wine_threads.c wine/ps5/pw_wine_threads.c,-pthread))
 $(eval $(call test_rule,test_pw_wine_sink,tests/test_pw_wine_sink.c wine/ps5/pw_wine_sink.c,-pthread))
+FOCUS_NEUTRAL_TEST_FLAGS = -pthread -DPW_WINE_FOCUS_NEUTRAL=1 -I$(BUILD)/focus-neutral
+$(eval $(call test_rule,test_pw_wine_focus_neutral_sink,tests/test_pw_wine_focus_neutral_sink.c,$(FOCUS_NEUTRAL_TEST_FLAGS)))
+$(BUILD)/test_pw_wine_focus_neutral_sink: wine/ps5/pw_wine_sink.c wine/ps5/pw_wine_sink.h wine/ps5/pw_wine_focus_neutral.h $(BUILD)/focus-neutral/wine/pw_focus_build.h
+.PHONY: focus-neutral-test-header-force
+focus-neutral-test-header-force:
+$(BUILD)/focus-neutral/wine/pw_focus_build.h: focus-neutral-test-header-force | $(BUILD)
+	mkdir -p $(@D)
+	PYTHONDONTWRITEBYTECODE=1 python3 -c 'import sys; sys.path.insert(0,"tools"); import wine_focus_neutral as f; print(f.header(f.contract(".")),end="")' > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 $(eval $(call test_rule,test_pw_wine_child_ui,tests/test_pw_wine_child_ui.c native/pw_wine_child_ui.c wine/ps5/pw_wine_sink.c,-pthread))
 $(BUILD)/test_pw_wine_child_ui: native/pw_wine_child_ui.h wine/ps5/pw_wine_sink.h
 $(eval $(call test_rule,test_pw_wine_child_ui_channel,tests/test_pw_wine_child_ui_channel.c native/pw_wine_child_ui.c,-pthread -D_DEFAULT_SOURCE))
@@ -382,7 +396,7 @@ TESTS := test_wine_ipc_admission_flow test_wine_ipc_installer test_wine_ipc_main
 	test_pw_script_input test_pw_game_profile test_pw_controller_settings test_pw_wine_controller_settings test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
 	test_d3d9_bridge_wire test_vk_replay test_d3d9_objects test_d3d9_program_query test_d3d9_program_wire test_d3d9_factory_wire test_d3d9_resource_wire \
 	test_d3d9_texture_wire test_d3d9_window test_d3d9_window_driver test_vk_wire test_vk_codec test_pw_wine_library test_pw_wine_display \
-	test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_wine_child_ui test_pw_wine_child_ui_channel test_pw_wine_child_ui_handoff test_pw_wine_child_ui_handoff_faults test_wine_ipc_preview_handoff \
+	test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_wine_focus_neutral_sink test_pw_wine_child_ui test_pw_wine_child_ui_channel test_pw_wine_child_ui_handoff test_pw_wine_child_ui_handoff_faults test_wine_ipc_preview_handoff \
 	test_pw_wine_child_ui_runtime test_pw_wine_child_ui_runtime_faults test_pw_wine_child_ui_owner test_pw_wine_child_ui_main test_pw_wine_child_ui_bootstrap test_pw_wine_child_ui_title test_pw_wine_threads test_pw_wine_compat \
 	test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_d3d9_gamma_wire test_d3d9_query_wire \
 	test_d3d9_stateblock_wire test_pw_guest_fp test_d3d9_cursor_wire test_d3d9_up_wire test_pw_vm test_pw_x86_block test_pw_x86_flat \
@@ -417,6 +431,11 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_private_dispatch_build.py
 	python3 tests/test_private_dispatch_wow64_build.py
 	python3 tests/test_wine_creation_abi.py
+	python3 tests/test_wine_focus_identity.py
+	@out=$$(mktemp -d "$(BUILD)/focus-neutral-suite.XXXXXX") && \
+	python3 tests/test_wine_focus_neutral.py --out "$$out/strict" && \
+	python3 tests/test_wine_focus_neutral.py --out "$$out/ubsan-preview" --preview --sanitize undefined && \
+	python3 tests/test_wine_focus_source.py --out "$$out/source" $(FOCUS_SOURCE_ARGS)
 	python3 tests/test_private_dispatch_wow64_contract.py
 	python3 tests/test_wine_fixture_build.py
 	@if test -d "$(WINE_COMPOSED_SOURCE)"; then \
@@ -438,6 +457,8 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_server_fatal.py
 	python3 tests/test_wine_build_performance.py
 	python3 tests/test_windows_child_workflow_options.py
+	python3 tests/test_focus_target_workflow.py
+	python3 tests/test_focus_target_compile.py
 	python3 tests/test_wine_compile_cache.py
 	python3 tests/test_wine_cache_incremental.py
 	python3 tests/test_windows_child_package.py
@@ -577,3 +598,12 @@ clean:
 	rm -rf build dist release tools/__pycache__ tests/__pycache__
 
 $(BUILD)/test_pw_wine_fixture_provider $(BUILD)/test_pw_wine_fixture_owner $(BUILD)/test_pw_wine_child_bootstrap $(BUILD)/test_pw_wine_child_main $(BUILD)/test_pw_wine_child_title $(BUILD)/test_bootstrap_diagnostic_flow $(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_wine_child_data_flow: wine/ps5/pw_wine_creation.h
+
+.PHONY: focus-neutral-host-check
+focus-neutral-host-check: $(BUILD)/test_pw_wine_focus_neutral_sink
+	$(BUILD)/test_pw_wine_focus_neutral_sink
+	python3 tests/test_wine_focus_identity.py
+	@out=$$(mktemp -d "$(BUILD)/focus-neutral.XXXXXX") && \
+	python3 tests/test_wine_focus_neutral.py --out "$$out/strict" && \
+	python3 tests/test_wine_focus_neutral.py --out "$$out/ubsan-preview" --preview --sanitize undefined && \
+	python3 tests/test_wine_focus_source.py --out "$$out/source" $(FOCUS_SOURCE_ARGS)

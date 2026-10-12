@@ -22,7 +22,7 @@ def general_release_admissible(report):
     # This general producer has no reviewed per-runtime/per-child ABI staging.
     # A present experimental declaration, including an unknown version or
     # malformed value, must not be silently treated as a legacy runtime.
-    return isinstance(report, dict) and 'private_dispatcher' not in report
+    return isinstance(report, dict) and 'private_dispatcher' not in report and 'focus_neutral' not in report
 
 
 def thunk_shape(code):
@@ -97,7 +97,7 @@ def check_image(data, anchor, mode):
 
 
 
-def check_build(work, mode, readelf, *, require_wow64=False):
+def check_build(work, mode, readelf, *, require_wow64=False, focus_neutral=None):
     """Supplement the unchanged complete PRX checker with ABI evidence."""
     def need(condition, message):
         if not condition:
@@ -106,6 +106,9 @@ def check_build(work, mode, readelf, *, require_wow64=False):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     work = Path(work)
     report = json.loads((work/'report.json').read_text())
+    need(isinstance(report, dict), 'runtime report must be an object')
+    need(('focus_neutral' in report) == (focus_neutral is not None), 'focus validation requires explicit matched selection')
+    need(focus_neutral is None or (mode == 1 and 'service_fixture' in report), 'focus requires matched service/private dispatch')
     need(isinstance(report, dict) and report.get('prx', {}).get('status') == '0' and
          report.get('errors') == [], 'Wine build failed, was skipped, or has no complete report')
     modules = {}
@@ -153,7 +156,7 @@ def check_build(work, mode, readelf, *, require_wow64=False):
         result['wow64'] = check_runtime(work, report, compiler)
     if mode and 'service_fixture' in report:
         from wine_creation_abi import check_runtime as check_creation
-        result['creation'] = check_creation(work, report)
+        result['creation'] = check_creation(work, report, focus=focus_neutral)
     else:
         need('creation' not in report, 'non-service report contains a creation declaration')
     return result
@@ -170,9 +173,10 @@ def main():
     parser.add_argument('--build-work', type=Path)
     parser.add_argument('--llvm-readelf', type=Path)
     parser.add_argument('--require-wow64', action='store_true')
+    parser.add_argument('--focus-neutral-repo', type=Path, help='explicit source root for compile-only protocol963 validation')
     args = parser.parse_args()
     if args.refuse_release_report:
-        if args.ntdll or args.win32u or args.output or args.build_work or args.llvm_readelf or args.require_wow64:
+        if args.ntdll or args.win32u or args.output or args.build_work or args.llvm_readelf or args.require_wow64 or args.focus_neutral_repo:
             parser.error('release refusal check does not accept module/output arguments')
         report = json.loads(args.refuse_release_report.read_text())
         if not general_release_admissible(report):
@@ -181,10 +185,17 @@ def main():
     if args.build_work:
         if args.ntdll or args.win32u or not args.output or not args.llvm_readelf:
             parser.error('build validation requires --llvm-readelf and --output, without explicit PE inputs')
-        result = check_build(args.build_work, args.mode, args.llvm_readelf, require_wow64=args.require_wow64)
+        focus = None
+        if args.focus_neutral_repo:
+            if args.mode != 1: parser.error('neutral focus requires matched private dispatcher mode1')
+            from wine_focus_neutral import contract
+            focus = contract(args.focus_neutral_repo)
+        result = check_build(args.build_work, args.mode, args.llvm_readelf, require_wow64=args.require_wow64, focus_neutral=focus)
         args.output.write_text(json.dumps(result, indent=2) + '\n')
         print('PASS: actual PE/native dispatcher build identities agree; no runtime execution.')
         return
+    if args.focus_neutral_repo:
+        parser.error('--focus-neutral-repo requires --build-work')
     if args.require_wow64:
         parser.error('--require-wow64 requires --build-work')
     if args.llvm_readelf:

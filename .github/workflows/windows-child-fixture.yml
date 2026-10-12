@@ -28,6 +28,7 @@ concurrency:
            github.event.deleted == false) ||
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
+           !contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
@@ -92,6 +93,7 @@ jobs:
       ${{ ((github.event_name == 'workflow_dispatch' && inputs.enable_chromium_ipc == true) ||
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
+           !contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
            (github.event.action == 'opened' || github.event.action == 'synchronize' ||
@@ -114,6 +116,7 @@ jobs:
            github.event.deleted == false) ||
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
+           !contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
@@ -192,6 +195,7 @@ jobs:
            github.event.deleted == false) ||
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
+           !contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
@@ -238,6 +242,7 @@ jobs:
            github.event.deleted == false) ||
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
+           !contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
@@ -284,6 +289,7 @@ jobs:
            github.event.deleted == false) ||
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
+           !contains(github.event.pull_request.labels.*.name, 'build-focus-neutral-target-compile-only') &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
