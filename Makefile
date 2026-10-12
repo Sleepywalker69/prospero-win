@@ -393,6 +393,8 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_compile_cache.py
 	python3 tests/test_reuse_host_wine.py
 	python3 tests/test_export_host_compiler_cache.py
+	python3 tests/test_import_host_compiler_cache.py
+	python3 tests/test_wine_cache_component.py
 	python3 tests/test_wine_cache_incremental.py
 	python3 tests/test_windows_child_package.py
 	python3 tests/test_windows_child_user_contract.py
