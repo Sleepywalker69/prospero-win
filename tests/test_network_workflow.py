@@ -89,7 +89,11 @@ class NetworkWorkflow(unittest.TestCase):
         self.assertEqual([role(i) for i in joins],['original','user','network']*2)
         early,late=[i for i in joins if role(i)=='network']
         host=next(i for i,s in enumerate(self.steps) if '--stage host-runtime --' in s.get('run',''))
-        self.assertEqual(early+1,host)
+        self.assertEqual(early+2,host)
+        admission=self.steps[early+1]
+        self.assertEqual(admission['id'],'host-reuse')
+        self.assertNotIn('if',admission);self.assertNotIn('continue-on-error',admission)
+        self.assertIn('tools/reuse_host_wine.py',admission['run'])
         for i,output in ((early,'early-network-reference-join'),(late,'network-reference-join')):
             step=self.steps[i];self.assertNotIn('if',step);self.assertNotIn('continue-on-error',step)
             self.assertEqual(step['env'],{'GH_TOKEN':'${{ github.token }}'})

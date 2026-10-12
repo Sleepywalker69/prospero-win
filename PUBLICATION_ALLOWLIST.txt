@@ -1075,3 +1075,12 @@ tests/test_pw_wine_controller_settings.c
 tests/test_controller_settings_launcher.py
 tests/test_pw_diagnostics_flush.c
 tests/test_wine_child_progress_failure.c
+tools/reuse_host_wine.py
+tests/test_reuse_host_wine.py
+docs/verified-host-reuse.md
+
+# Exact reviewed host compiler cache transport only.
+.github/workflows/export-host-compiler-cache.yml
+tools/export_host_compiler_cache.py
+tests/test_export_host_compiler_cache.py
+docs/host-cache-113-save.json
