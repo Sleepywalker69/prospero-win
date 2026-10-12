@@ -160,6 +160,66 @@ def validate_link_map(data, original_output):
     require(observed == objects, 'isolated link map has missing or foreign object input')
 
 
+# Pinned SDK include/freebsd/stdio.h declares these as FILE * objects, not
+# functions. ps5log_release_stdio/capture uses fflush/setvbuf on these pointers.
+# Admit only their ordinary 64-bit GOT slots, never arbitrary data imports.
+STDIO_POINTERS = {'__stdoutp', '__stderrp'}
+STDIO_PROVIDER = 'libSceLibcInternal.sprx'
+
+
+def inspect_import_contract(linked, converted, providers, stdio_exports):
+    graph = inspect_bindings(linked, converted, providers)
+    require(not FORBIDDEN.intersection(graph) and not any(name.startswith(('sceSysmodule', 'pw_wine_')) for name in graph),
+            'isolated title contains forbidden ordinary-wrapper/native imports')
+    for name in ('_init_env', 'atexit', 'exit'):
+        require(graph.get(name, {}).get('provider') == STDIO_PROVIDER, 'full CRT import missing or misbound')
+    objects, slots = set(), set()
+    for symbol in linked.symbols[1:]:
+        name = symbol['name']; chosen = graph[name]['provider']
+        require(symbol['binding'] == 1 and symbol['visibility'] == 0,
+                'unsupported isolated title import binding/visibility: ' + name)
+        relocations = graph[name]['relocations']
+        if name in STDIO_POINTERS:
+            exported = stdio_exports.get(name, {})
+            require(chosen == STDIO_PROVIDER and symbol['type'] == 1 and
+                    symbol['section'] == 0 and symbol['value'] == 0 and symbol['size'] == 0 and
+                    providers[chosen]['definitions'][name] == 'OBJECT' and
+                    exported.get('name') == name and exported.get('type') == 1 and
+                    exported.get('binding') == 1 and exported.get('visibility') == 0 and
+                    0 < exported.get('section', 0) < 0xff00 and exported.get('size') == 0,
+                    'unsupported isolated stdio pointer contract: ' + name)
+            require(len(relocations) == 1 and relocations[0]['type'] == 6 and
+                    relocations[0]['addend'] == 0 and relocations[0]['address'] % 8 == 0,
+                    'unsupported isolated stdio pointer relocation: ' + name)
+            address = relocations[0]['address']
+            require(all(sum(r['address'] < address + 8 and address < r['address'] + 8
+                            for r in image.relocations) == 1 for image in (linked, converted)),
+                    'overlapping isolated stdio pointer relocation: ' + name)
+            objects.add(name)
+        else:
+            require(symbol['type'] in (0, 2) and providers[chosen]['definitions'][name] == 'FUNC',
+                    'unsupported isolated title import type: ' + name)
+            require(relocations and all(r['type'] in (6, 7) and r['addend'] == 0 for r in relocations),
+                    'unsupported isolated title import relocation: ' + name)
+        for relocation in relocations:
+            require(relocation['address'] % 8 == 0 and relocation['address'] not in slots,
+                    'overlapping or unaligned isolated import slot')
+            slots.add(relocation['address'])
+            linked.offset(relocation['address'], 8, 6)
+            converted.offset(relocation['address'], 8, 6)
+    require(objects == STDIO_POINTERS, 'isolated logger stdio pointer set differs')
+    return graph
+
+
+def inspect_stdio_exports(data, provider_record):
+    require(hashlib.sha256(data).hexdigest() == provider_record['sha256'],
+            'isolated libc provider changed during inspection')
+    exports = Elf(data, module=True).symbols
+    rows = {name: [s for s in exports if s['name'] == name] for name in STDIO_POINTERS}
+    require(all(len(items) == 1 for items in rows.values()), 'ambiguous isolated stdio provider exports')
+    return {name: items[0] for name, items in rows.items()}
+
+
 def inspect_title(directory, sdk, bindir, identity, helper_sha, commands):
     linked = Elf(helper.raw(directory / 'title.linked.elf', 4 << 20))
     converted_bytes = helper.raw(directory / 'title.elf', 4 << 20)
@@ -169,17 +229,9 @@ def inspect_title(directory, sdk, bindir, identity, helper_sha, commands):
     providers = {name: provider(sdk / 'target/lib' / leaf, bindir, commands)
                  for name, leaf in PROVIDERS.items()}
     require(all(item['soname'] == name for name, item in providers.items()), 'title provider SONAME differs')
-    graph = inspect_bindings(linked, converted, providers)
-    require(not FORBIDDEN.intersection(graph) and not any(name.startswith(('sceSysmodule', 'pw_wine_')) for name in graph),
-            'isolated title contains forbidden ordinary-wrapper/native imports')
-    for name in ('_init_env', 'atexit', 'exit'):
-        require(graph.get(name, {}).get('provider') == 'libSceLibcInternal.sprx', 'full CRT import missing or misbound')
-    for symbol in linked.symbols[1:]:
-        name = symbol['name']; chosen = graph[name]['provider']
-        require(symbol['type'] in (0, 2) and symbol['binding'] == 1 and symbol['visibility'] == 0 and
-                providers[chosen]['definitions'][name] == 'FUNC', 'unsupported isolated title import type')
-        require(all(r['type'] in (6, 7) and r['addend'] == 0 for r in graph[name]['relocations']),
-                'unsupported isolated title import relocation')
+    libc = helper.raw(sdk / 'target/lib' / PROVIDERS[STDIO_PROVIDER])
+    graph = inspect_import_contract(linked, converted, providers,
+                                    inspect_stdio_exports(libc, providers[STDIO_PROVIDER]))
     # This dedicated all-C body needs no additional constructors. Refuse an
     # unknown constructor path rather than inferring safety from main alone.
     validate_constructor_arrays((linked, converted))
