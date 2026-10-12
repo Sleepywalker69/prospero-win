@@ -80,6 +80,17 @@ class Policy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regular"):
             policy.inventory(staged)
 
+    def test_hardlinked_staging_cannot_mutate_donor_timestamp(self):
+        staged = self.root/"staged"; shutil.copytree(self.source, staged)
+        target = staged/"server/process.c"; target.unlink()
+        donor = self.source/"server/process.c"; before = donor.stat().st_mtime_ns
+        os.link(donor, target)
+        current = copy.deepcopy(self.old)
+        barrier = max(r["mtime_ns"] for r in self.old["files"].values())
+        with self.assertRaisesRegex(ValueError, "hardlinks"):
+            policy.prepare_staged_timestamps(self.old, current, staged, barrier, now_ns=barrier+1)
+        self.assertEqual(donor.stat().st_mtime_ns, before)
+
     def test_reconcile_exact_bytes_modes_clock_and_membership(self):
         staged = self.root/"staged"; shutil.copytree(self.source, staged)
         current = manifest(staged, self.ctx)

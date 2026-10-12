@@ -40,6 +40,8 @@ def inventory(root):
             continue
         if not stat.S_ISREG(info.st_mode):
             raise ValueError("source inventory requires regular files: " + str(relative))
+        if info.st_nlink != 1:
+            raise ValueError("source files must not share hardlinks: " + str(relative))
         result[relative.as_posix()] = {
             "sha256": digest(path), "mode": stat.S_IMODE(info.st_mode),
             "mtime_ns": info.st_mtime_ns,
