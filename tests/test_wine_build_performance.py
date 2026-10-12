@@ -234,7 +234,8 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         host_index = next(i for i, step in enumerate(steps)
                           if '--stage host-runtime --' in step.get('run', ''))
         self.assertLess(target_index, early_index)
-        self.assertEqual(early_index + 3, host_index)
+        self.assertEqual(early_index + 4, host_index)
+        self.assertEqual(steps[early_index + 3]['id'], 'host-reuse')
         self.assertIn('--job original-network-x64-reference', steps[early_index + 2]['run'])
         self.assertIn('--job original-user-x64-reference', steps[early_index + 1]['run'])
         join_source = (ROOT / 'tools/wine_workflow_join.py').read_text()
@@ -288,7 +289,8 @@ class WorkflowPerformanceContracts(unittest.TestCase):
                              '"$RUNNER_TEMP/fixture-evidence/' + output + '.json"')
         host = next(i for i, step in enumerate(steps)
                     if '--stage host-runtime --' in step.get('run', ''))
-        self.assertEqual(early + 2, host)
+        self.assertEqual(early + 3, host)
+        self.assertEqual(steps[early + 2]['id'], 'host-reuse')
         self.assertIn('--job original-network-x64-reference', steps[early + 1]['run'])
         self.assertEqual(steps[early - 1]['id'], 'early-reference-join')
         downloads = [i for i, step in enumerate(steps)
@@ -388,7 +390,30 @@ class WorkflowPerformanceContracts(unittest.TestCase):
                 found = [step for step in steps if '--stage ' + stage + ' --' in step.get('run', '')]
                 self.assertEqual(len(found), 1)
                 step = found[0]
-                self.assertNotIn('if', step)
+                if stage == 'host-runtime':
+                    self.assertEqual(step['if'], "${{ steps.host-reuse.outputs.reused != 'true' }}")
+                    admission = [s for s in steps if s.get('id') == 'host-reuse']
+                    self.assertEqual(len(admission), 1)
+                    self.assertNotIn('if', admission[0])
+                    self.assertNotIn('continue-on-error', admission[0])
+                    self.assertIn('tools/reuse_host_wine.py', admission[0]['run'])
+                    self.assertNotIn('cache-hit', step['if'])
+                    support = [s for s in steps if '--stage host-reuse-support --' in s.get('run', '')]
+                    self.assertEqual(len(support), 1)
+                    self.assertEqual(support[0]['if'], "${{ steps.host-reuse.outputs.reused == 'true' }}")
+                    self.assertNotIn('continue-on-error', support[0])
+                    self.assertNotIn('|| true', support[0]['run'])
+                    self.assertIn('check_support', support[0]['run'])
+                    for target in ('loader/wine', 'server/wineserver', 'dlls/ntdll/ntdll.so',
+                                   'dlls/wow64/x86_64-windows/libwow64.a',
+                                   'dlls/ntdll/x86_64-windows/libntdll.a',
+                                   'libs/winecrt0/x86_64-windows/libwinecrt0.a',
+                                   'libs/compiler-rt/x86_64-windows/libcompiler-rt.a'):
+                        self.assertIn(target, support[0]['run'])
+                        self.assertLess(support[0]['run'].index(target),
+                                        support[0]['run'].index('check_support'))
+                else:
+                    self.assertNotIn('if', step)
                 self.assertNotIn('continue-on-error', step)
                 self.assertNotIn('|| true', step['run'])
                 self.assertIn('tools/wine_compile_cache.py run', step['run'])
