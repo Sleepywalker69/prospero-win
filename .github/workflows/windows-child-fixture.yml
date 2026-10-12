@@ -371,7 +371,16 @@ jobs:
         run: |
           python3 tools/wine_workflow_join.py --job original-network-x64-reference \
             --output "$RUNNER_TEMP/fixture-evidence/early-network-reference-join.json"
+      - name: Reuse an exactly matched accepted host runtime when available
+        id: host-reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/reuse_host_wine.py --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" \
+            --cohort "$COHORT" --cache-state "$RUNNER_TEMP/fixture-evidence/ccache-host" \
+            --run 38223633711 --report "$RUNNER_TEMP/fixture-evidence/host-reuse.json"
       - name: Build complete matching host Wine
+        if: ${{ steps.host-reuse.outputs.reused != 'true' }}
         env:
           PW_CACHE_RESTORE_HIT: ${{ steps.host-cache.outputs.cache-hit }}
           PW_CACHE_MATCHED_KEY: ${{ steps.host-cache.outputs.cache-matched-key }}
@@ -380,8 +389,26 @@ jobs:
             timeout 180m sh tools/build_host_wine.sh \
             --source "$WINE_SOURCE" --work "$HOST_WORK" --jobs "$BUILD_JOBS" \
             2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-wine.log"
+      - name: Build only required host support objects after verified reuse
+        if: ${{ steps.host-reuse.outputs.reused == 'true' }}
+        env:
+          PW_CACHE_RESTORE_HIT: ${{ steps.host-cache.outputs.cache-hit }}
+          PW_CACHE_MATCHED_KEY: ${{ steps.host-cache.outputs.cache-matched-key }}
+        run: |
+          python3 tools/wine_compile_cache.py run --state "$RUNNER_TEMP/fixture-evidence/ccache-host" --stage host-reuse-support -- \
+            timeout 20m make -C "$HOST_WORK/build" -j"$BUILD_JOBS" \
+            loader/wine server/wineserver dlls/ntdll/ntdll.so \
+            dlls/wow64/x86_64-windows/libwow64.a dlls/ntdll/x86_64-windows/libntdll.a \
+            libs/winecrt0/x86_64-windows/libwinecrt0.a libs/compiler-rt/x86_64-windows/libcompiler-rt.a \
+            2>&1 | tee "$RUNNER_TEMP/fixture-evidence/host-reuse-support.log"
+          python3 - "$HOST_WORK" <<'PY'
+          import pathlib, sys
+          sys.path.insert(0, str(pathlib.Path.cwd() / 'tools'))
+          from reuse_host_wine import check_support
+          check_support(pathlib.Path(sys.argv[1]))
+          PY
       - name: Save checked host compiler results only
-        if: ${{ steps.host-cache.outputs.cache-hit != 'true' }}
+        if: ${{ steps.host-reuse.outputs.reused != 'true' && steps.host-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/ccache-host
@@ -397,6 +424,12 @@ jobs:
           cp "$RUNNER_TEMP/wine-source.tar.gz" "$checkpoint/sources/wine.tar.gz"
           git archive HEAD | gzip -n > "$checkpoint/sources/prospero-win.tar.gz"
           cp "$COHORT" "$checkpoint/source-cohort.json"
+          if [[ -f "$RUNNER_TEMP/fixture-evidence/host-reuse.json" ]]; then
+            cp "$RUNNER_TEMP/fixture-evidence/host-reuse.json" "$checkpoint/host-reuse.json"
+          fi
+          if [[ -d "$RUNNER_TEMP/fixture-evidence/host-reuse-inputs" ]]; then
+            cp -a "$RUNNER_TEMP/fixture-evidence/host-reuse-inputs" "$checkpoint/host-reuse-inputs"
+          fi
           tar -C "$checkpoint" -czf "$RUNNER_TEMP/windows-child-host-checkpoint.tar.gz" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -609,8 +642,8 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/fixture-evidence/source-retention.log"
           python3 tools/package_windows_child_fixture.py assemble --inputs "$RUNNER_TEMP/package-inputs.json" \
             --out "$RUNNER_TEMP/windows-child-fixture" 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/assembly.log"
-          python3 tools/package_windows_child_fixture.py verify --package "$RUNNER_TEMP/windows-child-fixture/windows-child-fixture"
-          python3 tools/package_windows_child_fixture.py verify --archive "$RUNNER_TEMP/windows-child-fixture/windows-child-fixture.tar.gz"
+          # assemble already verifies the directory and complete archive round trip.
+          # Do not repeat the same scans without any intervening mutation.
           cp "$RUNNER_TEMP/windows-child-fixture/ARCHIVE-CHECK.json" "$RUNNER_TEMP/fixture-evidence/"
           sha256sum "$RUNNER_TEMP/windows-child-fixture/windows-child-fixture.tar.gz" | tee "$RUNNER_TEMP/fixture-evidence/final-archive.sha256"
       - name: Upload the complete checked original-fixture archive
