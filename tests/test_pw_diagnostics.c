@@ -61,7 +61,8 @@ int main(void)
     int sent_before = line_calls, retries_before = retries;
     uint64_t local_start = now_ms();
     pw_diagnostics_log_local("local-only value=%d text=%s", -37, "retained");
-    pw_diagnostics_tick(5000000000ull);
+    /* Immediate retention does not rely on the main/display loop ticking. */
+    pw_diagnostics_flush_local();
     assert(now_ms() - local_start < 100);
     assert(line_calls == sent_before && retries == retries_before);
     hold_send = 0; pthread_join(held, NULL);

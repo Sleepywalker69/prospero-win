@@ -92,6 +92,7 @@ static struct {
  unsigned request_frames,prepared_frames,cancel_frames,cancel_response_mode;
  unsigned partial,file_at,rx_at,rx_size,tx_size,phase,bad_hash,extra_byte,changed,mutate_after_close,header_bad;
  int native_errno,net_errno,setuid_error,net_close_error,close_error,socket_value,module_value,module_started,socket_failure,null_errno,net_errno_calls,net_module_value,sleep_interrupts,short_sleep,backward_at;
+ int socket_errno_pending,clobber_net_errno;
  unsigned char helper[8],upload[256],incoming[128];int ops[1024];unsigned tx_before[1024],rx_before[1024];
 }m;
 static uint64_t *shared_clock;
@@ -109,10 +110,10 @@ static int boundary(int operation)
  if(shared_clock)*shared_clock=m.now;
  errno=m.native_errno;return m.fail_at==(int)m.calls;
 }
-static int now(void *unused,uint64_t *out){(void)unused;*out=m.now;errno=ERANGE;return m.clock_fail;}
+static int now(void *unused,uint64_t *out){(void)unused;CHECK(!m.socket_errno_pending);if(m.clobber_net_errno&&m.net_errno_calls)m.net_errno=ERANGE;*out=m.now;errno=ERANGE;return m.clock_fail;}
 static int stop(void *unused){(void)unused;return m.cancel;}
 static int test_poll(struct pollfd*p,nfds_t n,int timeout)
-{CHECK(n==1&&p->fd==3&&p->events==POLLIN&&timeout==0);p->revents=(short)((m.poll_at&&m.calls>=(unsigned)m.poll_at)||(m.hup_after_socket&&m.sockets>=1)||(m.hup_after_request&&m.tx_size>8)?POLLHUP:m.poll_flags);if(m.poll_error){errno=EIO;return -1;}return p->revents?1:0;}
+{CHECK(!m.socket_errno_pending);CHECK(n==1&&p->fd==3&&p->events==POLLIN&&timeout==0);p->revents=(short)((m.poll_at&&m.calls>=(unsigned)m.poll_at)||(m.hup_after_socket&&m.sockets>=1)||(m.hup_after_request&&m.tx_size>8)?POLLHUP:m.poll_flags);if(m.poll_error){errno=EIO;return -1;}return p->revents?1:0;}
 static int test_stat(const char *path,struct stat *st)
 {CHECK(!strcmp(path,"/data"));m.stats++;int fail=boundary(F_STAT);memset(st,0,sizeof(*st));if(fail)return m.fail_result;if(m.stat_error){errno=m.stat_error;return -1;}
  if(m.missing_pair_always||m.stats<=(unsigned)m.missing_pair_count){errno=ENOENT;return -1;}
@@ -140,7 +141,7 @@ int net_load(unsigned id,...){CHECK(id==UINT32_C(0x8000001c)&&!m.modules&&!m.loa
 int net_handle(uint32_t id,int32_t *handle){CHECK(id==UINT32_C(0x8000001c)&&handle&&*handle==-1&&m.loads==1&&!m.modules&&!m.handles&&!m.symbols);m.handles++;int fail=boundary(F_NET_HANDLE);*handle=m.net_module_value;return fail?m.fail_result:0;}
 int net_init(void){m.inits++;CHECK(0);return -1;} /* Extra initialization is forbidden. */
 int net_socket(const char *name,int family,int type,int protocol)
-{CHECK(name&&!strcmp(name,"pw-wine-child-data")&&family==2&&type==1&&protocol==6);CHECK(!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.inits);m.sockets++;if(boundary(F_SOCKET)||m.socket_failure)return m.fail_result;return m.socket_value;}
+{CHECK(name&&!strcmp(name,"pw-wine-child-data")&&family==2&&type==1&&protocol==6);CHECK(!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.inits);m.sockets++;int rc=(boundary(F_SOCKET)||m.socket_failure)?m.fail_result:m.socket_value;m.socket_errno_pending=rc<0;return rc;}
 int net_connect(int fd,const struct sockaddr *address,socklen_t size)
 {static const unsigned char expected[16]={16,2,0x23,0x3d,127,0,0,1,0,0,0,0,0,0,0,0};CHECK(fd==m.socket_value&&address&&size==16&&!memcmp(address,expected,16));m.connects++;return boundary(F_CONNECT)?m.fail_result:0;}
 int net_option(int fd,int level,int option,const void *value,socklen_t size)
@@ -169,7 +170,7 @@ int net_receive(int fd,void *bytes,size_t n,int flags)
  }
  size_t left=m.rx_size-m.rx_at;if(n>left)n=left;if(m.partial&&n>5)n=5;memcpy(bytes,m.incoming+m.rx_at,n);m.rx_at+=(unsigned)n;return (int)n;}
 int net_close(int fd){CHECK(fd==m.socket_value&&!m.net_closes);m.net_closes++;int fail=boundary(F_NET_CLOSE);m.net_errno=EBADF;return fail?m.fail_result:m.net_close_error;}
-int *net_errno(void){m.net_errno_calls++;return m.null_errno?NULL:&m.net_errno;}
+int *net_errno(void){m.net_errno_calls++;m.socket_errno_pending=0;return m.null_errno?NULL:&m.net_errno;}
 int32_t test_module(const char *path,size_t n,const void*a,uint32_t flags,const void*b,int *started)
 {CHECK(!strcmp(path,"/system/common/lib/libSceSysmodule.sprx")&&!n&&!a&&!flags&&!b&&started);m.modules++;int fail=boundary(F_MODULE);*started=m.module_started;return fail?m.fail_result:m.module_value;}
 /* Historical lookup boundary: the observed PR80 failure remains injectable.
@@ -196,6 +197,7 @@ static int run(void){const PwWineChildDataConfig config={TEST_TRANSACTION,NULL,N
 static struct {unsigned count,last,fail,expire,control;} progress_test;
 static int adapter_progress(void *context,unsigned stage)
 {
+    CHECK(!m.socket_errno_pending);
     CHECK(context==&progress_test&&stage>progress_test.last&&stage>=PW_WCP_DATA_OBSERVED&&stage<=PW_WCP_NET_CLOSED);
     progress_test.last=stage;progress_test.count++;
     CHECK(!result.ready&&io.stage_end==31000&&io.total_end==61000);
@@ -204,6 +206,7 @@ static int adapter_progress(void *context,unsigned stage)
     if(stage>=PW_WCP_RESULT_RECEIVED)CHECK(result.terminal);
     if(stage>=PW_WCP_DATA_SETTLED)CHECK(result.settled_ms>=1000);
     if(stage==PW_WCP_NET_CLOSED)CHECK(m.net_closes==1);
+    if(stage==PW_WCP_NET_SOCKET_READY)CHECK(m.sockets==1&&!m.socket_failure&&!m.socket_errno_pending);
     if(progress_test.expire==stage)m.now=io.stage_end;
     if(progress_test.control==stage)m.poll_flags=POLLHUP;
     return progress_test.fail==stage?-1:0;
@@ -216,6 +219,13 @@ static void progress_adapter_tests(void)
     CHECK(result.ready&&progress_test.count==1&&progress_test.last==PW_WCP_DATA_OBSERVED&&!m.opens&&!result.possible_apply);
     reset();success_responses();enable_progress();CHECK(!run());
     CHECK(result.ready&&result.terminal&&progress_test.count==17&&progress_test.last==PW_WCP_NET_CLOSED);
+    /* A negative socket result captures Net errno before any observer, never
+     * emits success stage 6, and keeps that snapshot if a later clock mutates
+     * both error domains. The production data/wire paths are unchanged. */
+    reset();enable_progress();m.socket_failure=1;m.clobber_net_errno=1;
+    CHECK(run()&&result.api==PW_WCD_SOCKET&&result.raw==-1&&result.errno_valid&&result.native_error==EIO);
+    CHECK(progress_test.last==PW_WCP_NET_SOCKET_BEGIN&&m.net_errno_calls==1&&!m.socket_errno_pending);
+    CHECK(result.no_dispatch&&!result.possible_apply&&!result.terminal&&!result.ready&&!m.sends&&!m.net_closes);
     for(unsigned stage=PW_WCP_DATA_OBSERVED;stage<=PW_WCP_NET_CLOSED;stage++)for(unsigned mode=0;mode<3;mode++){
         reset();success_responses();enable_progress();
         if(mode==0)progress_test.fail=stage;

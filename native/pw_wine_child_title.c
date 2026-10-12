@@ -100,9 +100,21 @@ static void record(void *context, const char *event, uint64_t generation,
                    int64_t first, int64_t second, int64_t third)
 {
     const Title *t = context;
+    int saved_errno = errno;
     pw_diagnostics_log_local("PW_WINE_CHILD_OWNER profile=%u session=%llu event=%s generation=%llu first=%lld second=%lld third=%lld",
         t->profile, (unsigned long long)t->session, event, (unsigned long long)generation,
         (long long)first, (long long)second, (long long)third);
+    /* Supervisor-only observations already captured by the owner. Do not wait
+     * for the display loop's next 100 ms flush at this fragile startup boundary.
+     * Writes can wait for storage; failure neither retries work nor releases
+     * helper/service ownership. No child callback or wire contract is changed. */
+    if (!strncmp(event, "bootstrap_", 10) || !strncmp(event, "wire_", 5) ||
+        !strncmp(event, "helper_", 7) || !strncmp(event, "child_failure", 13) ||
+        !strcmp(event, "first_failure") || !strcmp(event, "progress_refused") ||
+        !strcmp(event, "channel_zero_hup") || !strcmp(event, "root_release_safe") ||
+        !strncmp(event, "supervisor_", 11))
+        pw_diagnostics_flush_local();
+    errno = saved_errno;
 }
 static void socket_sink(void *context, const PwWineFixtureSocketResult *r)
 {

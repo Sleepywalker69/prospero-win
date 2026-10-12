@@ -186,6 +186,15 @@ void pw_diagnostics_log_local(const char *format, ...)
     va_end(arguments);
 }
 
+void pw_diagnostics_flush_local(void)
+{
+    int saved_errno = errno;
+    pthread_mutex_lock(&lock);
+    flush();
+    pthread_mutex_unlock(&lock);
+    errno = saved_errno;
+}
+
 void pw_diagnostics_tick(uint64_t now)
 {
     pthread_mutex_lock(&lock);
