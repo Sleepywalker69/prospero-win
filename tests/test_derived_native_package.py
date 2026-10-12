@@ -302,4 +302,23 @@ class DerivedTests(unittest.TestCase):
                     self.assertNotEqual(d.pkg.record(out/'report.json'),
                                         d.pkg.record(package/'provenance/wine-build.json'))
 
+
+    def test_workflow_fetches_exact_donor_without_changing_checkout(self):
+        import yaml
+        workflow = yaml.safe_load((Path(__file__).resolve().parents[1]/
+                                  '.github/workflows/derived-native-child.yml').read_text())
+        steps = workflow['jobs']['native-only']['steps']
+        names = [step.get('name') for step in steps]
+        fetch = names.index('Fetch and verify exact donor source object')
+        self.assertLess(names.index('Run derived admission controls before downloads'), fetch)
+        self.assertLess(fetch, names.index('Download exact accepted same-repository donor artifacts'))
+        self.assertEqual(steps[fetch]['run'], """set -euo pipefail
+head_before=$(git rev-parse HEAD)
+git fetch --no-tags origin 7acf08abea63640a737c7cec0cae4c0da61b82f5:refs/pw-derived/donor113
+[[ $(git rev-parse 'refs/pw-derived/donor113^{commit}') == 7acf08abea63640a737c7cec0cae4c0da61b82f5 ]]
+[[ $(git rev-parse 'refs/pw-derived/donor113^{tree}') == e28679c3d6c1a8735b9069509062c4114c166c47 ]]
+[[ $(git rev-parse HEAD) == "$head_before" ]]
+""")
+        self.assertNotIn('--depth', steps[fetch]['run'])
+
 if __name__=='__main__':unittest.main()
