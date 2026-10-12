@@ -667,8 +667,128 @@ static void test_native_interception_empty_regain(void)
     }
 }
 
+/* Buffered ScePadRead records, rather than a fabricated aggregate edge mask.
+ * Snapshot XInput deliberately exposes only the final state; mapped mouse/key
+ * paths preserve a single complete tap once, in down/up order. */
+static PwPadPs5Data short_tap_batch[4];
+static int short_tap_count;
+static int short_tap_read(int32_t handle, PwPadPs5Data *samples, int32_t capacity)
+{
+    assert(handle == 7 && capacity == PW_PAD_PS5_BATCH);
+    assert(short_tap_count >= 0 && short_tap_count <= 4);
+    memcpy(samples, short_tap_batch, (size_t)short_tap_count * sizeof(*samples));
+    return short_tap_count;
+}
+static void test_native_buffered_short_tap(void)
+{
+    for (unsigned mode = 0; mode != 3; ++mode) {
+        PwPadPs5 pad;
+        PwWineInputRouter router;
+        PwGameInput profile;
+        PwWineInput events[PW_WINE_ROUTED_EVENTS];
+        PwWinePad game;
+        PwPadPs5Ops ops = interruption_ops;
+        ops.pad_read = short_tap_read;
+        pw_game_input_init(&profile);
+        profile.mode = mode == 2 ? PW_GAME_INPUT_XINPUT : PW_GAME_INPUT_KEYBOARD;
+        profile.start_mode = mode == 1 ? PW_GAME_START_MOUSE : PW_GAME_START_PROFILE;
+        profile.mouse = PW_GAME_STICK_NONE;
+        memset(profile.bindings, 0, sizeof(profile.bindings));
+        profile.bindings[0] = (PwGameBinding){CROSS, PW_GAME_BIND_KEY, 0x20};
+        pw_wine_input_router_init(&router, &profile);
+        assert(pw_pad_ps5_open(&pad, &ops, interruption_map, 1) == PW_OK);
+        short_tap_batch[0] = (PwPadPs5Data){
+            .left_stick = {128,128}, .right_stick = {128,128},
+            .connected = 1, .timestamp = 1, .connected_count = 1
+        };
+        short_tap_count = 1;
+        assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+        assert(router.active && !router.analog_blocked);
+
+        short_tap_batch[1] = short_tap_batch[0];
+        short_tap_batch[0].timestamp = 2;
+        short_tap_batch[0].buttons = CROSS;
+        short_tap_batch[1].timestamp = 3;
+        short_tap_count = 2;
+        const uint64_t serial = pad.sample_serial;
+        size_t n = interruption_poll(&pad, &router, &profile, events, &game);
+        assert(pad.sample_serial == serial + 2 && pad.core.stats.max_batch == 2);
+        assert(pad.core.pressed_edges == CROSS && pad.core.released_edges == CROSS);
+        assert(!pad.core.previous_buttons && !router.held);
+        if (mode == 2) {
+            /* Current-state API limitation: the intermediate press is not in
+             * the final XInput state. Do not invent a held frame to mask it. */
+            assert(!n && game.connected);
+            interruption_neutral_gamepad(&game);
+        } else {
+            assert(n == 2 && events[0].down && !events[1].down);
+            const uint32_t type = mode == 1 ? PW_WINE_INPUT_MOUSE_BUTTON : PW_WINE_INPUT_KEY;
+            const uint32_t code = mode == 1 ? 0 : 0x20;
+            assert(events[0].type == type && events[1].type == type);
+            assert(events[0].code == code && events[1].code == code);
+            assert(!game.connected);
+        }
+
+        /* Re-reading those same timestamps and then receiving no records
+         * cannot replay the tap or leave either output path held. */
+        assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+        assert(pad.sample_serial == serial + 2 && !pad.core.pressed_edges &&
+               !pad.core.released_edges);
+        short_tap_count = 0;
+        assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+        assert(!pad.core.previous_buttons && !router.held);
+        interruption_neutral_gamepad(&game);
+
+        /* A loss inside an otherwise chronological batch invalidates its tap.
+         * Returning neutral in the last record must not bypass the router's
+         * discontinuity reset, even though both accumulated edges are set. */
+        short_tap_batch[0] = short_tap_batch[1];
+        short_tap_batch[0].timestamp = 4;
+        short_tap_batch[0].buttons = CROSS;
+        short_tap_batch[1] = short_tap_batch[0];
+        short_tap_batch[1].timestamp = 5;
+        short_tap_batch[1].buttons = CROSS | 0x80000000u;
+        short_tap_batch[2] = short_tap_batch[0];
+        short_tap_batch[2].timestamp = 6;
+        short_tap_batch[2].buttons = 0;
+        short_tap_count = 3;
+        assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+        assert(pad.intercepted_samples == 1 && pad.discontinuities == 1);
+        assert(pad.core.pressed_edges == CROSS && pad.core.released_edges == CROSS);
+        assert(router.active && !router.held && !pad.core.previous_buttons);
+        interruption_neutral_gamepad(&game);
+        short_tap_count = 0;
+        assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+
+        /* Edge masks do not retain event multiplicity. Two complete taps in
+         * one read currently produce one mapped pulse, not an event FIFO.
+         * The final-state XInput path continues to report neutral. */
+        for (unsigned i = 0; i != 4; ++i) {
+            short_tap_batch[i] = short_tap_batch[2];
+            short_tap_batch[i].timestamp = 7 + i;
+            short_tap_batch[i].buttons = i % 2 ? 0 : CROSS;
+        }
+        short_tap_count = 4;
+        n = interruption_poll(&pad, &router, &profile, events, &game);
+        assert(pad.core.stats.max_batch == 4 && !pad.core.previous_buttons);
+        assert(pad.core.pressed_edges == CROSS && pad.core.released_edges == CROSS);
+        assert(n == (mode == 2 ? 0u : 2u));
+        if (mode != 2) {
+            assert(events[0].down && !events[1].down);
+            const uint32_t type = mode == 1 ? PW_WINE_INPUT_MOUSE_BUTTON : PW_WINE_INPUT_KEY;
+            const uint32_t code = mode == 1 ? 0 : 0x20;
+            assert(events[0].type == type && events[1].type == type);
+            assert(events[0].code == code && events[1].code == code);
+        }
+        assert(game.connected == (mode == 2));
+        interruption_neutral_gamepad(&game);
+        assert(pw_pad_ps5_close(&pad) == PW_OK);
+    }
+}
+
 int main(void)
 {
+    test_native_buffered_short_tap();
     test_native_interception_empty_regain();
     test_configured_controller();
     test_delivery_backpressure();
