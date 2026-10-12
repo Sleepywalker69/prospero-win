@@ -360,6 +360,12 @@ else:
     def test_collector_failure_is_not_hidden(self):
         self.prepare();self.run_step('paired-compile');(self.repo/'fail-collect').touch()
         self.run_step('collect',29);self.assertFalse(Path(self.env['GATE_ARTIFACT']).exists())
+        self.run_step('diagnostics')
+        report=json.loads((self.root/'unaccepted-diagnostics/UNACCEPTED.json').read_text())
+        for flag in ('accepted','complete_runtime','target_executed','descendants_settled'):
+            self.assertIs(report[flag], False)
+        self.assertTrue({'control-receipts/driver.log','neutral-receipts/driver.log'} <=
+                        {row['path'] for row in report['logs']})
 
     def test_existing_work_receipt_and_link_refused_before_compilation(self):
         self.prepare()
@@ -391,6 +397,59 @@ else:
         self.assertFalse((out/'evidence/linked.log').exists())
         self.assertFalse((out/'evidence/linked-directory').exists())
         self.assertFalse((out/'evidence/not-a-log.bin').exists())
+
+    def test_critical_paired_tails_survive_crowded_prerequisite_and_control_trees(self):
+        critical = []
+        for mode in ('neutral', 'control'):
+            critical.append(mode + '-receipts/driver.log')
+            critical.extend(mode + '-work/' + name for name in
+                            ('service-translation-units.log', 'configure.log', 'build/config.log', 'focus-neutral-stage.log'))
+        for name in critical:
+            path = self.root/name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'HEAD-MUST-NOT-SURVIVE' + b'x'*(256*1024) + b'INNER-ERROR-TAIL')
+        for directory in ('evidence', 'host-tools', 'tls', 'control-work/aaa'):
+            root = self.root/directory
+            root.mkdir(parents=True, exist_ok=True)
+            for i in range(40): (root/('aaa-%02d.log'%i)).write_text('prerequisite')
+        self.run_step('diagnostics')
+        out = self.root/'unaccepted-diagnostics'
+        records = json.loads((out/'UNACCEPTED.json').read_text())['logs']
+        self.assertEqual(len(records), 32)
+        self.assertEqual(len({r['path'] for r in records}), 32)
+        self.assertLessEqual(sum(r['retained_bytes'] for r in records), 8*1024*1024)
+        by_name = {r['path']: r for r in records}
+        for name in critical:
+            self.assertIn(name, by_name)
+            self.assertTrue(by_name[name]['truncated'])
+            self.assertEqual(by_name[name]['retained_bytes'], 256*1024)
+            data = (out/name).read_bytes()
+            self.assertTrue(data.endswith(b'INNER-ERROR-TAIL'))
+            self.assertNotIn(b'HEAD-MUST-NOT-SURVIVE', data)
+
+    def test_priority_paths_refuse_links_and_fifo_and_keep_exact_tail_boundary(self):
+        evidence = self.root/'evidence'
+        (evidence/'exact.log').write_bytes(b'e'*(256*1024))
+        (evidence/'over.log').write_bytes(b'h' + b't'*(256*1024))
+        os.mkfifo(evidence/'pipe.log')
+        outside = self.base/'outside'
+        outside.mkdir()
+        (outside/'driver.log').write_text('must not retain')
+        (self.root/'neutral-receipts').symlink_to(outside, target_is_directory=True)
+        work = self.root/'neutral-work'
+        work.mkdir()
+        (work/'configure.log').symlink_to(outside/'driver.log')
+        (work/'build').symlink_to(outside, target_is_directory=True)
+        (outside/'config.log').write_text('must not retain')
+        self.run_step('diagnostics')
+        out = self.root/'unaccepted-diagnostics'
+        rows = {r['path']: r for r in json.loads((out/'UNACCEPTED.json').read_text())['logs']}
+        self.assertEqual(set(rows), {'evidence/exact.log', 'evidence/over.log'})
+        self.assertFalse(rows['evidence/exact.log']['truncated'])
+        self.assertEqual(rows['evidence/exact.log']['original_bytes'], 256*1024)
+        self.assertTrue(rows['evidence/over.log']['truncated'])
+        self.assertEqual(rows['evidence/over.log']['original_bytes'], 256*1024+1)
+        self.assertEqual((out/'evidence/over.log').read_bytes(), b't'*(256*1024))
 
 
 if __name__ == '__main__': unittest.main()

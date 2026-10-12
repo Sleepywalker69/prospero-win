@@ -85,6 +85,31 @@ def verify_default_source(root, source):
     need(actual==expected,'focus staging default patch index differs')
 
 
+HEADERS = ('wine/pw_focus_build.h', 'wine/pw_focus_cohort.h', 'wine/pw_focus_protocol.h')
+
+
+def verify_headers(source, value):
+    """Check ordinary SOURCES entries before Wine's configure/makedep runs."""
+    source = Path(source)
+    text = (source/'include/Makefile.in').read_text()
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(r'^ *SOURCES\s*=', line)]
+    need(len(starts) == 1, 'focus header SOURCES assignment differs')
+    rows = []
+    for line in lines[starts[0]:]:
+        rows.append(line)
+        if not line.rstrip().endswith('\\'): break
+    tokens = ' '.join(rows).replace('\\', ' ').split()
+    need(sorted(t for t in tokens if 'pw_focus_' in t) == list(HEADERS),
+         'focus header registration differs')
+    need(len(re.findall(r'pw_focus_', text)) == len(HEADERS),
+         'duplicate or misplaced focus header registration')
+    for name in HEADERS:
+        path = source/'include'/name
+        need(path.is_file() and not path.is_symlink(), 'missing or linked focus header: ' + name)
+    need((source/'include/wine/pw_focus_build.h').read_text() == header(value),
+         'generated focus header differs')
+
 def stage(root, source, output):
     raw_output=Path(output).absolute()
     need(not any(p.is_symlink() for p in (raw_output,*raw_output.parents)), 'linked focus receipt path')
@@ -97,6 +122,7 @@ def stage(root, source, output):
         subprocess.run(['git','-C',str(source),'apply','--index',str(root/'wine/focus-neutral'/name)],check=True)
     need('#define SERVER_PROTOCOL_VERSION 963' in (source/'include/wine/server_protocol.h').read_text(),'focus patch protocol differs')
     (source/'include/wine/pw_focus_build.h').write_text(header(value))
+    verify_headers(source, value)
     output.write_text(json.dumps(value,indent=2,sort_keys=True)+'\n')
     return value
 

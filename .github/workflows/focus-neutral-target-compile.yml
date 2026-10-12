@@ -272,32 +272,45 @@ jobs:
           root = pathlib.Path(os.environ['FOCUS_ROOT'])
           out = root / 'unaccepted-diagnostics'
           out.mkdir(exist_ok=False)
-          records = []
-          for name in ('evidence', 'host-tools', 'tls', 'control-work', 'neutral-work',
-                       'control-receipts', 'neutral-receipts'):
+          records, seen = [], set()
+          def retain(path):
+              relative = path.relative_to(root)
+              if len(records) == 32 or relative in seen: return
+              if any(p.is_symlink() for p in (path.parent, *path.parent.parents)): return
+              try:
+                  fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                  with os.fdopen(fd, 'rb') as stream:
+                      st = os.fstat(stream.fileno())
+                      if not stat.S_ISREG(st.st_mode): return
+                      stream.seek(max(0, st.st_size - 256 * 1024))
+                      data = stream.read(256 * 1024)
+              except OSError:
+                  return
+              target = out / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              seen.add(relative)
+              records.append({'path': str(relative), 'original_bytes': st.st_size,
+                              'retained_bytes': len(data), 'truncated': st.st_size > len(data)})
+          # Reserve the inner driver/compiler/configure tails for BOTH modes
+          # before prerequisite trees can exhaust the shared 32-log budget.
+          for mode in ('neutral', 'control'):
+              retain(root / (mode + '-receipts') / 'driver.log')
+              for filename in ('service-translation-units.log', 'configure.log',
+                               'build/config.log', 'focus-neutral-stage.log'):
+                  retain(root / (mode + '-work') / filename)
+          for filename in ('neutral963-driver.log', 'default962-driver.log',
+                           'source-fetch.log', 'host-tools.log', 'dependencies.log'):
+              retain(root / 'evidence' / filename)
+          for name in ('evidence', 'neutral-receipts', 'control-receipts', 'neutral-work',
+                       'control-work', 'host-tools', 'tls'):
               source = root / name
               if not source.is_dir() or source.is_symlink(): continue
               for parent, dirs, files in os.walk(source, followlinks=False):
                   dirs[:] = sorted(d for d in dirs if not (pathlib.Path(parent) / d).is_symlink())
                   for filename in sorted(files):
                       if len(records) == 32: break
-                      if not filename.endswith('.log'): continue
-                      path = pathlib.Path(parent) / filename
-                      try:
-                          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                          with os.fdopen(fd, 'rb') as stream:
-                              st = os.fstat(stream.fileno())
-                              if not stat.S_ISREG(st.st_mode): continue
-                              stream.seek(max(0, st.st_size - 256 * 1024))
-                              data = stream.read(256 * 1024)
-                      except OSError:
-                          continue
-                      relative = path.relative_to(root)
-                      target = out / relative
-                      target.parent.mkdir(parents=True, exist_ok=True)
-                      target.write_bytes(data)
-                      records.append({'path': str(relative), 'original_bytes': st.st_size,
-                                      'retained_bytes': len(data), 'truncated': st.st_size > len(data)})
+                      if filename.endswith('.log'): retain(pathlib.Path(parent) / filename)
                   if len(records) == 32: break
           (out / 'UNACCEPTED.json').write_text(json.dumps({
               'schema': 'pw-focus-target-translation-unit-failure/1', 'accepted': False,

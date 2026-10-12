@@ -99,4 +99,73 @@ class Identity(unittest.TestCase):
             for name in ('server/main.c','include/wine/server_protocol.h','dlls/ntdll/unix/server.c'):
                 path=wine/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('/* inert */\n')
             self.assertTrue(source_inputs(wine,config))
+
+    def test_header_registry_and_source_binding_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d)
+            include = source/'include'
+            (include/'wine').mkdir(parents=True)
+            registry = include/'Makefile.in'
+            good = 'SOURCES = \\\n' + ''.join('\t' + name + ' \\\n' for name in focus.HEADERS) + '\twinbase.h\n'
+            registry.write_text(good)
+            for name in focus.HEADERS:
+                (include/name).write_text(focus.header(self.c) if name.endswith('pw_focus_build.h') else '/* inert header */\n')
+            focus.verify_headers(source, self.c)
+            for name in focus.HEADERS:
+                row = '\t' + name + ' \\\n'
+                for altered in (good.replace(row, ''), good.replace(row, row + row),
+                                good.replace(row, row.replace('.h', '.h.in')),
+                                good.replace(row, '').replace('winbase.h\n', 'winbase.h\n' + row)):
+                    registry.write_text(altered)
+                    with self.assertRaisesRegex(ValueError, 'registration'):
+                        focus.verify_headers(source, self.c)
+                registry.write_text(good)
+                path = include/name
+                original = path.read_text()
+                path.unlink()
+                with self.assertRaisesRegex(ValueError, 'missing or linked'):
+                    focus.verify_headers(source, self.c)
+                path.symlink_to(registry)
+                with self.assertRaisesRegex(ValueError, 'missing or linked'):
+                    focus.verify_headers(source, self.c)
+                path.unlink()
+                path.write_text(original)
+            registry.write_text(good + ' SOURCES = winbase.h\n')
+            with self.assertRaisesRegex(ValueError, 'assignment'):
+                focus.verify_headers(source, self.c)
+            registry.write_text(good.replace('SOURCES =', 'SOURCES +='))
+            with self.assertRaisesRegex(ValueError, 'assignment'):
+                focus.verify_headers(source, self.c)
+            registry.write_text(good)
+            (include/'wine/pw_focus_build.h').write_text(focus.header(self.c).replace('MODE 1', 'MODE 2'))
+            with self.assertRaisesRegex(ValueError, 'generated focus header'):
+                focus.verify_headers(source, self.c)
+
+    def test_header_repair_keeps_accepted_patch_inventory_and_stage_order(self):
+        self.assertEqual(focus.OPTIONAL, ('0001-server-adapter.patch', '0002-server-requests.patch',
+                                         '0003-neutral-cohort.patch'))
+        self.assertEqual(focus.ACCEPTED, ('5b4f6fb8d06b5878669ad2ac7ad784ac1e9b37b2596f9e21b51f24325a51cde6',
+            '8d3924c4539a064f311d3638e34de3f773d2f5e64a69b8d5ba86beeb2e2f7894'))
+        focus.contract(ROOT)  # production fixed-hash and exact inventory checks
+        patch3 = (ROOT/'wine/focus-neutral/0003-neutral-cohort.patch').read_text()
+        registry = patch3.split('diff --git a/include/Makefile.in', 1)[1].split('diff --git ', 1)[0]
+        additions = [line[1:] for line in registry.splitlines() if line.startswith('+') and not line.startswith('+++')]
+        self.assertEqual(additions, ['\t' + name + ' \\' for name in focus.HEADERS])
+        build = (ROOT/'tools/build_wine_ps5.sh').read_text()
+        self.assertLess(build.index('python3 "$root/tools/wine_focus_neutral.py"'),
+                        build.index('(cd "$build" && "$tree/configure"'))
+
+    def test_makedep_dependency_parser_and_required_ci_path(self):
+        import check_focus_makedep as makedep
+        generated = ('dlls/ntdll/unix/server.o: /source/include/wine/pw_focus_build.h \\\n'
+                     ' /source/include/wine/pw_focus_protocol.h\n'
+                     'dlls/ntdll/unix/server.o: /source/include/wine/pw_focus_cohort.h\n')
+        self.assertEqual(makedep.dependencies(generated, 'dlls/ntdll/unix/server.o'),
+                         {'/source/include/' + name for name in focus.HEADERS})
+        with self.assertRaisesRegex(AssertionError, 'missing generated object rule'):
+            makedep.dependencies(generated, 'server/pw_focus_requests.o')
+        flow = (ROOT/'.github/workflows/ci.yml').read_text()
+        self.assertIn('python3 tools/check_focus_makedep.py --wine-source "$PROSPERO_WINE_SOURCE"', flow)
+        self.assertIn('--work "$RUNNER_TEMP/focus-makedep" --out "$RUNNER_TEMP/wine-evidence/focus-makedep"', flow)
+
 if __name__=='__main__':unittest.main()

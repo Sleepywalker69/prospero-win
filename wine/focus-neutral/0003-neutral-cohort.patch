@@ -47,6 +47,19 @@ index c9f0dee..9a18871 100644
      install_server_fatal_sink( module );
  #ifdef __PROSPERO__
      share_name_changes( module );  /* before the server starts creating files */
+diff --git a/include/Makefile.in b/include/Makefile.in
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1144,6 +1144,9 @@ SOURCES = \
+ 	wine/ps5_mutex_word.h \
+ 	wine/ps5_sync_backend.h \
+ 	wine/ps5_sync_word.h \
++	wine/pw_focus_build.h \
++	wine/pw_focus_cohort.h \
++	wine/pw_focus_protocol.h \
+ 	wine/pw_wine_fixture_provider.h \
+ 	wine/pw_wine_creation.h \
+ 	wine/pw_wine_fixture_socket.h \
 diff --git a/include/wine/pw_focus_cohort.h b/include/wine/pw_focus_cohort.h
 new file mode 100644
 index 0000000..1a948ed
