@@ -321,4 +321,73 @@ git fetch --no-tags origin 7acf08abea63640a737c7cec0cae4c0da61b82f5:refs/pw-deri
 """)
         self.assertNotIn('--depth', steps[fetch]['run'])
 
+
+    def test_restore_validator_headers_from_exact_donor_source(self):
+        import subprocess
+        cases = ('valid', 'tree', 'missing-patch', 'nonregular-patch', 'duplicate-patch',
+                 'malformed-patch', 'non-new-patch', 'header-hash', 'missing-hash',
+                 'extra-hash', 'invalid-hash', 'existing-source', 'extra-output', 'linked-output')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);package=root/'package';runtime=root/'runtime'
+                (package/'sources').mkdir(parents=True)
+                (package/'provenance').mkdir();runtime.mkdir()
+                expected={};members=[]
+                for index,(header,name) in enumerate(d.VALIDATOR_PATCHES.items()):
+                    content=('#define PW_RESTORED_'+str(index)+' 1\n').encode()
+                    expected[header]=hashlib.sha256(content).hexdigest()
+                    patch_bytes=(b'--- /dev/null\n+++ b/include/wine/'+header.encode()+
+                                 b'\n@@ -0,0 +1 @@\n+'+content)
+                    kind='file'
+                    if index==0:
+                        if case=='missing-patch':continue
+                        if case=='nonregular-patch':kind='link'
+                        if case=='malformed-patch':patch_bytes=b'not a patch\n'
+                        if case=='non-new-patch':
+                            patch_bytes=(b'--- a/include/wine/'+header.encode()+
+                                         b'\n+++ b/include/wine/'+header.encode()+
+                                         b'\n@@ -1 +1 @@\n-old\n+'+content)
+                    members.append((name,patch_bytes,kind))
+                    if case=='duplicate-patch' and index==0:members.append((name,patch_bytes,kind))
+                archive_path=package/'sources/project.tar.gz'
+                with tarfile.open(archive_path,'w:gz') as archive:
+                    for name,data,kind in members:
+                        member=tarfile.TarInfo(name);member.mode=0o644
+                        if kind=='link':
+                            member.type=tarfile.SYMTYPE;member.linkname='elsewhere'
+                            archive.addfile(member)
+                        else:
+                            member.size=len(data);archive.addfile(member,io.BytesIO(data))
+                donor=copy.deepcopy(d.DONOR)
+                donor['project']['tree']=('0'*40 if case in ('tree','duplicate-patch')
+                                           else d.archive_tree(archive_path))
+                if case=='header-hash':expected['pw_private_dispatch.h']='0'*64
+                if case=='missing-hash':del expected['pw_private_dispatch.h']
+                if case=='extra-hash':expected['other.h']='a'*64
+                if case=='invalid-hash':expected['pw_private_dispatch.h']='not-a-digest'
+                (package/'provenance/private-dispatch-abi.json').write_bytes(
+                    d.pkg.json_bytes({'wow64':{'validator':{'headers':expected}}}))
+                if case=='existing-source':
+                    (runtime/'source').mkdir();(runtime/'source/keep').write_bytes(b'keep')
+                real_run=d.subprocess.run
+                def apply(*args,**kwargs):
+                    result=real_run(*args,**kwargs)
+                    extra=Path(kwargs['cwd'])/'unexpected'
+                    if case=='extra-output':extra.write_bytes(b'not a header')
+                    elif case=='linked-output' and not extra.is_symlink():extra.symlink_to(root/'outside')
+                    return result
+                with patch.object(d,'DONOR',donor),patch.object(d.subprocess,'run',side_effect=apply):
+                    if case=='valid':
+                        self.assertEqual(d.restore_validator_headers(package,runtime),expected)
+                        self.assertEqual({p.relative_to(runtime/'source').as_posix()
+                                          for p in (runtime/'source').rglob('*') if p.is_file()},
+                                         {'include/wine/'+name for name in d.VALIDATOR_PATCHES})
+                        for header,digest in expected.items():
+                            self.assertEqual(d.pkg.record(runtime/'source/include/wine'/header)['sha256'],digest)
+                    else:
+                        with self.assertRaises((ValueError,subprocess.CalledProcessError)):
+                            d.restore_validator_headers(package,runtime)
+                if case=='existing-source':
+                    self.assertEqual((runtime/'source/keep').read_bytes(),b'keep')
+
 if __name__=='__main__':unittest.main()

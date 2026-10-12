@@ -168,6 +168,38 @@ def restore_runtime(evidence,out,package):
         require(name in records,'required ABI input omitted: '+name)
     return records
 
+
+VALIDATOR_PATCHES = {
+    'pw_private_dispatch.h': 'wine/patches/0910-ntdll-private-dispatcher-abi-proposal.patch',
+    'pw_private_dispatch_i386.h': 'wine/patches/0914-ntdll-private-dispatcher-wow64.patch',
+}
+
+def restore_validator_headers(package,runtime):
+    archive_path=package/'sources/project.tar.gz'
+    require(archive_tree(archive_path)==DONOR['project']['tree'],'validator donor source tree differs')
+    expected=pkg.read_json(package/'provenance/private-dispatch-abi.json')['wow64']['validator']['headers']
+    require(set(expected)==set(VALIDATOR_PATCHES) and all(isinstance(v,str) and
+            re.fullmatch('[0-9a-f]{64}',v) for v in expected.values()),'validator header pins differ')
+    patches={}
+    with tarfile.open(archive_path,'r:gz') as archive:
+        for header,name in VALIDATOR_PATCHES.items():
+            members=[m for m in archive.getmembers() if m.name==name]
+            require(len(members)==1 and members[0].isreg() and 0<members[0].size<=1<<20,
+                    'validator patch absent or unsafe')
+            patches[header]=archive.extractfile(members[0]).read()
+    source=fresh(runtime/'source')
+    for header,data in patches.items():
+        subprocess.run(['git','apply','--include=include/wine/'+header,'-'],
+                       input=data,cwd=source,check=True,capture_output=True,timeout=30)
+    paths=list(source.rglob('*'))
+    require(all(not p.is_symlink() and (p.is_dir() or p.is_file()) for p in paths),
+            'validator source contains link or special file')
+    require({p.relative_to(source).as_posix() for p in paths if p.is_file()}==
+            {'include/wine/'+name for name in VALIDATOR_PATCHES},'validator source file set differs')
+    for header,digest in expected.items():
+        require(pkg.record(source/'include/wine'/header)['sha256']==digest,'validator header hash differs')
+    return expected
+
 def prepare(root,package_zip,evidence_zip,out):
     out=fresh(out)
     outer=unpack_zip(package_zip,out/'outer',DONOR['zip'])
@@ -176,6 +208,7 @@ def prepare(root,package_zip,evidence_zip,out):
     package=unpack_donor(members[0],out/'package')
     evidence=unpack_zip(evidence_zip,out/'evidence',DONOR['evidence'])
     runtime=out/'runtime';records=restore_runtime(evidence,runtime,package)
+    restore_validator_headers(package,runtime)
     fixtures=out/'fixtures';fixtures.mkdir()
     original=fixtures/'original';original.mkdir()
     copy(original,'fixture-source.json',package/'provenance/fixture-source.json')
