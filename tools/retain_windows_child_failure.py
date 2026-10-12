@@ -19,13 +19,16 @@ import subprocess
 MAX_FILE=256*1024*1024
 MAX_TOTAL=2*1024*1024*1024
 MAX_FILES=10000
+# The isolated preview needs compiler diagnostics, not another source archive.
+PREVIEW_LOG_LIMITS=(4*1024*1024,16*1024*1024,256)
 
 
 def sha(data):return hashlib.sha256(data).hexdigest()
 
 
 class Collector:
-    def __init__(self,out):
+    def __init__(self,out,*,limits=None):
+        self.limits=limits
         self.out=Path(out).absolute()
         if self.out.exists() or self.out.is_symlink():raise ValueError('retention output must be fresh')
         for parent in self.out.parents:
@@ -37,7 +40,8 @@ class Collector:
         if not name or Path(name).is_absolute() or any(p in ('','..','.') for p in name.split('/')):
             raise ValueError('unsafe retained path')
         if name in self.files:raise ValueError('duplicate retained path')
-        if len(data)>MAX_FILE or self.total+len(data)>MAX_TOTAL or len(self.files)>=MAX_FILES:
+        max_file,max_total,max_files=self.limits or (MAX_FILE,MAX_TOTAL,MAX_FILES)
+        if len(data)>max_file or self.total+len(data)>max_total or len(self.files)>=max_files:
             self.omissions.append({'path':name,'reason':'bounded retention limit','bytes':len(data)});return
         destination=self.out/name;destination.parent.mkdir(parents=True,exist_ok=True)
         destination.write_bytes(data);destination.chmod(0o644)
@@ -53,8 +57,11 @@ class Collector:
         info=path.lstat()
         if not stat.S_ISREG(info.st_mode):
             self.omissions.append({'path':name,'reason':'nonregular input'});return
-        if info.st_size>MAX_FILE:
+        max_file,max_total,max_files=self.limits or (MAX_FILE,MAX_TOTAL,MAX_FILES)
+        if info.st_size>max_file:
             self.omissions.append({'path':name,'reason':'file retention limit','bytes':info.st_size});return
+        if self.total+info.st_size>max_total or len(self.files)>=max_files:
+            self.omissions.append({'path':name,'reason':'bounded retention limit','bytes':info.st_size});return
         self.put(name,path.read_bytes(),stat.S_IMODE(info.st_mode))
 
     def tree(self,base,label,suffixes=None):
@@ -84,13 +91,26 @@ def archive_git(collector,root,name):
             'tracked_source_clean':not run('diff','HEAD','--name-only').strip()}
 
 
-def collect_title_inspection(collector,title_build):
-    sibling=title_build.with_name(title_build.name+'-wine-child-title-inspection')
-    inspection=sibling/'inspection'
-    if not sibling.is_dir() or sibling.is_symlink() or not inspection.is_dir() or inspection.is_symlink():return
+def collect_numbered_inspection(collector,base,label):
+    base=Path(base).absolute();inspection=base/'inspection'
+    if any(path.is_symlink() for path in (inspection,*inspection.parents)) or not inspection.is_dir():return
     for path in sorted(inspection.glob('*-tool.log')):
         if re.fullmatch(r'[0-9]{3,}-tool\.log',path.name):
-            collector.copy(path,sibling,'target/title-inspection')
+            collector.copy(path,base,label)
+
+
+def collect_title_inspection(collector,title_build):
+    sibling=title_build.with_name(title_build.name+'-wine-child-title-inspection')
+    collect_numbered_inspection(collector,sibling,'target/title-inspection')
+
+
+def collect_preview_inspection(title_build,title_check,out):
+    """Keep only numbered regular-file logs from all isolated preview checks."""
+    c=Collector(out,limits=PREVIEW_LOG_LIMITS)
+    collect_numbered_inspection(c,Path(title_build)/'wine-child','target/child')
+    collect_title_inspection(c,Path(title_build))
+    collect_numbered_inspection(c,title_check,'target/title-check')
+    return c.finish({'preview_inspection_only':True})
 
 
 def collect(args):

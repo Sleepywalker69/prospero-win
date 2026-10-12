@@ -32,6 +32,7 @@ GATE = """${{ (github.event_name == 'workflow_dispatch' && inputs.child_ui_previ
 BUILD = 'Build the opt-in enabled preview in fresh isolated outputs'
 COLLECT = 'Recheck both modes and collect static-only preview evidence with exact sources'
 UPLOAD = 'Upload the isolated preview static-validation artifact'
+INSPECTION = 'Retain bounded isolated preview compiler diagnostics'
 EVIDENCE = 'Keep bounded preview logs even when its validation fails'
 
 
@@ -86,6 +87,13 @@ def recipe_contract(flow, native):
     require(upload['with'] == {'name': 'child-ui-preview-static-validation-${{ github.sha }}-${{ github.run_attempt }}',
                               'path': '${{ runner.temp }}/child-ui-preview-static-validation/',
                               'retention-days': '7', 'if-no-files-found': 'error'}, 'preview artifact identity differs')
+    inspection, evidence = selected[INSPECTION], selected[EVIDENCE]
+    require(inspection['if'] == evidence['if'] and 'always()' in inspection['if'] and
+            'continue-on-error' not in inspection, 'preview diagnostics must run even after failure')
+    for text in ('from retain_windows_child_failure import collect_preview_inspection',
+                 "temp / 'preview-source/build/native-windows-child-fixture'",
+                 "temp / 'preview-title-inspection'", "temp / 'preview-evidence/compiler-inspection'"):
+        require(text in inspection['run'], 'isolated preview diagnostic route omission: ' + text)
     ordered = job['steps']
     control = next(s for s in ordered if s.get('name') == 'Build the full-CRT child once and the matched title')
     require('PW_WINE_CHILD_UI_ENABLED' not in control['env'] and '--child-ui' not in control['run'] and
@@ -93,6 +101,10 @@ def recipe_contract(flow, native):
     normal_upload = next(s for s in ordered if s.get('name') == 'Upload the complete checked original-fixture archive')
     require(ordered.index(normal_upload) < ordered.index(build) < ordered.index(collect) < ordered.index(upload),
             'preview must follow successful default-off package')
+    require(ordered.index(upload) < ordered.index(inspection) < ordered.index(evidence),
+            'compiler diagnostics must be collected before the preview evidence upload')
+    require(evidence['with']['path'] == '${{ runner.temp }}/preview-evidence/',
+            'preview compiler diagnostics must share the existing evidence artifact')
     names = [s['with']['name'] for j in flow['jobs'].values() for s in j['steps']
              if s.get('uses', '').startswith('actions/upload-artifact@')]
     require(len(names) == len(set(names)), 'workflow artifact collision')
@@ -155,9 +167,10 @@ def event_contract(flow):
         for step in (BUILD, COLLECT, UPLOAD):
             collector.require(actual_job_gate(selected[step]['if'], context) is preview,
                               name + ': preview step admission differs: ' + step)
-        evidence = selected[EVIDENCE]['if'].replace('always()', 'true')
-        collector.require(actual_job_gate(evidence, context) is preview,
-                          name + ': preview evidence selection differs')
+        for step in (INSPECTION, EVIDENCE):
+            evidence = selected[step]['if'].replace('always()', 'true')
+            collector.require(actual_job_gate(evidence, context) is preview,
+                              name + ': preview evidence selection differs: ' + step)
         prefix = 'windows-child-fixture-'
         group = flow['concurrency']['group']
         collector.require(group.startswith(prefix), 'concurrency prefix differs')
@@ -211,7 +224,11 @@ class WorkflowRecipe(unittest.TestCase):
                            (BUILD, "rev-parse 'HEAD^{tree}'"),
                            (COLLECT, 'package_windows_child_fixture.py retain-sources'),
                            (COLLECT, 'collect_child_ui_preview_validation.py'),
-                           (COLLECT, '--sources "$RUNNER_TEMP/preview-retained-sources"')):
+                           (COLLECT, '--sources "$RUNNER_TEMP/preview-retained-sources"'),
+                           (INSPECTION, 'import collect_preview_inspection'),
+                           (INSPECTION, 'preview-source/build/native-windows-child-fixture'),
+                           (INSPECTION, 'preview-title-inspection'),
+                           (INSPECTION, 'preview-evidence/compiler-inspection')):
             with self.subTest(name=name, omission=text):
                 mutant = copy.deepcopy(self.flow)
                 steps(mutant)[name]['run'] = steps(mutant)[name]['run'].replace(text, 'omitted')
@@ -223,6 +240,8 @@ class WorkflowRecipe(unittest.TestCase):
                      lambda f: steps(f)[BUILD]['env'].update(PW_OUTPUT_SUFFIX='-unadmitted'),
                      lambda f: steps(f)[BUILD]['env'].update(PW_WINE_CHILD_RUNTIME='other-runtime'),
                      lambda f: steps(f)[BUILD].pop('if'),
+                     lambda f: steps(f)[INSPECTION].update(**{'if': GATE}),
+                     lambda f: steps(f)[EVIDENCE]['with'].update(path='${{ runner.temp }}/wrong/'),
                      lambda f: steps(f)[UPLOAD].update(**{'if': '${{ always() }}'}),
                      lambda f: steps(f)[COLLECT].update(**{'continue-on-error': 'true'}),
                      lambda f: steps(f)[UPLOAD]['with'].update(name='windows-child-fixture-${{ github.sha }}-${{ github.run_attempt }}'),
@@ -295,6 +314,41 @@ print('INERT_ENABLED_CHECK')
                 result = self.run_build(root, script, enabled)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((root / 'temp/preview-title-inspection/inert.json').exists())
+
+
+    def test_failed_preview_build_retains_real_compiler_stderr_before_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self.fixture(root)
+            build = root / 'repo/tools/build_native.sh'
+            build.write_text(build.read_text() + """
+mkdir -p "$root/build/native-windows-child-fixture/wine-child/inspection"
+printf 'argv: compiler\\nstdout: partial output\\nstderr: inert compiler failure\\n' > "$root/build/native-windows-child-fixture/wine-child/inspection/007-tool.log"
+echo 'compiler failed; details are in the numbered inspection log'
+exit 42
+""")
+            subprocess.run(['git', '-C', str(root / 'repo'), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root / 'repo'), '-c', 'user.name=Test', '-c',
+                            'user.email=test@example.invalid', 'commit', '-qm', 'Inert compiler failure'], check=True)
+            result = self.run_build(root)
+            self.assertEqual(result.returncode, 42, result.stderr)
+            evidence = root / 'temp/preview-evidence'
+            self.assertNotIn('stderr: inert compiler failure', (evidence / 'title-build.log').read_text())
+            self.assertFalse((root / 'temp/preview-title-inspection').exists())
+            # Run the actual workflow collector after failure, from the original
+            # workspace, where the default-off logs must remain out of scope.
+            (root / 'repo/tools/retain_windows_child_failure.py').write_bytes(
+                (ROOT / 'tools/retain_windows_child_failure.py').read_bytes())
+            control = root / 'repo/build/native-windows-child-fixture/wine-child/inspection'
+            control.mkdir(parents=True); (control / '001-tool.log').write_text('default-off only')
+            result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', steps(self.flow)[INSPECTION]['run']],
+                                    cwd=root / 'repo', env=dict(os.environ, RUNNER_TEMP=str(root / 'temp')),
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            kept = evidence / 'compiler-inspection/target/child/inspection/007-tool.log'
+            self.assertIn('stderr: inert compiler failure', kept.read_text())
+            manifest = json.loads((evidence / 'compiler-inspection/UNACCEPTED-BUILD.json').read_text())
+            self.assertEqual(set(manifest['files']), {'target/child/inspection/007-tool.log'})
+            self.assertFalse(manifest['accepted'])
 
 
 class CollectorControls(unittest.TestCase):

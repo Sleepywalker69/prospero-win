@@ -1,7 +1,11 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Headless application main, linked with the unchanged foundation app_crt.
  * Child-local data readiness precedes logs and all Wine threads. */
+/* The target preview uses the SDK's BSD MAP_ANON extension. Keep its default
+ * visibility there; retain POSIX-only visibility for hosts and default-off. */
+#if !defined(__PROSPERO__) || !defined(PW_WINE_CHILD_UI_ENABLED) || !PW_WINE_CHILD_UI_ENABLED
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "pw_wine_child_bootstrap.h"
 #include "pw_wine_child_data.h"
 #include "../wine/ps5/pw_wine_threads.h"

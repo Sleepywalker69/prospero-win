@@ -761,6 +761,26 @@ jobs:
           path: ${{ runner.temp }}/child-ui-preview-static-validation/
           retention-days: 7
           if-no-files-found: error
+      - name: Retain bounded isolated preview compiler diagnostics
+        if: >-
+          ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+              (github.event_name == 'pull_request' &&
+               github.event.pull_request.head.repo.full_name == github.repository &&
+               github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+               (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+                github.event.action == 'reopened' ||
+                (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static')))) }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools')
+          from retain_windows_child_failure import collect_preview_inspection
+          temp = Path(os.environ['RUNNER_TEMP'])
+          collect_preview_inspection(temp / 'preview-source/build/native-windows-child-fixture',
+                                     temp / 'preview-title-inspection', temp / 'preview-evidence/compiler-inspection')
+          PY
       - name: Keep bounded preview logs even when its validation fails
         if: >-
           ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||

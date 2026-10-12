@@ -3,6 +3,7 @@
 """Original filesystem-only evidence-retention controls."""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -124,5 +125,91 @@ class FailureRetention(unittest.TestCase):
         alias=self.root/'alias-wine-child-title-inspection';alias.symlink_to(sibling,target_is_directory=True)
         c=retention.Collector(self.root/'alias-logs');retention.collect_title_inspection(c,self.root/'alias')
         self.assertFalse(c.files)
+
+    def preview_paths(self):
+        build=self.root/'preview-source/build/native-windows-child-fixture'
+        check=self.root/'preview-title-inspection'
+        paths=[(build/'wine-child','target/child'),
+               (build.with_name(build.name+'-wine-child-title-inspection'),'target/title-inspection'),
+               (check,'target/title-check')]
+        for base,label in paths:(base/'inspection').mkdir(parents=True)
+        return build,check,paths
+
+    def test_preview_keeps_exact_numbered_logs_from_all_three_routes_only(self):
+        build,check,paths=self.preview_paths();expected={}
+        for index,(base,label) in enumerate(paths):
+            data=b'argv: compiler\nstdout: output\nstderr: failed compilation\xff'+bytes([index])
+            path=base/'inspection/001-tool.log';path.write_bytes(data);path.chmod(0o755)
+            expected[label+'/inspection/001-tool.log']=data
+            for name in ('system.reg','source.tar.gz','other.log','private-tool.log','01-tool.log'):
+                (base/'inspection'/name).write_bytes(b'not retained')
+            (base/'prefix').mkdir();(base/'prefix/002-tool.log').write_bytes(b'not retained')
+            (base/'worker.elf').write_bytes(b'not retained')
+        out=self.root/'preview-evidence/compiler-inspection'
+        with mock.patch.object(retention,'archive_git',side_effect=AssertionError('no source archive')):
+            result=retention.collect_preview_inspection(build,check,out)
+        self.assertEqual(set(result['files']),set(expected))
+        for name,data in expected.items():
+            self.assertEqual((out/name).read_bytes(),data)
+            self.assertEqual(result['files'][name]['sha256'],retention.sha(data))
+            self.assertEqual(result['files'][name]['original_mode'],0o755)
+            self.assertEqual((out/name).stat().st_mode & 0o777,0o644)
+        self.assertFalse(result['accepted']);self.assertFalse(result['runtime_validated'])
+        self.assertFalse(result['raw_prefix_or_registry_retained'])
+        self.assertTrue(result['inputs']['preview_inspection_only'])
+        self.assertEqual(json.loads((out/'UNACCEPTED-BUILD.json').read_text()),result)
+
+    def test_preview_rejects_symlinks_fifos_and_directories(self):
+        build,check,paths=self.preview_paths();inspection=paths[0][0]/'inspection'
+        secret=self.root/'private';secret.write_bytes(b'not retained')
+        (inspection/'001-tool.log').symlink_to(secret)
+        os.mkfifo(inspection/'002-tool.log')
+        (inspection/'003-tool.log').mkdir()
+        (inspection/'1000-tool.log').write_bytes(b'compiler log')
+        result=retention.collect_preview_inspection(build,check,self.root/'out')
+        self.assertEqual(set(result['files']),{'target/child/inspection/1000-tool.log'})
+        self.assertEqual([item['reason'] for item in result['omissions']],
+                         ['symlink input','nonregular input','nonregular input'])
+
+    def test_preview_rejects_symlink_roots_and_ancestors(self):
+        real=self.root/'real';(real/'nested/inspection').mkdir(parents=True)
+        (real/'nested/inspection/001-tool.log').write_bytes(b'not retained through alias')
+        alias=self.root/'alias';alias.symlink_to(real,target_is_directory=True)
+        for name,base in [('ancestor',alias/'nested'),('root',self.root/'root-alias'),
+                          ('inspection',self.root/'inspection-alias')]:
+            with self.subTest(name=name):
+                if name=='root':base.symlink_to(real/'nested',target_is_directory=True)
+                if name=='inspection':
+                    base.mkdir();(base/'inspection').symlink_to(real/'nested/inspection',target_is_directory=True)
+                c=retention.Collector(self.root/(name+'-out'))
+                retention.collect_numbered_inspection(c,base,'target/child')
+                self.assertFalse(c.files)
+
+    def test_preview_file_total_and_count_limits_are_independent(self):
+        self.assertEqual(retention.PREVIEW_LOG_LIMITS,(4*1024*1024,16*1024*1024,256))
+        build,check,paths=self.preview_paths();inspection=paths[0][0]/'inspection'
+        for name,data in [('001-tool.log',b'aa'),('002-tool.log',b'bb'),('003-tool.log',b'oversize')]:
+            (inspection/name).write_bytes(data)
+        for kind,limits,expected in [('file',(2,100,10),2),('total',(10,3,10),1),('count',(10,100,1),1)]:
+            with self.subTest(kind=kind),mock.patch.object(retention,'PREVIEW_LOG_LIMITS',limits):
+                result=retention.collect_preview_inspection(build,check,self.root/kind)
+                self.assertEqual(len(result['files']),expected)
+                self.assertEqual(len(result['omissions']),3-expected)
+                self.assertLessEqual(result['bytes'],limits[1])
+                self.assertTrue(all(record['bytes']<=limits[0] for record in result['files'].values()))
+        c=retention.Collector(self.root/'no-read',limits=(1,1,1))
+        with mock.patch.object(Path,'read_bytes',side_effect=AssertionError('oversize input read')):
+            c.copy(inspection/'003-tool.log',paths[0][0],'target/child')
+        self.assertEqual(c.omissions[0]['reason'],'file retention limit')
+
+    def test_missing_preview_is_reported_without_reusing_output(self):
+        out=self.root/'out'
+        result=retention.collect_preview_inspection(self.root/'missing',self.root/'missing-check',out)
+        self.assertFalse(result['files']);self.assertFalse(result['accepted'])
+        with self.assertRaises(ValueError):
+            retention.collect_preview_inspection(self.root/'missing',self.root/'missing-check',out)
+        alias=self.root/'output-alias';alias.symlink_to(out,target_is_directory=True)
+        with self.assertRaises(ValueError):
+            retention.collect_preview_inspection(self.root/'missing',self.root/'missing-check',alias/'new')
 
 if __name__=='__main__':unittest.main(verbosity=2)
