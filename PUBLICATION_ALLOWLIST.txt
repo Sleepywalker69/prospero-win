@@ -1073,3 +1073,13 @@ native/pw_wine_controller_settings.h
 tests/test_pw_controller_settings.c
 tests/test_pw_wine_controller_settings.c
 tests/test_controller_settings_launcher.py
+.github/workflows/windows-chromium-ipc-reference.yml
+docs/WINDOWS_CHROMIUM_IPC_PROBES.md
+tests/chromium_ipc_mock/windows.h
+tests/fixtures/windows_chromium_ipc.c
+tests/fixtures/windows_chromium_ipc_contract.h
+tests/test_windows_chromium_ipc_contract.c
+tests/test_windows_chromium_ipc_fixture.c
+tests/test_windows_chromium_ipc_reference.py
+tools/build_windows_chromium_ipc.ps1
+tools/check_windows_chromium_ipc.py

@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Original Chromium IPC Windows reference
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - tests/fixtures/windows_chromium_ipc.c
+      - tests/fixtures/windows_chromium_ipc_contract.h
+      - tests/test_windows_chromium_ipc_*.py
+      - tests/test_windows_chromium_ipc_*.c
+      - tests/chromium_ipc_mock/windows.h
+      - tools/build_windows_chromium_ipc.ps1
+      - tools/check_windows_chromium_ipc.py
+      - .github/workflows/windows-chromium-ipc-reference.yml
+permissions:
+  contents: read
+concurrency:
+  group: windows-chromium-ipc-reference-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows-reference:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build separate original diagnostics with preinstalled MSVC
+        shell: pwsh
+        run: |
+          ./tools/build_windows_child_fixture.ps1 -Arch '${{ matrix.arch }}' -Out "$env:RUNNER_TEMP/original-${{ matrix.arch }}"
+          ./tools/build_windows_chromium_ipc.ps1 -Arch '${{ matrix.arch }}' -Out "$env:RUNNER_TEMP/chromium-ipc-${{ matrix.arch }}"
+      - name: Establish original Windows child baseline, then independent IPC cases
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'chromium-ipc-${{ matrix.arch }}'
+          function Invoke-BoundedReference($exe, $arguments, $directory) {
+            New-Item -ItemType Directory $directory | Out-Null
+            $options = @{
+              FilePath = $exe; PassThru = $true; NoNewWindow = $true; WorkingDirectory = $directory
+              RedirectStandardOutput = (Join-Path $directory 'stdout.log')
+              RedirectStandardError = (Join-Path $directory 'stderr.log')
+            }
+            if ($arguments) { $options.ArgumentList = $arguments }
+            $process = Start-Process @options
+            if (!$process.WaitForExit(90000)) {
+              'timeout; process state unresolved; no helper killed or native settlement inferred' |
+                Set-Content (Join-Path $directory 'reference.exit')
+              throw 'Reference exceeded 90 seconds. Stop dependent cases and retain evidence.'
+            }
+            $process.Refresh()
+            $code = $process.ExitCode
+            "reference_exit=$code" | Set-Content (Join-Path $directory 'reference.exit')
+            Get-Content (Join-Path $directory 'stdout.log') | Write-Host
+            if ($code -ne 0) { throw "Reference failed or remained unsettled: $code" }
+            return $code
+          }
+          $original = Join-Path $env:RUNNER_TEMP 'original-${{ matrix.arch }}/parent.exe'
+          $null = Invoke-BoundedReference $original '' (Join-Path $out 'original-baseline')
+          $bits = if ('${{ matrix.arch }}' -eq 'x64') { 64 } else { 32 }
+          $cases = 'self-memory', 'live-memory', 'suspended-memory', 'section-readonly', 'section-duplicate', 'section-close-source', 'mojo-pipe', 'page-regression'
+          foreach ($case in $cases) {
+            $directory = Join-Path $out $case
+            $code = Invoke-BoundedReference (Join-Path $out 'chromium-ipc.exe') $case $directory
+            python tools/check_windows_chromium_ipc.py --directory $directory --case $case --bits $bits --exit-code $code |
+              Tee-Object -FilePath (Join-Path $directory 'REFERENCE.json')
+            if ($LASTEXITCODE -ne 0) { throw "Structured reference rejected: $case" }
+          }
+      - name: Preserve exact binaries, original source and reference evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-chromium-ipc-reference-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/chromium-ipc-${{ matrix.arch }}/
+            ${{ runner.temp }}/original-${{ matrix.arch }}/
+          retention-days: 7
+          if-no-files-found: warn

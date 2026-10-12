@@ -1,0 +1,331 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* Compile the actual fixture; only its decision paths use these fake APIs.
+ * Unused Windows entrypoints are dropped at link time. No Windows execution. */
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include "chromium_ipc_mock/windows.h"
+static int quiet_fputs(const char *text,FILE *stream){(void)text;(void)stream;return 0;}
+static int quiet_fflush(FILE *stream){(void)stream;return 0;}
+#define fputs quiet_fputs
+#define fflush quiet_fflush
+#define main fixture_main
+#include "fixtures/windows_chromium_ipc.c"
+#undef main
+#undef fputs
+#undef fflush
+static struct {
+    DWORD error,io_error,cancel_error,completion_error,completion_bytes;
+    ULONG_PTR key;OVERLAPPED *completed;
+    BOOL io_ok,cancel_ok,completion_ok,log_ok;
+    unsigned cancels,completions,reads,releases;
+    unsigned char memory[16384];
+    DWORD protections[4],states[4],extra_protection;
+    unsigned closes,foreign_captures,identity_waits;
+    int missing_compare,same_control_bad,different_control_bad,candidate_same;
+    int candidate_invalid,candidate_error,child_exited,child_exits_after_capture;
+    int compare_unknown_error,duplicate_same_failed,included_invalid,included_control_bad;
+    DWORD event_type,pipe_type,candidate_type,event_type_error,candidate_type_error;
+    unsigned error_resets;int candidate_unsupported;
+    DWORD local_pin_error;unsigned object_queries,info_classes,pinned_type_seen,raw_type_seen;
+    int missing_query,malformed_type,type_query_failed,private_type_text_leaked;
+    int reference_duplicate_reuses_slot,slot_reused,cross_type_bad,invalid_control_bad,reference_control_bad;
+    unsigned slot_comparisons;int close_control_failed;
+} m;
+DWORD GetLastError(void){return m.error;}
+DWORD GetCurrentProcessId(void){return 100;}
+ULONGLONG GetTickCount64(void){return 100;}
+BOOL WriteFile(HANDLE h,const void *buffer,DWORD size,DWORD *bytes,void *overlapped)
+{
+    (void)h;(void)buffer;
+    if(!overlapped){
+        if(strstr(buffer,"identity_candidate_pinned_ALPC_Port"))m.pinned_type_seen=1;
+        if(strstr(buffer,"identity_candidate_unpinned_racy_ALPC_Port"))m.raw_type_seen=1;
+        if(strstr(buffer,"private_object_name"))m.private_type_text_leaked=1;
+        *bytes=m.log_ok?size:0;return m.log_ok;
+    }
+    *bytes=m.io_ok?size:0;m.error=m.io_error;return m.io_ok;
+}
+BOOL ReadFile(HANDLE h,void *buffer,DWORD size,DWORD *bytes,void *overlapped)
+{ ++m.reads;memset(buffer,0,size);return WriteFile(h,buffer,size,bytes,overlapped); }
+BOOL CancelIoEx(HANDLE h,OVERLAPPED *overlapped)
+{(void)h;assert(overlapped);++m.cancels;m.error=m.cancel_error;return m.cancel_ok;}
+BOOL GetQueuedCompletionStatus(HANDLE h,DWORD *bytes,ULONG_PTR *key,OVERLAPPED **overlapped,DWORD wait)
+{
+    (void)h;assert(wait==PW_IPC_WAIT_MS);++m.completions;
+    *bytes=m.completion_bytes;*key=m.key;*overlapped=m.completed;m.error=m.completion_error;return m.completion_ok;
+}
+HANDLE GetCurrentProcess(void){return (HANDLE)(intptr_t)-1;}
+HMODULE GetModuleHandleW(const wchar_t *name){(void)name;return (HMODULE)(uintptr_t)3;}
+static BOOL WINAPI compare_mock(HANDLE first,HANDLE second)
+{
+    if(first==(HANDLE)(uintptr_t)10&&second==(HANDLE)(uintptr_t)13){
+        ++m.slot_comparisons;
+        if(m.candidate_same||m.slot_reused){m.error=0;return TRUE;}
+        m.error=m.candidate_invalid?ERROR_INVALID_HANDLE:m.candidate_unsupported?ERROR_NOT_SUPPORTED:
+            m.candidate_error?ERROR_ACCESS_DENIED:m.compare_unknown_error?0:ERROR_NOT_SAME_OBJECT;
+        return FALSE;
+    }
+    if(!first){assert(second==(HANDLE)(uintptr_t)13);m.error=m.invalid_control_bad?ERROR_NOT_SAME_OBJECT:ERROR_INVALID_HANDLE;return FALSE;}
+    if(first==(HANDLE)(uintptr_t)13){
+        if(second==(HANDLE)(uintptr_t)45||(m.reference_duplicate_reuses_slot&&second==(HANDLE)(uintptr_t)10)){
+            m.error=m.same_control_bad?ERROR_NOT_SAME_OBJECT:0;return !m.same_control_bad;
+        }
+        if(second==GetCurrentProcess()){m.error=m.cross_type_bad?ERROR_NOT_SUPPORTED:ERROR_NOT_SAME_OBJECT;return FALSE;}
+        assert(second==(HANDLE)(uintptr_t)11);m.error=m.different_control_bad?0:ERROR_NOT_SAME_OBJECT;return m.different_control_bad;
+    }
+    if(first==(HANDLE)(uintptr_t)11){
+        assert(second==(HANDLE)(uintptr_t)43||second==(HANDLE)(uintptr_t)44);m.error=m.included_control_bad?ERROR_NOT_SAME_OBJECT:0;
+        return !m.included_control_bad;
+    }
+    assert(first==(HANDLE)(uintptr_t)10);
+    if(second==(HANDLE)(uintptr_t)40){m.error=m.same_control_bad?ERROR_NOT_SAME_OBJECT:0;return !m.same_control_bad;}
+    if(second==(HANDLE)(uintptr_t)41){m.error=m.different_control_bad?0:ERROR_NOT_SAME_OBJECT;return m.different_control_bad;}
+    assert(second==(HANDLE)(uintptr_t)42);
+    m.error=m.reference_control_bad?ERROR_NOT_SAME_OBJECT:0;return !m.reference_control_bad;
+}
+static LONG NTAPI query_object_mock(HANDLE handle,ULONG info_class,void *buffer,ULONG capacity,ULONG *returned)
+{
+    struct object_type_prefix *info=buffer;const char *name;size_t minimum=sizeof(*info)+22*sizeof(ULONG),length;
+    int candidate=handle==(HANDLE)(uintptr_t)10||handle==(HANDLE)(uintptr_t)40;
+    ++m.object_queries;m.info_classes|=1u<<info_class;assert(info_class==2&&capacity==4096);
+    if(candidate&&m.type_query_failed){*returned=9000;return (LONG)-1073741820;}
+    name=handle==(HANDLE)(uintptr_t)11?"Event":handle==(HANDLE)(uintptr_t)12?"File":"ALPC Port";
+    if(candidate&&m.malformed_type==5)name="private_object_name";
+    length=strlen(name);memset(buffer,0,capacity);
+    info->length=(uint16_t)(length*2);info->maximum=(uint16_t)(info->length+2);
+    info->text=(const uint16_t *)((unsigned char *)buffer+minimum);
+    for(size_t i=0;i<length;++i){uint16_t letter=(unsigned char)name[i];memcpy((unsigned char *)buffer+minimum+2*i,&letter,2);}
+    *returned=(ULONG)(minimum+info->maximum);
+    if(candidate){
+        if(m.malformed_type==1)info->length|=1;
+        if(m.malformed_type==2)info->text=(const uint16_t *)(uintptr_t)1;
+        if(m.malformed_type==3)info->maximum=UINT16_MAX;
+        if(m.malformed_type==4)*returned=4097;
+        if(m.malformed_type==6)info->text=(const uint16_t *)((unsigned char *)buffer+minimum+1);
+        if(m.malformed_type==7)info->length=0;
+        if(m.malformed_type==8)info->text=(const uint16_t *)buffer;
+    }
+    return 0;
+}
+FARPROC GetProcAddress(HMODULE module,const char *name)
+{
+    FARPROC symbol=NULL;compare_objects_fn callback=compare_mock;(void)module;
+    if(!strcmp(name,"NtQueryObject")){
+        query_object_fn query=query_object_mock;
+        if(m.missing_query){m.error=127;return NULL;}
+        memcpy(&symbol,&query,sizeof(symbol));return symbol;
+    }
+    assert(!strcmp(name,"CompareObjectHandles"));
+    if(m.missing_compare){m.error=127;return NULL;}
+    memcpy(&symbol,&callback,sizeof(symbol));return symbol;
+}
+BOOL DuplicateHandle(HANDLE source,HANDLE original,HANDLE target,HANDLE *copy,DWORD rights,BOOL inherit,DWORD options)
+{
+    assert((original==(HANDLE)(uintptr_t)10||original==(HANDLE)(uintptr_t)11||original==(HANDLE)(uintptr_t)13)&&target==GetCurrentProcess());
+    assert(!rights&&!inherit&&options==DUPLICATE_SAME_ACCESS);
+    if(source==GetCurrentProcess()){
+        if(original==(HANDLE)(uintptr_t)13){
+            if(m.duplicate_same_failed){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_ACCESS_DENIED;return FALSE;}
+            *copy=(HANDLE)(uintptr_t)(m.reference_duplicate_reuses_slot?10:45);m.slot_reused=m.reference_duplicate_reuses_slot;return TRUE;
+        }
+        if(original==(HANDLE)(uintptr_t)11){*copy=(HANDLE)(uintptr_t)44;return TRUE;}
+        if(m.local_pin_error){*copy=(HANDLE)(uintptr_t)99;m.error=m.local_pin_error;return FALSE;}
+        if(m.duplicate_same_failed){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_ACCESS_DENIED;return FALSE;}
+        *copy=(HANDLE)(uintptr_t)40;return TRUE;
+    }
+    assert(source==(HANDLE)(uintptr_t)20);
+    if(original==(HANDLE)(uintptr_t)11){
+        if(m.included_invalid){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_INVALID_HANDLE;return FALSE;}
+        *copy=(HANDLE)(uintptr_t)43;return TRUE;
+    }
+    assert(original==(HANDLE)(uintptr_t)13);++m.foreign_captures;
+    if(m.candidate_unsupported){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_NOT_SUPPORTED;return FALSE;}
+    if(m.candidate_invalid||m.candidate_error){
+        *copy=(HANDLE)(uintptr_t)99;m.error=m.candidate_error?ERROR_ACCESS_DENIED:ERROR_INVALID_HANDLE;return FALSE;
+    }
+    *copy=(HANDLE)(uintptr_t)42;return TRUE;
+}
+HANDLE CreateEventW(SECURITY_ATTRIBUTES *sa,BOOL manual,BOOL initial,const wchar_t *name)
+{ assert(!sa&&manual&&!initial&&!name);return (HANDLE)(uintptr_t)41; }
+BOOL CloseHandle(HANDLE h)
+{
+    /* Only successfully acquired parent-local copies may be closed. */
+    assert(h==(HANDLE)(uintptr_t)40||h==(HANDLE)(uintptr_t)41||h==(HANDLE)(uintptr_t)42||h==(HANDLE)(uintptr_t)43||h==(HANDLE)(uintptr_t)44||h==(HANDLE)(uintptr_t)45||(m.reference_duplicate_reuses_slot&&h==(HANDLE)(uintptr_t)10));
+    ++m.closes;if(m.close_control_failed){m.error=ERROR_ACCESS_DENIED;return FALSE;}return TRUE;
+}
+DWORD WaitForSingleObject(HANDLE h,DWORD wait)
+{
+    assert(h==(HANDLE)(uintptr_t)20&&!wait);++m.identity_waits;
+    return m.child_exited||(m.child_exits_after_capture&&m.foreign_captures)?WAIT_OBJECT_0:WAIT_TIMEOUT;
+}
+/* PAGE_* deliberately have signed int type, matching the Windows SDK.
+ * The returned Protect field remains an exact unsigned 32-bit DWORD. */
+_Static_assert(_Generic(PAGE_READONLY,int:1,default:0),"SDK protection constant type");
+_Static_assert(_Generic(PAGE_READWRITE,int:1,default:0),"SDK protection constant type");
+_Static_assert(sizeof(DWORD)==4 && (DWORD)-1>0,"Protect is unsigned 32-bit");
+void *VirtualAlloc(void *address,SIZE_T size,DWORD type,DWORD protection)
+{
+    assert(protection==PAGE_READWRITE);
+    if(!address){
+        assert(size==sizeof(m.memory)&&type==(MEM_RESERVE|MEM_COMMIT));
+        for(unsigned i=0;i<4;++i){m.protections[i]=PAGE_READWRITE;m.states[i]=MEM_COMMIT;}
+        return m.memory;
+    }
+    assert(address==m.memory+8192&&size==4096&&type==MEM_COMMIT);
+    memset(address,0,size);m.protections[2]=protection;m.states[2]=MEM_COMMIT;return address;
+}
+BOOL VirtualProtect(void *address,SIZE_T size,DWORD protection,DWORD *old)
+{
+    assert(address==m.memory+4096&&size==4096&&protection==PAGE_READONLY);
+    *old=m.protections[1];m.protections[1]=protection;return TRUE;
+}
+SIZE_T VirtualQuery(const void *address,MEMORY_BASIC_INFORMATION *info,SIZE_T size)
+{
+    size_t offset=(const unsigned char *)address-m.memory;unsigned page=(unsigned)(offset/4096);
+    assert(offset<sizeof(m.memory)&&offset%4096==0&&size==sizeof(*info));
+    memset(info,0,size);info->State=m.states[page];info->Protect=m.protections[page];
+    if(page==0)info->Protect|=m.extra_protection;
+    return sizeof(*info);
+}
+BOOL VirtualFree(void *address,SIZE_T size,DWORD type)
+{
+    if(type==MEM_RELEASE){assert(address==m.memory&&!size);++m.releases;return TRUE;}
+    assert(address==m.memory+8192&&size==4096&&type==MEM_DECOMMIT);
+    m.states[2]=MEM_RESERVE;m.protections[2]=0;return TRUE;
+}
+BOOL GetHandleInformation(HANDLE handle,DWORD *flags)
+{ assert(handle==(HANDLE)(uintptr_t)10);*flags=0;return TRUE; }
+void SetLastError(DWORD error){m.error=error;++m.error_resets;}
+DWORD GetFileType(HANDLE h)
+{
+    assert(m.error==0);
+    if(h==(HANDLE)(uintptr_t)11){m.error=m.event_type_error;return m.event_type;}
+    if(h==(HANDLE)(uintptr_t)12)return m.pipe_type;
+    assert(h==(HANDLE)(uintptr_t)10);m.error=m.candidate_type_error;return m.candidate_type;
+}
+static void reset(void)
+{
+    memset(&m,0,sizeof(m));memset(slots,0,sizeof(slots));m.log_ok=1;
+    log_file=(HANDLE)(uintptr_t)1;selected=PW_IPC_PIPE;nonce=1;parent_pid=100;epoch=100;
+    worker=log_failed=close_failed=unsettled=stage_failed=0;log_bytes=handles=0;
+    m.completed=&slots[0].ov;m.key=IO_KEY;
+    m.event_type_error=ERROR_INVALID_HANDLE;m.pipe_type=FILE_TYPE_PIPE;
+}
+int main(void)
+{
+    HANDLE pipe=(HANDLE)(uintptr_t)2,port=(HANDLE)(uintptr_t)3;unsigned checks=0;
+#define CHECK(x) do { ++checks;assert(x); } while(0)
+    reset();m.io_ok=1;m.completion_ok=1;m.completion_bytes=sizeof(struct pw_ipc_packet);
+    CHECK(submit_io(pipe,&slots[0],0,0));CHECK(slots[0].pending);
+    CHECK(complete_io(port,&slots[0],sizeof(struct pw_ipc_packet),0));CHECK(!slots[0].pending&&!stage_failed);
+    reset();m.io_error=ERROR_IO_PENDING;
+    CHECK(submit_io(pipe,&slots[0],0,1));m.cancel_ok=1;m.completion_error=ERROR_OPERATION_ABORTED;
+    CHECK(cancel_and_drain(pipe,port,&slots[0],1));CHECK(!slots[0].pending&&!stage_failed&&m.cancels==1);
+    reset();slots[0].pending=1;m.cancel_error=ERROR_ACCESS_DENIED;m.completion_error=ERROR_OPERATION_ABORTED;
+    CHECK(cancel_and_drain(pipe,port,&slots[0],1));CHECK(stage_failed);
+    CHECK(!pw_ipc_final_ok(!stage_failed,0,0,0,1,unsettled));
+    reset();slots[0].pending=1;m.key=IO_KEY+1;m.completion_ok=1;m.completion_bytes=64;
+    CHECK(!complete_io(port,&slots[0],64,0));CHECK(slots[0].pending&&unsettled&&stage_failed);
+    reset();slots[0].pending=1;m.completed=NULL;m.completion_error=WAIT_TIMEOUT;
+    CHECK(!complete_io(port,&slots[0],64,0));CHECK(slots[0].pending&&stage_failed);
+    m.cancel_error=ERROR_NOT_FOUND;m.completed=&slots[0].ov;m.completion_error=ERROR_OPERATION_ABORTED;
+    CHECK(cancel_and_drain(pipe,port,&slots[0],0));CHECK(!slots[0].pending&&stage_failed);
+    reset();slots[0].pending=1;m.cancel_error=ERROR_NOT_FOUND;m.completion_error=ERROR_OPERATION_ABORTED;
+    CHECK(cancel_and_drain(pipe,port,&slots[0],1));CHECK(!slots[0].pending&&!stage_failed);
+    reset();slots[0].pending=1;m.cancel_ok=1;m.completed=NULL;m.completion_error=WAIT_TIMEOUT;
+    CHECK(!settle_slots(pipe,port));CHECK(slots[0].pending&&unsettled&&stage_failed);
+    reset();m.io_error=ERROR_BROKEN_PIPE;
+    CHECK(!submit_io(pipe,&slots[0],0,0));CHECK(!slots[0].pending&&stage_failed);
+    reset();m.io_ok=1;CHECK(!submit_io(pipe,&slots[0],0,1));CHECK(slots[0].pending);
+    reset();m.log_ok=0;trace("final","pass",0,0,0,0,0);CHECK(log_failed);
+    reset();log_bytes=PW_IPC_LOG_LIMIT;trace("final","pass",0,0,0,0,0);CHECK(log_failed);
+    reset();selected=PW_IPC_PAGES;CHECK(pages());CHECK(!stage_failed&&m.releases==1);
+    reset();selected=PW_IPC_PAGES;m.extra_protection=UINT32_C(0x80000000);
+    CHECK(!pages());CHECK(stage_failed&&m.releases==1);
+    reset();selected=PW_IPC_PAGES;m.extra_protection=PAGE_READONLY;
+    CHECK(!pages());CHECK(stage_failed&&m.releases==1);
+    {
+        struct child child;memset(&child,0,sizeof(child));
+        child.decoy=(HANDLE)(uintptr_t)10;child.release=(HANDLE)(uintptr_t)11;child.pi.hProcess=(HANDLE)(uintptr_t)20;
+        child.reference=(HANDLE)(uintptr_t)13;
+        {
+            HANDLE list[5],rx=(HANDLE)(uintptr_t)14,tx=(HANDLE)(uintptr_t)15,extra=(HANDLE)(uintptr_t)16;
+            CHECK(explicit_handle_list(list,rx,tx,child.release,child.reference,NULL,child.decoy)==4);
+            CHECK(list[0]==rx&&list[1]==tx&&list[2]==child.release&&list[3]==child.reference&&!list[4]);
+            CHECK(explicit_handle_list(list,rx,tx,child.release,child.reference,extra,child.decoy)==5&&list[4]==extra);
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,child.decoy,extra,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,child.reference,child.reference,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,NULL,child.release,child.reference,extra,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,INVALID_HANDLE_VALUE,extra,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,child.reference,extra,NULL));
+        }
+        reset();CHECK(excluded_object(&child,1));CHECK(!stage_failed&&!handles&&m.closes==4&&m.foreign_captures==1);
+        reset();CHECK(excluded_object(&child,2));CHECK(!stage_failed&&!handles&&m.closes==4);
+        reset();CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();CHECK(!excluded_object(&child,257));CHECK(stage_failed&&!handles);
+        reset();m.same_control_bad=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.different_control_bad=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.candidate_error=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.candidate_invalid=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.candidate_unsupported=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.reference_control_bad=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();m.child_exited=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.child_exits_after_capture=1;
+        CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();m.included_invalid=1;
+        CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==2);
+        reset();m.included_control_bad=1;
+        CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==3);
+        reset();m.missing_compare=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.closes);
+        reset();m.duplicate_same_failed=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.closes);
+        {
+            struct slot_snapshot snapshot;
+#define SNAPSHOT() snapshot_slot(child.decoy,child.reference)
+#define VALIDATE() validate_slot(snapshot,child.decoy,child.reference,child.release)
+            reset();snapshot=SNAPSHOT();CHECK(VALIDATE()==1);CHECK(!stage_failed&&!handles&&m.closes==1&&m.slot_comparisons==1);
+            reset();m.candidate_invalid=1;snapshot=SNAPSHOT();CHECK(VALIDATE()==2);CHECK(!stage_failed&&!handles&&m.closes==1);
+            reset();m.candidate_same=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.candidate_unsupported=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.candidate_error=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.compare_unknown_error=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.missing_compare=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles&&!m.closes);
+            reset();m.same_control_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.different_control_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.cross_type_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.invalid_control_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.duplicate_same_failed=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles&&!m.closes);
+            /* The control duplicate occupies the formerly free slot, but the
+             * stored pre-allocation comparison remains absence, not a leak. */
+            reset();m.candidate_invalid=1;m.reference_duplicate_reuses_slot=1;snapshot=SNAPSHOT();
+            CHECK(VALIDATE()==2);CHECK(m.slot_reused&&m.slot_comparisons==1&&!stage_failed&&!handles&&m.closes==1);
+            reset();m.close_control_failed=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&close_failed&&handles==1);
+            reset();snapshot=SNAPSHOT();CHECK(!validate_slot(snapshot,child.decoy,child.decoy,child.release));CHECK(stage_failed&&!handles&&!m.closes);
+#undef VALIDATE
+#undef SNAPSHOT
+        }
+        reset();inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(m.object_queries==3&&m.info_classes==(1u<<2)&&m.pinned_type_seen&&!m.raw_type_seen);
+        CHECK(!stage_failed&&!handles&&m.closes==2);
+        reset();m.local_pin_error=ERROR_NOT_SUPPORTED;
+        inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(m.raw_type_seen&&!m.pinned_type_seen&&m.object_queries==3);
+        CHECK(!stage_failed&&!handles&&m.closes==1);
+        m.candidate_unsupported=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles);
+        for(int malformed=1;malformed<=8;++malformed){
+            reset();m.malformed_type=malformed;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+            CHECK(!m.pinned_type_seen&&!m.raw_type_seen&&!m.private_type_text_leaked);
+            CHECK(!stage_failed&&!handles&&m.closes==2);
+        }
+        reset();m.type_query_failed=1;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(!m.pinned_type_seen&&!stage_failed&&!handles&&m.closes==2);
+        reset();m.missing_query=1;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(!m.object_queries&&!stage_failed&&!handles&&m.closes==1);
+        reset();m.missing_compare=1;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
+        CHECK(m.object_queries==3&&!stage_failed&&!handles&&m.closes==2);
+
+
+    }
+    printf("windows_chromium_ipc_fixture: %u mocked decision-path checks passed\n",checks);
+    return 0;
+}
