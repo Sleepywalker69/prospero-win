@@ -398,10 +398,12 @@ class CollectorControls(unittest.TestCase):
                             (Path(self.paths['title_report']), self.control_title), (self.args.report, self.preview_title)):
             path.write_text(json.dumps(value))
 
-    def collect(self, *, mutate_replay=None, retained_error=False):
+    def collect(self, *, mutate_replay=None, retained_error=False, preview_error=None):
         self.sync(); calls = []
         def replay(args):
             calls.append(getattr(args, 'child_ui', False))
+            if getattr(args, 'child_ui', False) and preview_error is not None:
+                raise preview_error
             args.out.mkdir()
             value = copy.deepcopy(self.preview_title if getattr(args, 'child_ui', False) else self.control_title)
             if mutate_replay: mutate_replay(value, bool(getattr(args, 'child_ui', False)))
@@ -409,13 +411,20 @@ class CollectorControls(unittest.TestCase):
             self.assertEqual(args.run_id, '123'); self.assertEqual(args.run_attempt, '2')
             self.assertEqual(args.work, self.args.repo if getattr(args, 'child_ui', False) else Path(self.paths['repo']))
             return value
+        def control_replay(args):
+            self.assertFalse(getattr(args, 'child_ui', False), 'preview must not reuse control interpreter')
+            return replay(args)
+        def preview_replay(args):
+            self.assertIs(args.child_ui, True)
+            return replay(args)
         def sources(*args):
             self.assertEqual(args[0], self.args.repo)
             self.assertEqual(args[5], self.preview)
             if retained_error: raise ValueError('source drift')
             return {'inventory': collector.prefix.inventory(self.args.sources)}
         with mock.patch.object(collector.prefix, 'project', return_value=self.project), \
-             mock.patch.object(collector.child, 'check_title', side_effect=replay), \
+             mock.patch.object(collector.child, 'check_title', side_effect=control_replay), \
+             mock.patch.object(collector, 'replay_preview_title', side_effect=preview_replay), \
              mock.patch.object(collector.prefix, 'load_tool', return_value=collector.child), \
              mock.patch.object(collector.package, 'retained_sources', side_effect=sources):
             result = collector.collect(self.config, self.args)
@@ -472,6 +481,14 @@ class CollectorControls(unittest.TestCase):
             self.collect(mutate_replay=lambda value, enabled: value.update(changed=True) if enabled else None)
         self.assertFalse(self.args.out.exists())
 
+    def test_preview_process_failure_or_timeout_never_creates_bundle(self):
+        for index, error in enumerate((subprocess.CalledProcessError(7, ['preview-validator']),
+                                      subprocess.TimeoutExpired(['preview-validator'], 1800))):
+            self.args.out = self.root / ('failed-preview-' + str(index))
+            with self.subTest(error=type(error).__name__), self.assertRaises(type(error)):
+                self.collect(preview_error=error)
+            self.assertFalse(self.args.out.exists())
+
     def test_crossed_mode_refusal_never_creates_bundle(self):
         self.preview['child_ui'] = collector.child.child_ui_contract(False)
         with self.assertRaisesRegex(ValueError, 'mode contract differs'): self.collect()
@@ -517,6 +534,314 @@ class CollectorControls(unittest.TestCase):
         self.args.app = linked
         with self.assertRaisesRegex(ValueError, 'symlink'): self.collect()
         self.assertFalse(self.args.out.exists())
+
+
+class PreviewSubprocessControls(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='preview replay with spaces ')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.args = argparse.Namespace(child_ui=True, run_id='123', run_attempt='2')
+        for name in ('work', 'sdk', 'foundation', 'runtime', 'llvm_bindir', 'service_work',
+                     'app', 'build', 'sdk_source_archive', 'fixture', 'user_fixture',
+                     'network_fixture', 'out'):
+            setattr(self.args, name, self.root / name)
+        (self.args.work / 'tools').mkdir(parents=True)
+        self.script = self.args.work / 'tools/build_wine_service_child.py'
+        self.expected = ['--check-title', '--child-ui']
+        for name in ('work', 'sdk', 'foundation', 'runtime', 'llvm_bindir', 'service_work',
+                     'app', 'build', 'sdk_source_archive', 'fixture', 'user_fixture',
+                     'network_fixture', 'run_id', 'run_attempt', 'out'):
+            self.expected += ['--' + name.replace('_', '-'), str(getattr(self.args, name))]
+        self.script.write_text('''import json, os, pathlib, sys
+assert sys.flags.dont_write_bytecode
+assert sys.argv[1:] == ''' + repr(self.expected) + '''
+assert pathlib.Path.cwd() == pathlib.Path(''' + repr(str(self.args.work)) + ''')
+out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1]); out.mkdir()
+(out / 'native-wine-child-title.json').write_text('{"fresh": true}')
+print('stdout is not a title receipt')
+''')
+
+    def test_real_child_receives_every_exact_argument_and_fresh_report(self):
+        self.assertEqual(collector.replay_preview_title(self.args), {'fresh': True})
+        self.assertFalse((self.args.work / 'tools/__pycache__').exists())
+
+    def test_process_is_checked_bounded_and_never_uses_a_shell(self):
+        self.args.out.mkdir()
+        report = self.args.out / 'native-wine-child-title.json'
+        report.write_text('{"inert": true}')
+        with mock.patch.object(collector.subprocess, 'run') as run:
+            self.assertEqual(collector.replay_preview_title(self.args), {'inert': True})
+        run.assert_called_once_with([sys.executable, '-B', str(self.script), *self.expected],
+                                    cwd=self.args.work, check=True, shell=False, timeout=1800)
+
+    def test_nonzero_process_refused_even_if_it_writes_a_valid_report(self):
+        self.script.write_text(self.script.read_text() + '\nsys.exit(7)\n')
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            collector.replay_preview_title(self.args)
+        self.assertEqual(raised.exception.returncode, 7)
+        self.assertTrue((self.args.out / 'native-wine-child-title.json').is_file())
+
+    def test_missing_duplicate_or_symlink_report_refused(self):
+        for index, body in enumerate(('',
+                "(out / 'native-wine-child-title.json').write_text('{\"a\": 1, \"a\": 2}')",
+                "(out / 'elsewhere.json').write_text('{}'); "
+                "(out / 'native-wine-child-title.json').symlink_to(out / 'elsewhere.json')")):
+            self.args.out = self.root / ('bad-report-' + str(index))
+            prefix = 'import pathlib\nout = pathlib.Path(' + repr(str(self.args.out)) + '); out.mkdir()\n'
+            self.script.write_text(prefix + body + '\n')
+            with self.subTest(index=index), self.assertRaises((ValueError, FileNotFoundError)):
+                collector.replay_preview_title(self.args)
+
+    def test_missing_or_linked_entry_point_and_implicit_mode_refused(self):
+        self.args.child_ui = False
+        with self.assertRaisesRegex(ValueError, 'explicit child UI'):
+            collector.replay_preview_title(self.args)
+        self.args.child_ui = True
+        self.script.unlink()
+        with self.assertRaises((ValueError, FileNotFoundError)):
+            collector.replay_preview_title(self.args)
+        actual = self.script.with_name('other.py'); actual.write_text('raise AssertionError("must not run")')
+        self.script.symlink_to(actual)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            collector.replay_preview_title(self.args)
+
+
+class PreviewValidatorOriginTests(unittest.TestCase):
+    """Real admission contracts with inert receipts, isolated from suite imports.
+
+    These controls execute no PE code, compiler, Wine, console, or network. Every
+    validator import and fixture-helper import occurs in a child interpreter.
+    """
+
+    _FIXTURES = r'''
+import hashlib
+import json
+import sys
+from pathlib import Path
+original, preview, data = map(Path, sys.argv[1:4])
+sys.path[:0] = [str(original / 'tools'), str(original / 'tests')]
+import test_windows_child_user_contract as user_fixture
+import test_windows_child_network_contract as network_fixture
+
+def digest(value):
+    return hashlib.sha256(value).hexdigest()
+
+def record(value):
+    return {'bytes': len(value), 'sha256': digest(value)}
+
+project = {'commit': 'a' * 40, 'tree': 'b' * 40}
+(data / 'service/native-wine-child-build.json').write_text(json.dumps({'project': project}))
+leaf = user_fixture.make_pe('parent')
+for name in ('parent.exe', 'child.exe'):
+    (data / 'leaf' / name).write_bytes(leaf)
+leaf_receipt = {
+    'schema': 'pw-original-windows-child-msvc/1',
+    'project': project, 'architecture': 'x64', 'run_id': '123', 'run_attempt': '1',
+    'compiler': {'name': 'MSVC cl.exe', 'file_version': 'inert-synthetic-test',
+                 'sha256': 'c' * 64},
+    'reference': {'exit': 0, 'deadline_seconds': 45},
+    'source_sha256': digest((original / 'tests/fixtures/windows_child_process.c').read_bytes()),
+    'recipe_sha256': digest((original / 'tools/build_windows_child_fixture.ps1').read_bytes()),
+    'files': {name: record(leaf) for name in ('parent.exe', 'child.exe')},
+}
+(data / 'leaf/fixture-source.json').write_text(json.dumps(leaf_receipt))
+for role, fixture in (('user', user_fixture), ('network', network_fixture)):
+    files, receipt, _, _, _ = fixture.make_bundle()
+    sources = [('source_sha256', fixture.contract.SOURCE),
+               ('recipe_sha256', fixture.contract.RECIPE),
+               ('validator_sha256', fixture.contract.VALIDATOR)]
+    if role == 'network':
+        sources.append(('header_sha256', fixture.contract.HEADER))
+    for key, relative in sources:
+        source = (original / relative).read_bytes()
+        receipt[key] = digest(source)
+        if Path(relative).name in files:
+            files[Path(relative).name] = source
+    if role == 'network':
+        receipt['headers'][r'D:\a\repo\tests\fixtures\windows_child_network_contract.h'] = record(
+            (original / fixture.contract.HEADER).read_bytes())
+    files[fixture.contract.RECEIPT] = json.dumps(receipt).encode()
+    for name, value in files.items():
+        (data / role / name).write_bytes(value)
+print(json.dumps({'fixture_kind': 'inert', 'roles': ['user', 'network']}))
+'''
+
+    _PROBE = r'''
+import json
+import sys
+from pathlib import Path
+original, preview, data, import_root, work_root = map(Path, sys.argv[1:6])
+user_enabled, network_enabled = [value == '1' for value in sys.argv[6:8]]
+attempt, mode = sys.argv[8:10]
+sys.path.insert(0, str(import_root / 'tools'))
+import collect_child_ui_preview_validation as collector
+builder = collector.child
+
+def contract(root, user=True, network=True, expected_attempt='1'):
+    return builder.title_profiles_input_contract(
+        root, data / 'service', data / 'leaf', data / 'user' if user else None,
+        '123', expected_attempt, data / 'network' if network else None)
+
+outcome = {}
+if mode != 'fresh':
+    control = contract(original)
+    outcome['original_control'] = {
+        'user_enabled': control[0]['user_enabled'],
+        'network_enabled': control[0]['network_enabled'],
+    }
+if mode in ('prepend', 'load_tool'):
+    sys.path.insert(0, str(preview / 'tools'))
+if mode == 'load_tool':
+    builder = collector.prefix.load_tool(preview, 'build_wine_service_child')
+try:
+    result = contract(work_root, user_enabled, network_enabled, attempt)
+    outcome.update(status='pass', result=result[0])
+except ValueError as error:
+    outcome.update(status='refused', error=str(error))
+outcome['builder_origin'] = str(Path(builder.__file__).resolve())
+outcome['validator_origins'] = {
+    role: str(Path(sys.modules['windows_child_' + role + '_contract'].__file__).resolve())
+    for role in ('user', 'network')
+    if 'windows_child_' + role + '_contract' in sys.modules
+}
+print(json.dumps(outcome))
+'''
+
+    def setUp(self):
+        import shutil
+
+        self._temp = tempfile.TemporaryDirectory(prefix='child-ui-origin-')
+        self.addCleanup(self._temp.cleanup)
+        self.base = Path(self._temp.name)
+        self.original, self.preview, self.data = (
+            self.base / name for name in ('original', 'preview', 'inert-fixtures'))
+        for root in (self.original, self.preview):
+            shutil.copytree(ROOT / 'tools', root / 'tools',
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+            for name in ('windows_child_process.c', 'windows_child_user.c',
+                         'windows_child_network.c', 'windows_child_network_contract.h'):
+                target = root / 'tests/fixtures' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / 'tests/fixtures' / name, target)
+            for name in ('test_windows_child_user_contract.py',
+                         'test_windows_child_network_contract.py'):
+                shutil.copyfile(ROOT / 'tests' / name, root / 'tests' / name)
+        for source in (ROOT / 'tools').rglob('*'):
+            if not source.is_file() or '__pycache__' in source.parts or source.suffix == '.pyc':
+                continue
+            relative = source.relative_to(ROOT)
+            self.assertEqual(source.read_bytes(), (self.original / relative).read_bytes())
+            self.assertEqual(source.read_bytes(), (self.preview / relative).read_bytes())
+        for role in ('leaf', 'user', 'network', 'service'):
+            (self.data / role).mkdir(parents=True)
+        self.assertEqual(self._run_isolated(self._FIXTURES)['fixture_kind'], 'inert')
+
+    def _run_isolated(self, script, *args):
+        env = os.environ.copy()
+        # Existing fixture helper overrides must not select another checkout.
+        env.update(PW_USER_BASE_REPO=str(self.original),
+                   PW_NETWORK_BASE_REPO=str(self.original))
+        completed = subprocess.run(
+            [sys.executable, '-I', '-B', '-c', script,
+             str(self.original), str(self.preview), str(self.data), *map(str, args)],
+            cwd=self.original, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(completed.returncode, 0,
+                         'isolated contract probe failed:\n' + completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def _probe(self, *, import_root=None, work_root=None, user=True, network=True,
+               attempt='1', mode='fresh'):
+        return self._run_isolated(
+            self._PROBE, import_root or self.preview, work_root or self.preview,
+            int(user), int(network), attempt, mode)
+
+    def _assert_original_control(self, outcome):
+        self.assertEqual(outcome['original_control'],
+                         {'user_enabled': True, 'network_enabled': True})
+
+    def _assert_origin_refusal(self, outcome, role, origin):
+        self.assertEqual(outcome['status'], 'refused')
+        label = 'USER' if role == 'user' else 'network'
+        self.assertEqual(outcome['error'], label + ' validator loaded from another project')
+        self.assertEqual(outcome['validator_origins'][role],
+                         str((origin / 'tools' / ('windows_child_' + role + '_contract.py')).resolve()))
+
+    def test_unchanged_same_process_original_control_passes(self):
+        outcome = self._probe(import_root=self.original, work_root=self.original, mode='warm')
+        self._assert_original_control(outcome)
+        self.assertEqual(outcome['status'], 'pass')
+        self.assertIs(outcome['result']['user_enabled'], True)
+        self.assertIs(outcome['result']['network_enabled'], True)
+
+    def test_cached_original_user_validator_rejects_preview_root(self):
+        outcome = self._probe(import_root=self.original, network=False, mode='warm')
+        self._assert_original_control(outcome)
+        self._assert_origin_refusal(outcome, 'user', self.original)
+
+    def test_cached_original_network_validator_rejects_preview_root(self):
+        outcome = self._probe(import_root=self.original, user=False, mode='warm')
+        self._assert_original_control(outcome)
+        self._assert_origin_refusal(outcome, 'network', self.original)
+
+    def test_prepending_preview_tools_does_not_replace_cached_validators(self):
+        for role in ('user', 'network'):
+            with self.subTest(role=role):
+                outcome = self._probe(import_root=self.original, user=role == 'user',
+                                      network=role == 'network', mode='prepend')
+                self._assert_original_control(outcome)
+                self._assert_origin_refusal(outcome, role, self.original)
+
+    def test_loading_preview_builder_does_not_replace_cached_validators(self):
+        for role in ('user', 'network'):
+            with self.subTest(role=role):
+                outcome = self._probe(import_root=self.original, user=role == 'user',
+                                      network=role == 'network', mode='load_tool')
+                self._assert_original_control(outcome)
+                self.assertEqual(outcome['builder_origin'],
+                                 str((self.preview / 'tools/build_wine_service_child.py').resolve()))
+                self._assert_origin_refusal(outcome, role, self.original)
+
+    def test_fresh_preview_interpreter_passes_from_original_cwd(self):
+        outcome = self._probe()
+        self.assertEqual(outcome['status'], 'pass')
+        self.assertIs(outcome['result']['user_enabled'], True)
+        self.assertIs(outcome['result']['network_enabled'], True)
+        for role in ('user', 'network'):
+            self.assertEqual(outcome['validator_origins'][role],
+                             str((self.preview / 'tools' / ('windows_child_' + role + '_contract.py')).resolve()))
+
+    def test_fresh_interpreter_still_rejects_wrong_validator_origin(self):
+        for role in ('user', 'network'):
+            with self.subTest(role=role):
+                outcome = self._probe(import_root=self.original, user=role == 'user',
+                                      network=role == 'network')
+                self._assert_origin_refusal(outcome, role, self.original)
+
+    def test_fresh_preview_interpreter_rejects_stale_run_attempt(self):
+        for role in ('user', 'network'):
+            with self.subTest(role=role):
+                outcome = self._probe(user=role == 'user', network=role == 'network', attempt='2')
+                self.assertEqual(outcome['status'], 'refused')
+                label = 'USER' if role == 'user' else 'network'
+                self.assertEqual(outcome['error'],
+                                 'original fixture is not the expected ' + label + ' title run/attempt')
+
+    def test_fresh_preview_interpreter_rejects_validator_source_hash_drift(self):
+        for role, receipt_name in (('user', 'user-source.json'), ('network', 'network-source.json')):
+            with self.subTest(role=role):
+                receipt_path = self.data / role / receipt_name
+                before = receipt_path.read_bytes()
+                receipt = json.loads(before)
+                receipt['validator_sha256'] = '0' * 64
+                receipt_path.write_text(json.dumps(receipt))
+                try:
+                    outcome = self._probe(user=role == 'user', network=role == 'network')
+                finally:
+                    receipt_path.write_bytes(before)
+                self.assertEqual(outcome['status'], 'refused')
+                label = 'USER' if role == 'user' else 'network'
+                self.assertEqual(outcome['error'], label + ' source/recipe/validator differs')
 
 
 if __name__ == '__main__':

@@ -12,6 +12,8 @@ import argparse
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 
 import build_wine_service_child as child
 import package_windows_child_fixture as package
@@ -19,6 +21,23 @@ import package_windows_child_fixture as package
 prefix = package.prefix
 require = package.require
 SCHEMA = 'pw-child-ui-preview-static-validation/1'
+
+
+def replay_preview_title(args):
+    # Control replay has already imported validators from the original checkout.
+    # A different --work or sys.path cannot relocate those cached modules. Run
+    # the preview checkout's entry point in a fresh interpreter, keeping its
+    # exact module-origin and all source/compiler/cohort checks intact.
+    require(args.child_ui is True, 'preview replay requires explicit child UI')
+    script = args.work / 'tools/build_wine_service_child.py'
+    prefix.ordinary(script)
+    command = [sys.executable, '-B', str(script), '--check-title', '--child-ui']
+    for name in ('work', 'sdk', 'foundation', 'runtime', 'llvm_bindir', 'service_work',
+                 'app', 'build', 'sdk_source_archive', 'fixture', 'user_fixture',
+                 'network_fixture', 'run_id', 'run_attempt', 'out'):
+        command.extend(('--' + name.replace('_', '-'), str(getattr(args, name))))
+    subprocess.run(command, cwd=args.work, check=True, shell=False, timeout=1800)
+    return package.read_json(args.out / 'native-wine-child-title.json')
 
 
 def exact_contract(value, enabled):
@@ -102,7 +121,7 @@ def collect(config, args):
         app=app, build=build, sdk_source_archive=p['sdk_source_archive'], fixture=p['fixture'],
         user_fixture=p['user_fixture'], network_fixture=p['network_fixture'], run_id=run,
         run_attempt=attempt, child_ui=True, out=scratch / 'preview')
-    preview_title = child.check_title(preview_args)
+    preview_title = replay_preview_title(preview_args)
     require(preview_title == expected_preview, 'replayed preview title receipt differs')
     control, preview = package.read_json(control_path), package.read_json(preview_path)
     paired_contract(control, preview, control_title, preview_title, project)
