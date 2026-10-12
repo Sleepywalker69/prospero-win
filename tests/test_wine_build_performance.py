@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -32,44 +33,38 @@ def workflow():
 
 def step_by_id(name):
     matches = [(job, step) for job, value in workflow()['jobs'].items()
-               for step in value['steps'] if step.get('id') == name]
+               for step in value.get('steps', []) if step.get('id') == name]
     if len(matches) != 1:
         raise AssertionError('expected one actual workflow step: ' + name)
     return matches[0]
 
 
 def actual_job_gate(expression, context):
-    """Evaluate only the gate's bounded boolean grammar over original case data.
+    """Evaluate the actual gate with the shared bounded Actions interpreter."""
+    from test_windows_child_workflow_options import actual_gate
+    return actual_gate(expression, context)
 
-    This consumes the actual YAML expression, not a second admission function.
-    It does not claim to emulate the complete GitHub expression language.
-    """
-    if not expression.strip().startswith('${{') or not expression.strip().endswith('}}'):
-        raise AssertionError('job gate is not an Actions expression')
-    value = expression.strip()[3:-2]
-    label_call = "contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')"
-    value = value.replace(label_call, repr('build-windows-child-fixture' in context['labels']))
-    for name in sorted((key for key in context if key != 'labels'), key=len, reverse=True):
-        value = value.replace(name, repr(context[name]))
-    value = value.replace('&&', ' and ').replace('||', ' or ')
-    value = re.sub(r'\bfalse\b', 'False', value)
-    value = re.sub(r'\btrue\b', 'True', value)
 
-    def visit(node):
-        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bool)):
-            return node.value
-        if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
-            values = [visit(item) for item in node.values]
-            return all(values) if isinstance(node.op, ast.And) else any(values)
-        if isinstance(node, ast.Compare) and len(node.ops) == len(node.comparators) == 1:
-            left, right = visit(node.left), visit(node.comparators[0])
-            if isinstance(node.ops[0], ast.Eq):
-                return left == right
-            if isinstance(node.ops[0], ast.NotEq):
-                return left != right
-        raise AssertionError('unsupported job-gate grammar: ' + ast.dump(node))
+class WorkflowStepLookupTests(unittest.TestCase):
+    def test_reusable_job_is_skipped_when_finding_the_exact_step(self):
+        expected = {'id': 'fixture-preflight', 'run': 'inert test body'}
+        flow = {'jobs': {
+            'chromium-ipc-reference': {'uses': './.github/workflows/windows-chromium-ipc-reference.yml'},
+            'matched-runtime': {'steps': [expected]},
+        }}
+        with mock.patch(__name__ + '.workflow', return_value=flow):
+            self.assertEqual(step_by_id('fixture-preflight'), ('matched-runtime', expected))
 
-    return visit(ast.parse('(' + value.strip() + ')', mode='eval').body)
+    def test_missing_or_duplicate_target_step_still_fails(self):
+        reusable = {'uses': './.github/workflows/windows-chromium-ipc-reference.yml'}
+        for steps in ([], [{'id': 'other-step'}],
+                      [{'id': 'fixture-preflight'}, {'id': 'fixture-preflight'}]):
+            with self.subTest(steps=steps):
+                flow = {'jobs': {'chromium-ipc-reference': reusable,
+                                 'matched-runtime': {'steps': steps}}}
+                with mock.patch(__name__ + '.workflow', return_value=flow):
+                    with self.assertRaisesRegex(AssertionError, 'expected one actual workflow step'):
+                        step_by_id('fixture-preflight')
 
 
 class FixturePreflightControls(unittest.TestCase):
@@ -167,23 +162,21 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         self.assertEqual(actual['jobs']['matched-runtime']['permissions'],
                          {'contents': 'read', 'actions': 'read'})
         self.assertNotIn('permissions', actual['jobs']['original-x64-reference'])
-        self.assertEqual(actual['concurrency'],
-                         {'group': 'windows-child-fixture-${{ github.ref }}', 'cancel-in-progress': 'false'})
-        expected = """${{ github.event_name == 'workflow_dispatch' ||
-            (github.event_name == 'push' &&
-             github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
-             github.event.deleted == false) ||
-            (github.event_name == 'pull_request' &&
-             github.event.pull_request.head.repo.full_name == github.repository &&
-             github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-             contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}"""
-        for name in ('original-x64-reference', 'matched-runtime'):
+        self.assertEqual(set(actual['concurrency']), {'group', 'cancel-in-progress'})
+        self.assertEqual(actual['concurrency']['cancel-in-progress'], 'false')
+        # The opt-in/ignored-event matrix evaluates every actual gate and the
+        # actual concurrency expression, rather than copying a large expression.
+        from test_windows_child_workflow_options import event_contract
+        event_contract(actual)
+        expected = actual['jobs']['original-x64-reference']['if']
+        for name in ('original-user-x64-reference', 'original-network-x64-reference', 'matched-runtime'):
             self.assertEqual(''.join(actual['jobs'][name]['if'].split()), ''.join(expected.split()))
 
     def test_actual_seed_job_gates_truth_table(self):
         seed = 'perf/windows-child-incremental-cache'
         base = {'github.event_name': 'pull_request', 'github.repository': 'Sleepywalker69/prospero-win',
                 'github.ref': 'refs/pull/123/merge', 'github.event.deleted': False,
+                'github.event.action': 'labeled', 'github.event.label.name': 'build-windows-child-fixture',
                 'github.event.pull_request.head.repo.full_name': 'Sleepywalker69/prospero-win',
                 'github.event.pull_request.head.ref': 'reviewed-change',
                 'github.event.pull_request.base.ref': 'main', 'labels': ['build-windows-child-fixture']}

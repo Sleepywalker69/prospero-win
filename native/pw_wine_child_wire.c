@@ -29,9 +29,9 @@ static int valid(const PwWineChildFrame *f)
     if(f->kind==PW_WC_HELLO)
         return !f->generation&&!f->sequence&&!f->parent_pid&&!f->wine_pid&&!f->wine_tid&&
                !f->target_tid&&!f->signal&&!f->status&&!f->native_error&&!f->profile&&!f->machine;
-    if((f->profile!=PW_WC_PROFILE_FIXTURE&&f->profile!=PW_WC_PROFILE_BATTLENET&&f->profile!=PW_WC_PROFILE_USER&&f->profile!=PW_WC_PROFILE_NET)||
+    if((f->profile!=PW_WC_PROFILE_FIXTURE&&f->profile!=PW_WC_PROFILE_BATTLENET&&f->profile!=PW_WC_PROFILE_USER&&f->profile!=PW_WC_PROFILE_NET&&!pw_wine_ipc_profile(f->profile))||
        (f->machine!=PW_WC_MACHINE_AMD64&&f->machine!=PW_WC_MACHINE_I386)||
-       ((f->profile==PW_WC_PROFILE_FIXTURE||f->profile==PW_WC_PROFILE_USER||f->profile==PW_WC_PROFILE_NET)&&f->machine!=PW_WC_MACHINE_AMD64))return 0;
+       ((f->profile==PW_WC_PROFILE_FIXTURE||f->profile==PW_WC_PROFILE_USER||f->profile==PW_WC_PROFILE_NET||pw_wine_ipc_profile(f->profile))&&f->machine!=PW_WC_MACHINE_AMD64))return 0;
     if(!f->generation||!f->parent_pid||f->parent_pid==f->child_pid||!f->wine_pid||!f->wine_tid) return 0;
     if(f->kind==PW_WC_BOOTSTRAP||f->kind==PW_WC_BOOTSTRAP_ACK||f->kind==PW_WC_CANCEL)
         return f->sequence==1&&!f->target_tid&&!f->signal&&!f->status&&!f->native_error;

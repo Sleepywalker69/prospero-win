@@ -13,6 +13,7 @@
 #if PW_WINE_NET_PROFILE_ENABLED != 0 && PW_WINE_NET_PROFILE_ENABLED != 1
 #error PW_WINE_NET_PROFILE_ENABLED must be zero or one
 #endif
+#include "pw_wine_ipc_profile.h"
 #include "../src/pw_game_profile.h"
 #include "../wine/ps5/pw_wine_prx.h"
 

@@ -10,6 +10,10 @@
 #define PW_WINE_CREATION_IMAGE_BYTES 2048u
 #define PW_WINE_CREATION_REQUESTS 16u
 #define PW_WINE_CREATION_STARTUP_MS 30000u
+/* Fixed original IPC diagnostic modes; structural child identity only.
+ * Root admission separately binds the opt-in profile, exact path and digest. */
+#define PW_WINE_CREATION_IPC_FIRST 16u
+#define PW_WINE_CREATION_IPC_LAST 23u
 
 typedef struct PwWineCreationRequest {
     uint64_t origin, lease, key, now, deadline;

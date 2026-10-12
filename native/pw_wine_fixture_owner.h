@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #ifndef PW_WINE_FIXTURE_OWNER_H
 #define PW_WINE_FIXTURE_OWNER_H
+#include "pw_wine_ipc_profile.h"
 #include "../wine/ps5/pw_wine_fixture_provider.h"
 #include "../wine/ps5/pw_wine_creation.h"
 #include "../wine/ps5/pw_wine_fixture_socket.h"
@@ -18,9 +19,9 @@ enum { PW_WFO_IDLE, PW_WFO_ADMITTED, PW_WFO_BOUND, PW_WFO_LAUNCH_POSSIBLE,
        PW_WFO_BOOTSTRAP, PW_WFO_RUNNING, PW_WFO_RETIRED, PW_WFO_UNCERTAIN };
 typedef struct PwWineFixtureOwnerConfig {
     uint64_t session;
-    unsigned profile; /* 1 original fixture; 2 Battle.net experiment; 3 original USER control; 4 original network control */
-    const char *child_unix_path; /* exact original mode1/3/4 image; NULL for vendor */
-    const char *child_sha256;    /* exact original mode1/3/4 hash; NULL for vendor */
+    unsigned profile; /* 1 original fixture; 2 Battle.net experiment; 3 original USER control; 4 original network control; 16..23 fixed IPC controls */
+    const char *child_unix_path; /* exact original mode1/3/4 or selected IPC image; NULL for vendor */
+    const char *child_sha256;    /* exact original mode1/3/4 or selected IPC hash; NULL for vendor */
     const unsigned char *helper_image;
     uint32_t helper_bytes;
     const char *build_id;        /* exact full-CRT helper build identity */

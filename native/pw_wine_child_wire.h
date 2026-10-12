@@ -2,6 +2,7 @@
 #ifndef PW_WINE_CHILD_WIRE_H
 #define PW_WINE_CHILD_WIRE_H
 #include "pw_native_child_protocol.h"
+#include "pw_wine_ipc_profile.h"
 
 enum { PW_WC_WIRE_BYTES = 136, PW_WC_BUILD_CHARS = 40,
        PW_WC_STARTUP_MS = 30000, PW_WC_LIFETIME_MS = 60000, PW_WC_BATTLENET_LIFETIME_MS = 300000,

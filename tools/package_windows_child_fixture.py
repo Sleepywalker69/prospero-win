@@ -25,6 +25,8 @@ sys.dont_write_bytecode = True
 import prepare_windows_child_prefix as prefix
 import windows_child_user_package as user_package
 import windows_child_network_package as network_package
+import windows_chromium_ipc_package as ipc_package
+import windows_chromium_ipc_contract as ipc_contract
 import build_owned_helper as owned_helper
 
 SLUG = 'windows-child-fixture-v1'
@@ -345,7 +347,7 @@ def validate_optional_roles(manifest):
     roles = {}
     if manifest.get('battlenet_enabled'):
         roles.update(battlenet_profile=BATTLE_PROFILE, battlenet_capability=BATTLE_CAPABILITY)
-    for name, module in (('user', user_package), ('network', network_package)):
+    for name, module in (('user', user_package), ('network', network_package), ('ipc', ipc_package)):
         enabled = manifest.get(name + '_enabled', False)
         require(type(enabled) is bool, name + ' capability selection must be boolean')
         if enabled:
@@ -353,12 +355,12 @@ def validate_optional_roles(manifest):
     require(manifest.get('optional_roles', {}) == roles, 'unreviewed optional consumer roles')
 
 
-def expected_worker_capabilities():
+def expected_worker_capabilities(ipc=False):
     return [
         {'mode': 1, 'prefix': SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False},
         {'mode': 2, 'prefix': BATTLE_SLUG, 'guest_machine': 'I386', 'backend': 'wowprospero', 'runtime_validated': False},
         {'mode': 3, 'prefix': user_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False},
-        {'mode': 4, 'prefix': network_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False}]
+        {'mode': 4, 'prefix': network_package.SLUG, 'guest_machine': 'AMD64', 'backend': 'native-amd64', 'runtime_validated': False}] + (ipc_package.worker_capabilities() if ipc else [])
 
 
 def validate_user(manifest, values, read, prepared, abi, build, worker, combined):
@@ -371,7 +373,7 @@ def validate_user(manifest, values, read, prepared, abi, build, worker, combined
                 name.startswith('provenance/windows-child-user') for name in values),
                 'disabled USER package contains USER payload')
         return combined
-    require(worker.get('candidate_capabilities') == expected_worker_capabilities(),
+    require(worker.get('candidate_capabilities') in (expected_worker_capabilities(), expected_worker_capabilities(True)),
             'USER worker capability cohort differs')
     required = (user_package.PROFILE, user_package.REPORT, user_package.REFERENCE, user_package.CAPABILITY)
     require(all(values.get(name, {}).get('type') == 'file' for name in required),
@@ -461,7 +463,7 @@ def validate_network(manifest, values, read, prepared, abi, build, worker, combi
                 name.startswith('provenance/windows-child-network') for name in values),
                 'disabled network package contains network payload')
         return combined
-    require(worker.get('candidate_capabilities') == expected_worker_capabilities(),
+    require(worker.get('candidate_capabilities') in (expected_worker_capabilities(), expected_worker_capabilities(True)),
             'network worker capability cohort differs')
     required = (network_package.PROFILE, network_package.REPORT, network_package.REFERENCE, network_package.CAPABILITY)
     require(all(values.get(name, {}).get('type') == 'file' for name in required),
@@ -539,6 +541,83 @@ def check_network_inputs(paths, project, fixture, abi, host_stamp):
                 {k: pair['files'][name][k] for k in ('bytes', 'sha256')}, 'network prefix image differs')
     return {'pair': pair, 'prefix': prepared, 'profile': actual,
             'reference_inventory': prefix.inventory(paths['network_fixture'])}
+
+
+def validate_ipc(manifest, values, read, prepared, abi, build, worker, combined):
+    enabled = manifest.get('ipc_enabled', False)
+    require(type(enabled) is bool, 'IPC capability selection must be boolean')
+    validate_optional_roles(manifest)
+    if not enabled:
+        require(not any(name in ipc_package.PROFILES.values() or name == ipc_package.PREFIX or
+                name.startswith(ipc_package.PREFIX + '/') or name.startswith('provenance/windows-chromium-ipc')
+                for name in values), 'disabled IPC package contains IPC payload')
+        return combined
+    require(worker.get('candidate_capabilities') == expected_worker_capabilities(True), 'IPC worker capability cohort differs')
+    required = (*ipc_package.PROFILES.values(), ipc_package.REPORT, ipc_package.REFERENCE, ipc_package.CAPABILITY,
+                *(ipc_package.REFERENCE_ROOT + '/' + n for n in ('anchors.json', 'x64.zip', 'x86.zip')))
+    require(all(values.get(name, {}).get('type') == 'file' for name in required), 'IPC package evidence missing')
+    require({name for name, value in values.items() if name.startswith(ipc_package.REFERENCE_ROOT + '/') and
+             value.get('type') == 'file'} == {ipc_package.REFERENCE_ROOT + '/' + n for n in ('anchors.json', 'x64.zip', 'x86.zip', 'cohort.json')},
+            'unreviewed IPC reference payload')
+    copies = {relative: read(ipc_package.SOURCE_ROOT + '/' + relative) for relative in ipc_package.SOURCE_FILES.values()}
+    sources = decode_json(read('provenance/retained-sources.json'))
+    role = sources.get('roles', {}).get('project', {})
+    require(role.get('revision') == manifest['project']['commit'] and role.get('path') == 'project.tar.gz',
+            'IPC complete retained project identity differs')
+    hashes = ipc_package.source_copies(read('sources/project.tar.gz'), copies)
+    expected = manifest.get('ipc_anchors')
+    require(decode_json(read(ipc_package.REFERENCE_ROOT + '/anchors.json')) == expected, 'IPC retained external anchors differ')
+    cohort = ipc_contract.validate_archives({arch: read(ipc_package.REFERENCE_ROOT + '/' + arch + '.zip') for arch in ('x64', 'x86')},
+        expected, manifest['project'], manifest['run_url'].rsplit('/', 1)[-1], manifest.get('run_attempt'), hashes)
+    require(decode_json(read(ipc_package.REFERENCE)) == cohort, 'IPC retained checker result differs from actual reference ZIPs')
+    prepared_ipc = decode_json(read(ipc_package.REPORT))
+    require(prepared_ipc.get('schema') == 'pw-windows-chromium-ipc-prefix/1' and prepared_ipc.get('project') == manifest['project'] and
+            prepared_ipc.get('wine_commit') == prefix.WINE and prepared_ipc.get('patches') == manifest['patches'] and
+            prepared_ipc.get('private_dispatcher') == abi and prepared_ipc.get('cpu') == prepared.get('cpu') and
+            prepared_ipc.get('fixture') == cohort and prepared_ipc.get('fixture_executed') is False and
+            prepared_ipc.get('console_execution_verified') is False and prepared_ipc.get('child_presentation') is False and
+            prepared_ipc.get('child_input') is False, 'IPC prefix/source/ABI/reference differs')
+    combined = ipc_package.merge_inventory(combined, prepared_ipc['inventory'])
+    image = cohort['references']['x64']['image']
+    for name in ipc_contract.IMAGES:
+        require({k: values.get(ipc_package.APP + '/' + name, {}).get(k) for k in ('bytes', 'sha256')} ==
+                {k: image[k] for k in ('bytes', 'sha256')}, 'IPC packaged alias differs from x64 reference')
+    for name, digest in build['pe'].items():
+        arch, leaf = name.split('/')
+        relative = 'drive_c/windows/' + ('system32' if arch == 'x86_64-windows' else 'syswow64') + '/' + leaf
+        require(values.get(ipc_package.PREFIX + '/' + relative, {}).get('sha256') == digest and
+                prepared_ipc.get('patched_pe_delta', {}).get(relative, {}).get('after', {}).get('sha256') == digest,
+                'IPC matched PE overlay differs')
+    require(len(prepared_ipc.get('patched_pe_delta', {})) == 24, 'IPC complete PE overlay absent')
+    cpu = prepared['cpu']['outputs']['x86_64-windows/wowprospero.dll']
+    require(cpu == {k: values.get(ipc_package.PREFIX + '/drive_c/windows/system32/wowprospero.dll', {}).get(k)
+                   for k in ('bytes', 'sha256')}, 'IPC CPU PE differs')
+    require(decode_json(read(ipc_package.CAPABILITY)) == ipc_package.capability(manifest['project'],
+        {case: read(path) for case, path in ipc_package.PROFILES.items()}, read(ipc_package.REPORT),
+        read(ipc_package.REFERENCE), worker['worker']['build_id'], image['sha256']), 'IPC capability differs')
+    return combined
+
+
+def check_ipc_inputs(paths, project, fixture, abi, host_stamp):
+    cohort = ipc_contract.validate_bundle(paths['ipc_fixture'], project, paths['repo'],
+        os.environ.get('GITHUB_RUN_ID'), os.environ.get('GITHUB_RUN_ATTEMPT'))
+    prepared = read_json(paths['ipc_prefix_report'])
+    require(prepared.get('schema') == 'pw-windows-chromium-ipc-prefix/1' and prepared.get('project') == project and
+            prepared.get('wine_commit') == prefix.WINE and prepared.get('patches') == fixture['patches'] and
+            prepared.get('host_stamp') == host_stamp and prepared.get('private_dispatcher') == abi and
+            prepared.get('cpu') == fixture.get('cpu') and prepared.get('fixture') == cohort and
+            prepared.get('fixture_executed') is False and prepared.get('console_execution_verified') is False and
+            prepared.get('child_presentation') is False and prepared.get('child_input') is False,
+            'IPC prepared prefix source/reference differs')
+    require(prefix.inventory(paths['ipc_prefix']) == prepared.get('inventory'), 'IPC prefix bytes changed')
+    ipc_package.merge_inventory(fixture['inventory'], prepared['inventory'])
+    profiles = {case: (paths['ipc_prefix'] / path.removeprefix('console/')).read_bytes()
+                for case, path in ipc_package.PROFILES.items()}
+    for case, data in profiles.items(): ipc_package.profile_fields(data, case)
+    for name, data in ipc_contract.images(paths['ipc_fixture'], cohort).items():
+        require((paths['ipc_prefix'] / ipc_package.APP.removeprefix('console/') / name).read_bytes() == data,
+                'IPC staged alias differs from actual original x64 reference')
+    return {'cohort': cohort, 'prefix': prepared, 'profiles': profiles}
 
 
 def helper_role(project):
@@ -738,6 +817,7 @@ def validate_manifest(manifest, values, read):
     combined = validate_battle(manifest, values, read, prepared, abi, build)
     combined = validate_user(manifest, values, read, prepared, abi, build, worker, combined)
     combined = validate_network(manifest, values, read, prepared, abi, build, worker, combined)
+    combined = validate_ipc(manifest, values, read, prepared, abi, build, worker, combined)
     copied_inventory(values, 'console', combined)
     pair = decode_json(read('provenance/fixture-source.json'))
     require(pair.get('project') == project and pair == prepared['fixture'] and pair.get('architecture') == 'x64',
@@ -783,6 +863,21 @@ def validate_manifest(manifest, values, read):
         require(title.get('network_child_sha256') == network['files']['net-child.exe']['sha256'] and
                 title.get('network_reference_sha256') == values[network_package.REFERENCE]['sha256'],
                 'title original network child/reference differs')
+    require(type(title.get('ipc_enabled', False)) is bool and title.get('ipc_enabled', False) == manifest.get('ipc_enabled', False),
+            'title IPC admission selection differs')
+    if manifest.get('ipc_enabled', False):
+        cohort = decode_json(read(ipc_package.REFERENCE))
+        require(title.get('ipc_reference') == cohort and title.get('ipc_child_sha256') == cohort['references']['x64']['image']['sha256'],
+                'title IPC reference/hash differs')
+        require(title.get('title_compile_receipt') == {k: values.get('provenance/title-compile.json', {}).get(k) for k in ('bytes', 'sha256')},
+                'IPC raw title compile receipt differs')
+        compile_record = decode_json(read('provenance/title-compile.json'))
+        common = compile_record.get('common_flags', [])
+        require([v for v in common if v.startswith('-DPW_WINE_IPC_PROFILE_ENABLED')] == ['-DPW_WINE_IPC_PROFILE_ENABLED=1'] and
+                not any(v.startswith(('-UPW_WINE_IPC_', '-DPW_WINE_IPC_CHILD_SHA256')) for v in common),
+                'IPC raw title enable/hash flags differ')
+        require(title.get('ipc_child_identity', {}).get('identity') == cohort['references']['x64']['image']['sha256'] and
+                title.get('ipc_child_identity', {}).get('addresses'), 'IPC compiled title hash identity absent')
     copied_inventory(values, APP, title_inventory(title['files']), exact=False)
     return manifest
 
@@ -843,6 +938,8 @@ def verify_archive(path):
                     name.startswith(user_package.SOURCE_ROOT + '/') or name.startswith(user_package.REFERENCE_ROOT + '/') or \
                     name == network_package.PROFILE or name.startswith(network_package.SOURCE_ROOT + '/') or \
                     name.startswith(network_package.REFERENCE_ROOT + '/') or \
+                    name in ipc_package.PROFILES.values() or name.startswith(ipc_package.SOURCE_ROOT + '/') or \
+                    name.startswith(ipc_package.REFERENCE_ROOT + '/') or \
                     name in ('sources/owned-helper/lapy-source.json', 'sources/owned-helper/lapy-manifest.json',
                              'sources/owned-helper/lapy-build.json', 'sources/owned-helper/owned_identity.h')
                 if retain:
@@ -943,6 +1040,7 @@ def validate_title(paths, expected, inspection, run_id=None, run_attempt=None):
                               sdk_source_archive=paths['sdk_source_archive'], fixture=paths['fixture'], out=inspection)
     args.user_fixture = paths.get('user_fixture')
     args.network_fixture = paths.get('network_fixture')
+    args.ipc_fixture = paths.get('ipc_fixture')
     args.run_id, args.run_attempt = run_id, run_attempt
     actual = builder.check_title(args)
     require(actual == expected, 'replayed title import/compiled/embedded identity differs')
@@ -1110,9 +1208,11 @@ def assemble(config, output):
     require(type(user_enabled) is bool, 'USER capability selection must be boolean')
     network_enabled = config.get('network_enabled', False)
     require(type(network_enabled) is bool, 'network capability selection must be boolean')
+    ipc_enabled = config.get('ipc_enabled', False)
+    require(type(ipc_enabled) is bool, 'IPC capability selection must be boolean')
     run_id = config['run_url'].rsplit('/', 1)[-1]
     run_attempt = config.get('run_attempt')
-    if user_enabled or network_enabled:
+    if user_enabled or network_enabled or ipc_enabled:
         require(isinstance(run_attempt, str) and re.fullmatch('[1-9][0-9]*', run_attempt) and
                 os.environ.get('GITHUB_RUN_ID') == run_id and
                 os.environ.get('GITHUB_RUN_ATTEMPT') == run_attempt,
@@ -1123,11 +1223,12 @@ def assemble(config, output):
     if enabled: names |= {'battlenet_prefix', 'battlenet_prefix_report', 'cpu_output'}
     if user_enabled: names |= {'user_prefix', 'user_prefix_report', 'user_fixture'}
     if network_enabled: names |= {'network_prefix', 'network_prefix_report', 'network_fixture'}
+    if ipc_enabled: names |= {'ipc_prefix', 'ipc_prefix_report', 'ipc_fixture'}
     require(set(config.get('paths', {})) == names, 'incomplete/unexpected assembler paths')
     p = {name: Path(config['paths'][name]).absolute() for name in names}
     for name, path in p.items():
         prefix.ordinary(path, name not in {'cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive',
-                                         'sdk_source_archive', 'battlenet_prefix_report', 'user_prefix_report', 'network_prefix_report'})
+                                         'sdk_source_archive', 'battlenet_prefix_report', 'user_prefix_report', 'network_prefix_report', 'ipc_prefix_report'})
     repo, wine, host = p['repo'], p['wine_work'], p['host_work']
     project = prefix.project(repo)
     out = prefix.absent(output, tuple(p.values())); out.mkdir(mode=0o755)
@@ -1155,6 +1256,7 @@ def assemble(config, output):
     battle = check_battle_inputs(p, project, prepared, abi, host_identity['stamp']) if enabled else None
     user = check_user_inputs(p, project, prepared, abi, host_identity['stamp']) if user_enabled else None
     network = check_network_inputs(p, project, prepared, abi, host_identity['stamp']) if network_enabled else None
+    ipc = check_ipc_inputs(p, project, prepared, abi, host_identity['stamp']) if ipc_enabled else None
     service = validate_service(repo, p['service_work'], project, wine, abi, p['sdk'], p['foundation'],
                                p['llvm_bindir'], inspection / 'service-before')
     require(read_json(wine / 'report.json')['tls']['build']['inputs']['host_llvm'] == service['host_llvm'],
@@ -1176,15 +1278,20 @@ def assemble(config, output):
         require(title.get('network_child_sha256') == network['pair']['files']['net-child.exe']['sha256'] and
                 title.get('network_reference_sha256') == record(p['network_fixture'] / 'network-source.json')['sha256'],
                 'title network original image/receipt differs')
+    require(type(title.get('ipc_enabled', False)) is bool and title.get('ipc_enabled', False) == ipc_enabled, 'title IPC selection differs')
+    if ipc_enabled:
+        require(title.get('ipc_reference') == ipc['cohort'] and title.get('ipc_child_sha256') ==
+                ipc['cohort']['references']['x64']['image']['sha256'], 'title IPC exact reference/hash differs')
     title_tree = prefix.inventory(p['title'])
     require(title.get('files') == title_files(title_tree), 'title bytes changed after inspection')
-    validate_title(p, title, inspection / 'title-before', run_id if user_enabled or network_enabled else None, run_attempt)
+    validate_title(p, title, inspection / 'title-before', run_id if user_enabled or network_enabled or ipc_enabled else None, run_attempt)
     source_record = retained_sources(repo, p['sources_root'], p['sources_manifest'], project,
                                      p['wine_archive'], service, p['sdk'], p['foundation'], wine)
     before = {n: record(p[n]) for n in ('cohort', 'prefix_report', 'title_report', 'sources_manifest', 'wine_archive', 'sdk_source_archive')}
     if enabled: before['battlenet_prefix_report'] = record(p['battlenet_prefix_report'])
     if user_enabled: before['user_prefix_report'] = record(p['user_prefix_report'])
     if network_enabled: before['network_prefix_report'] = record(p['network_prefix_report'])
+    if ipc_enabled: before['ipc_prefix_report'] = record(p['ipc_prefix_report'])
     checker = prefix.load_tool(repo, 'check_wine_prx_build')
     script = (repo / 'tools/build_wine_ps5.sh').read_text()
     pin = re.search(r'^MODULE_EXPORTS_COMMIT=([0-9a-f]{40})$', script, re.M)
@@ -1244,7 +1351,7 @@ def assemble(config, output):
         put_bytes(stage, BATTLE_CAPABILITY,
                   json_bytes(battle_capability(project, battle[2], json_bytes(battle[0]), battle[1])))
         put(stage, BATTLE_CPU, p['cpu_output'] / 'cpu-build.json')
-    if user_enabled or network_enabled:
+    if user_enabled or network_enabled or ipc_enabled:
         put(stage, 'provenance/title-compile.json', p['title_build'] / 'wine-child-title-compile.json',
             title['title_compile_receipt'])
     if user_enabled:
@@ -1267,6 +1374,17 @@ def assemble(config, output):
             project, network['profile'], json_bytes(network['prefix']),
             (p['network_fixture'] / 'network-source.json').read_bytes(),
             service['worker']['build_id'], network['pair']['files']['net-child.exe']['sha256'])))
+    if ipc_enabled:
+        copy_tree(stage, 'console', p['ipc_prefix'], expected=ipc['prefix']['inventory'])
+        for name in ('anchors.json', 'x64.zip', 'x86.zip'):
+            put(stage, ipc_package.REFERENCE_ROOT + '/' + name, p['ipc_fixture'] / name)
+        put_bytes(stage, ipc_package.REFERENCE, json_bytes(ipc['cohort']))
+        put_bytes(stage, ipc_package.REPORT, json_bytes(ipc['prefix']))
+        for relative in ipc_package.SOURCE_FILES.values():
+            put(stage, ipc_package.SOURCE_ROOT + '/' + relative, repo / relative)
+        put_bytes(stage, ipc_package.CAPABILITY, json_bytes(ipc_package.capability(project, ipc['profiles'],
+            json_bytes(ipc['prefix']), json_bytes(ipc['cohort']), service['worker']['build_id'],
+            ipc['cohort']['references']['x64']['image']['sha256'])))
     cpu = stage / CONSOLE_PREFIX / 'drive_c/windows/system32/wowprospero.dll'
     put(stage, LIB + '/x86_64-windows/wowprospero.dll', cpu,
         prepared['cpu']['outputs']['x86_64-windows/wowprospero.dll'])
@@ -1302,7 +1420,7 @@ def assemble(config, output):
             abi_checker.check_build(wine, 1, p['llvm_bindir'] / 'llvm-readelf') == abi and
             validate_service(repo, p['service_work'], project, wine, abi, p['sdk'], p['foundation'],
                              p['llvm_bindir'], inspection / 'service-after') == service, 'runtime/worker inputs changed')
-    validate_title(p, title, inspection / 'title-after', run_id if user_enabled or network_enabled else None, run_attempt)
+    validate_title(p, title, inspection / 'title-after', run_id if user_enabled or network_enabled or ipc_enabled else None, run_attempt)
     if enabled:
         require(check_battle_inputs(p, project, prepared, abi, host_identity['stamp']) == battle,
                 'Battle source/runtime/profile changed during assembly')
@@ -1312,6 +1430,8 @@ def assemble(config, output):
     if network_enabled:
         require(check_network_inputs(p, project, prepared, abi, host_identity['stamp']) == network,
                 'network reference/prefix/profile changed during assembly')
+    if ipc_enabled:
+        require(check_ipc_inputs(p, project, prepared, abi, host_identity['stamp']) == ipc, 'IPC source/reference/prefix changed during assembly')
     normalize_directories(stage)
     values = inventory(stage)
     manifest = {'schema': 'pw-windows-child-fixture/1', 'project': project, 'wine_commit': prefix.WINE,
@@ -1331,6 +1451,11 @@ def assemble(config, output):
         manifest['run_attempt'] = run_attempt
         manifest['network_reference_inventory'] = network['reference_inventory']
         manifest['optional_roles'] = {**manifest.get('optional_roles', {}), **network_package.ROLES}
+    if ipc_enabled:
+        manifest['ipc_enabled'] = True
+        manifest['run_attempt'] = run_attempt
+        manifest['ipc_anchors'] = ipc['cohort']['anchors']
+        manifest['optional_roles'] = {**manifest.get('optional_roles', {}), **ipc_package.ROLES}
     put_bytes(stage, MANIFEST, json_bytes(manifest))
     put_bytes(stage, SUMS, checksums(inventory(stage)))
     verify_directory(stage)

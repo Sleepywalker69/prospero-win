@@ -42,6 +42,9 @@ native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
 wine_child_fixture=${PW_WINE_CHILD_FIXTURE_MODE:-0}
 wine_child_user=${PW_WINDOWS_CHILD_USER_DIR:-}
 wine_child_network=${PW_WINDOWS_CHILD_NETWORK_DIR:-}
+wine_child_ipc=${PW_WINDOWS_CHROMIUM_IPC_DIR:-}
+wine_ipc_enabled=0
+[[ -z $wine_child_ipc ]] || wine_ipc_enabled=1
 wine_network_enabled=0
 [[ -z $wine_child_network ]] || wine_network_enabled=1
 wine_user_enabled=0
@@ -58,7 +61,9 @@ title_id=PPSA99995
     echo "USER child reference requires the isolated Wine child title" >&2; exit 2; }
 [[ $wine_network_enabled == 0 || $wine_child_fixture == 1 ]] || {
     echo "Network child reference requires the isolated Wine child title" >&2; exit 2; }
-if [[ $wine_user_enabled == 1 || $wine_network_enabled == 1 ]]; then
+[[ $wine_ipc_enabled == 0 || $wine_child_fixture == 1 ]] || {
+    echo "IPC reference requires the isolated Wine child title" >&2; exit 2; }
+if [[ $wine_user_enabled == 1 || $wine_network_enabled == 1 || $wine_ipc_enabled == 1 ]]; then
     [[ ${GITHUB_RUN_ID:-} =~ ^[1-9][0-9]*$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[1-9][0-9]*$ ]] || {
         echo "Original child profiles require explicit current GitHub run/attempt" >&2; exit 2; }
 fi
@@ -215,21 +220,25 @@ if [[ $wine_child_fixture == 1 ]]; then
         --helper-directory "$build/owned-helper" \
         --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
     python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" \
-        "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" "$wine_child_network" <<'PYWINEINPUT'
+        "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" "$wine_child_network" "$wine_child_ipc" <<'PYWINEINPUT'
 import json, pathlib, sys
 root, build, fixture = map(pathlib.Path, sys.argv[1:4])
 sys.path.insert(0, str(root / 'tools'))
 from build_wine_service_child import title_profiles_input_contract
 user = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
 network = pathlib.Path(sys.argv[7]) if sys.argv[7] else None
+ipc = pathlib.Path(sys.argv[8]) if sys.argv[8] else None
 record, header, _, _, _ = title_profiles_input_contract(root, build / 'wine-child', fixture, user,
-                                           sys.argv[5] or None, sys.argv[6] or None, network)
+                                           sys.argv[5] or None, sys.argv[6] or None, network, ipc)
 (build / 'wine-child-title-inputs.json').write_text(json.dumps(record, indent=2) + '\n')
 (build / 'wine-child-title-config.h').write_text(header)
 PYWINEINPUT
     common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled" -I"$build" -I"$build/wine-child")
     if [[ $wine_network_enabled == 1 ]]; then
         common+=(-DPW_WINE_NET_PROFILE_ENABLED=1)
+    fi
+    if [[ $wine_ipc_enabled == 1 ]]; then
+        common+=(-DPW_WINE_IPC_PROFILE_ENABLED=1)
     fi
 fi
 
@@ -381,7 +390,10 @@ if [[ $wine_child_fixture == 1 ]]; then
     if [[ ${wine_network_enabled:-0} == 1 ]]; then
         user_title_args+=(--network-fixture "$wine_child_network")
     fi
-    if [[ ${wine_user_enabled:-0} == 1 || ${wine_network_enabled:-0} == 1 ]]; then
+    if [[ ${wine_ipc_enabled:-0} == 1 ]]; then
+        user_title_args+=(--ipc-fixture "$wine_child_ipc")
+    fi
+    if [[ ${wine_user_enabled:-0} == 1 || ${wine_network_enabled:-0} == 1 || ${wine_ipc_enabled:-0} == 1 ]]; then
         user_title_args+=(--run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
     fi
     python3 "$root/tools/build_wine_service_child.py" --check-title --work "$root" --sdk "$sdk" \

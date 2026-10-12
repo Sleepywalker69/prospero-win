@@ -80,6 +80,14 @@ unsigned pw_wine_child_title_profile(const PwGameProfile *p)
         EQUAL(p, winedebug, "") && p->display.width == 800 && p->display.height == 600 &&
         p->display.view == PW_GAME_VIEW_DESKTOP && !p->display.show_fps)
         return 4;
+    if (PW_WINE_IPC_PROFILE_ENABLED) for (unsigned mode=PW_WC_PROFILE_IPC_FIRST;mode<=PW_WC_PROFILE_IPC_LAST;++mode) {
+        const PwWineIpcProfile *ipc=pw_wine_ipc_profile(mode);
+        if (EQUAL(p,app.id,ipc->id) && EQUAL(p,app.prefix,PW_WINE_IPC_SLUG) &&
+            EQUAL(p,app.executable,ipc->image) && EQUAL(p,app.working_directory,ipc->cwd) &&
+            p->app.architecture==PW_APP_ARCH_PE64 && p->runtime.cpu==PW_GAME_CPU_DEFAULT &&
+            EQUAL(p,winedebug,"") && p->display.width==800 && p->display.height==600 &&
+            p->display.view==PW_GAME_VIEW_DESKTOP && !p->display.show_fps) return mode;
+    }
     return 0;
 }
 #undef EQUAL
@@ -173,12 +181,14 @@ static const void *unique_export(const PwPrxDescriptor *d, const char *name)
 int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
 {
     unsigned empty = TITLE_UNUSED;
+    const PwWineIpcProfile *ipc=pw_wine_ipc_profile(profile);
     if (!atomic_compare_exchange_strong(&title.state, &empty, TITLE_PREPARING)) return -1;
     int status = -1;
-    if ((profile != 1 && profile != 2 && profile != 3 && profile != 4) ||
+    if ((profile != 1 && profile != 2 && profile != 3 && profile != 4 && !ipc) ||
+        (ipc && !PW_WINE_IPC_PROFILE_ENABLED) ||
         (profile == 3 && !PW_WINE_USER_PROFILE_ENABLED) ||
         (profile == 4 && !PW_WINE_NET_PROFILE_ENABLED) ||
-        ((profile == 1 || profile == 3 || profile == 4) && !hexadecimal(fixture_hash, 64)) ||
+        ((profile == 1 || profile == 3 || profile == 4 || ipc) && !hexadecimal(fixture_hash, 64)) ||
         (profile == 2 && fixture_hash) || !hexadecimal(PW_WINE_CHILD_BUILD_ID, 40) ||
         !hexadecimal(PW_WINE_CHILD_SELF_SHA256, 64) ||
         pw_wine_child_image_size != PW_WINE_CHILD_SELF_BYTES ||
@@ -190,7 +200,7 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
     /* Correlation only, not authentication or entropy. One title owner means
      * these generations are never recycled within this native process. */
     title.session = (uint64_t)(unsigned)pid << 32 | (uint32_t)now;
-    if (profile == 1 || profile == 3 || profile == 4) memcpy(title.child_hash, fixture_hash, sizeof(title.child_hash));
+    if (profile == 1 || profile == 3 || profile == 4 || ipc) memcpy(title.child_hash, fixture_hash, sizeof(title.child_hash));
     unsigned bytes = pw_wine_fixture_owner_bytes();
     if (!bytes || bytes > 1024u * 1024u) goto failure;
     title.owner = calloc(1, bytes);
@@ -199,8 +209,8 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
         .session = title.session, .profile = profile,
         .child_unix_path = profile == 1 ? "/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe" :
                            profile == 3 ? "/data/prospero-win/prefixes/windows-child-user-v1/drive_c/windows-child-user/user-child.exe" :
-                           profile == 4 ? "/data/prospero-win/prefixes/windows-child-net-v1/drive_c/windows-child-net/net-child.exe" : NULL,
-        .child_sha256 = profile == 1 || profile == 3 || profile == 4 ? title.child_hash : NULL,
+                           profile == 4 ? "/data/prospero-win/prefixes/windows-child-net-v1/drive_c/windows-child-net/net-child.exe" : ipc ? ipc->native_image : NULL,
+        .child_sha256 = profile == 1 || profile == 3 || profile == 4 || ipc ? title.child_hash : NULL,
         .helper_image = pw_wine_child_image, .helper_bytes = (uint32_t)pw_wine_child_image_size,
         .build_id = PW_WINE_CHILD_BUILD_ID, .context = &title,
         .clock_ms = clock_ms, .cancelled = cancelled, .record = record
