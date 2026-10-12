@@ -30,7 +30,8 @@ WORKFLOW = '.github/workflows/windows-child-fixture.yml'
 MAX_ZIP = 2 << 30
 MAX_EXPANDED = 8 << 30
 RECIPES = ('tools/build_host_wine.sh', 'tools/build_wine_ps5.sh',
-           'tools/stage_vk_batch.py', 'tools/generate_vk_codecs.py')
+           'tools/stage_vk_batch.py', 'tools/generate_vk_codecs.py',
+           'tools/wine_compile_cache.py')
 SUPPORT_TARGETS = ('loader/wine', 'server/wineserver', 'dlls/ntdll/ntdll.so', 'dlls/wow64/x86_64-windows/libwow64.a',
                    'dlls/ntdll/x86_64-windows/libntdll.a',
                    'libs/winecrt0/x86_64-windows/libwinecrt0.a',
