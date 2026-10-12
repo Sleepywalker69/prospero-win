@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install only reader dependency
-        run: python -m pip install --only-binary=:all: PyYAML==6.0.1
+        run: 'python -m pip install --only-binary=:all: PyYAML==6.0.1'
       - name: Test bounded export admission and archive contracts
         run: python -m unittest discover -s tests -p test_export_host_compiler_cache.py -v
       - name: Validate original component and unique exact cache metadata

@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+import yaml
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / 'tools'))
@@ -264,6 +265,18 @@ class ExportTests(unittest.TestCase):
              patch.object(m, 'pack') as pack, self.assertRaises(ValueError):
             m.export(root, root, self.proof)
         pack.assert_not_called()
+
+    def test_workflow_yaml_and_wheel_only_command(self):
+        path = Path(__file__).parents[1] / '.github/workflows/export-host-compiler-cache.yml'
+        workflow = yaml.safe_load(path.read_text())
+        steps = workflow['jobs']['export']['steps']
+        install = [s for s in steps if s.get('name') == 'Install only reader dependency']
+        self.assertEqual(len(install), 1)
+        self.assertEqual(install[0]['run'], 'python -m pip install --only-binary=:all: PyYAML==6.0.1')
+        restore = [s for s in steps if s.get('id') == 'restore'][0]
+        self.assertEqual(restore['with']['key'], self.proof['key'])
+        self.assertTrue(restore['with']['fail-on-cache-miss'])
+        self.assertNotIn('restore-keys', restore['with'])
 
 if __name__ == '__main__':
     unittest.main()
