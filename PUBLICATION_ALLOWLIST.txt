@@ -1156,3 +1156,10 @@ tests/test_focus_target_workflow.py
 # Exact uncached target compile-only command and object receipts
 tools/check_focus_target_compile.py
 tests/test_focus_target_compile.py
+
+# Default-off tracked mouse-button receipt successor (no runtime activation)
+wine/focus-neutral/0004-tracked-mouse-button.patch
+docs/focus-mouse-button.md
+tools/check_focus_mouse_source.py
+tests/focus_mouse_fixture/mouse.c
+tests/focus_mouse_fixture/disabled.c

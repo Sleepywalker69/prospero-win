@@ -143,7 +143,7 @@ class Identity(unittest.TestCase):
 
     def test_header_repair_keeps_accepted_patch_inventory_and_stage_order(self):
         self.assertEqual(focus.OPTIONAL, ('0001-server-adapter.patch', '0002-server-requests.patch',
-                                         '0003-neutral-cohort.patch'))
+                                         '0003-neutral-cohort.patch', '0004-tracked-mouse-button.patch'))
         self.assertEqual(focus.ACCEPTED, ('5b4f6fb8d06b5878669ad2ac7ad784ac1e9b37b2596f9e21b51f24325a51cde6',
             '8d3924c4539a064f311d3638e34de3f773d2f5e64a69b8d5ba86beeb2e2f7894'))
         focus.contract(ROOT)  # production fixed-hash and exact inventory checks

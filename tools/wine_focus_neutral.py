@@ -12,7 +12,7 @@ import subprocess
 import sys
 sys.dont_write_bytecode = True
 WINE_COMMIT = '490f6d5dcbb2a5047345b8af88d114bbcaad69a8'
-OPTIONAL = ('0001-server-adapter.patch', '0002-server-requests.patch', '0003-neutral-cohort.patch')
+OPTIONAL = ('0001-server-adapter.patch', '0002-server-requests.patch', '0003-neutral-cohort.patch', '0004-tracked-mouse-button.patch')
 ACCEPTED = ('5b4f6fb8d06b5878669ad2ac7ad784ac1e9b37b2596f9e21b51f24325a51cde6',
             '8d3924c4539a064f311d3638e34de3f773d2f5e64a69b8d5ba86beeb2e2f7894')
 MARKERS = {'__wine_ps5_focus_abi': 1, '__wine_ps5_focus_protocol': 963, '__wine_ps5_focus_mode': 1}

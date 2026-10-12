@@ -99,7 +99,7 @@ jobs:
       - name: Source-check compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential bison flex
+          sudo apt-get install -y --no-install-recommends build-essential bison flex clang
       - name: Fetch and verify the pinned Wine source
         run: |
           mkdir -p "$RUNNER_TEMP/wine-evidence"
@@ -149,6 +149,12 @@ jobs:
         run: |
           python3 tools/check_focus_makedep.py --wine-source "$PROSPERO_WINE_SOURCE" \
             --work "$RUNNER_TEMP/focus-makedep" --out "$RUNNER_TEMP/wine-evidence/focus-makedep"
+      - name: Exercise tracked mouse-button source with strict and sanitizers
+        run: |
+          python3 tools/check_focus_mouse_source.py --wine-source "$PROSPERO_WINE_SOURCE" \
+            --out "$RUNNER_TEMP/wine-evidence/focus-mouse-strict"
+          python3 tools/check_focus_mouse_source.py --wine-source "$PROSPERO_WINE_SOURCE" \
+            --cc clang --sanitize address,undefined --out "$RUNNER_TEMP/wine-evidence/focus-mouse-sanitize"
       - name: Retain Wine source evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
