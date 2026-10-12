@@ -11,3 +11,10 @@ tests/fixtures/windows_child_network.c text eol=lf
 tests/fixtures/windows_child_network_contract.h text eol=lf
 tools/build_windows_child_network.ps1 text eol=lf
 tools/windows_child_network_contract.py text eol=lf
+
+# The original IPC producer/reference files are byte-bound across platforms.
+tests/fixtures/windows_chromium_ipc.c text eol=lf
+tests/fixtures/windows_chromium_ipc_contract.h text eol=lf
+tools/build_windows_chromium_ipc.ps1 text eol=lf
+tools/check_windows_chromium_ipc.py text eol=lf
+.github/workflows/windows-chromium-ipc-reference.yml text eol=lf

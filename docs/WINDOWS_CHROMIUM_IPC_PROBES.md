@@ -18,8 +18,9 @@ powershell -File tools/build_windows_chromium_ipc.ps1 -Arch x64 -Out C:\scratch\
 powershell -File tools/build_windows_chromium_ipc.ps1 -Arch x86 -Out C:\scratch\ipc-x86-new
 ```
 
-The output directory must not exist. The one `chromium-ipc.exe` image launches
-itself with `--worker`; no unrelated executable or process is opened. ASLR and NX
+The output directory must not exist. The `chromium-ipc.exe` image and its byte-identical fixed aliases launch
+their own actual module path with `--worker`; no unrelated executable or process
+is opened. ASLR and NX
 remain enabled. The script checks PE machine/optional-header architecture,
 retains the original C/header, compiler-selection output, compiler hash and
 source/PE SHA-256 values. Compiler bytes are not redistributed.
@@ -39,6 +40,54 @@ The [Windows reference workflow](../.github/workflows/windows-chromium-ipc-refer
 performs the original gate then these cases for x64 and x86 in order. It stops
 dependent cases on any failure. Windows x86 success remains a reference until
 there is separately admitted, actual PE32 target-child support.
+
+### Empty-argument entrypoints, Windows reference only
+
+The canonical `chromium-ipc.exe` still requires one explicit case argument. Eight
+byte-identical copies have exact, lowercase basenames selecting that case with
+**no arguments**. Selection uses `GetModuleFileNameW`, never `argv[0]`. Unknown
+basenames, extra profile arguments, canonical no-case entry, or a worker case
+that does not match its alias are rejected before logging or running a case.
+The existing bounded worker parser still validates every nonce/PID/handle field.
+
+These names and proposed IDs are reserved here for later separately reviewed
+native admission. **This change creates no PS5 profile, package or admission.**
+The planned dedicated prefix is `windows-chromium-ipc-v1`; its exact per-case
+executable/CWD will be sealed in that later change, not inferred from a wildcard.
+
+| Case | Exact basename | Proposed profile ID | Direct helpers per fresh owner |
+| --- | --- | --- | ---: |
+| self-memory | pw-ipc-self-memory.exe | windows-chromium-ipc-self-memory-v1 | 0 |
+| live-memory | pw-ipc-live-memory.exe | windows-chromium-ipc-live-memory-v1 | 1 |
+| suspended-memory | pw-ipc-suspended-memory.exe | windows-chromium-ipc-suspended-memory-v1 | 1 |
+| section-readonly | pw-ipc-section-readonly.exe | windows-chromium-ipc-section-readonly-v1 | 1 |
+| section-duplicate | pw-ipc-section-duplicate.exe | windows-chromium-ipc-section-duplicate-v1 | 1 |
+| section-close-source | pw-ipc-section-close-source.exe | windows-chromium-ipc-section-close-source-v1 | 1 |
+| mojo-pipe | pw-ipc-mojo-pipe.exe | windows-chromium-ipc-mojo-pipe-v1 | 1 |
+| page-regression | pw-ipc-page-regression.exe | windows-chromium-ipc-page-regression-v1 | 0 |
+
+Each reference launches a fresh Windows process and has maximum child depth one.
+There is no cumulative in-process reset, suite-launcher grandchild or increase
+to native generation limits. A future target profile must retain empty arguments,
+allow only its selected exact alias/path/hash, cap admission at zero or one
+lifetime direct helper as shown, and continue refusing descendant creation.
+Native retirement and restart-readiness remain independent of guest exit.
+
+`BUILD-INFO.json` schema 2 binds source commit/tree, source/header, producer,
+checker, reference workflow, compiler and identical executable/alias hashes.
+CI run/repository/attempt fields provide correlation; consumers must additionally
+supply trusted expected run/artifact identities and verify the downloaded archive
+digest. Producer/reference inputs must match the committed source. Recipe and
+checker/workflow copies are retained beside the source and binaries.
+
+The Windows workflow preserves the original baseline and eight explicit-mode
+references, then runs all eight empty-argument aliases in separate fresh
+directories through the same strict checker. Twelve real entry-rejection controls
+must exit exactly 2 without creating IPC logs. `ENTRY-REFERENCE.json` is written
+only after all those gates pass. It records Windows reference success while
+keeping native admission not implemented, PS5 execution not run and native
+settlement unverified. Existing successful explicit-mode artifacts alone cannot
+establish this new no-argument entry path.
 
 1. `self-memory`: no child. Pseudo-self and real `OpenProcess` self handles each
    read and write a private DWORD through both kernelbase and direct ntdll APIs.
