@@ -72,9 +72,11 @@ static int ref_take(RefTaggedSink *s)
         RefEnvelope m=s->meta[s->head];
         s->head=(s->head+1)%PW_WINE_INPUT_QUEUE;s->count--;
         if(memcmp(&e,&m.event,sizeof(e)))return -1;
+        if(m.source>=REF_SOURCES)return -1;
         if(m.epoch!=s->source[m.source].epoch)continue;
         if(s->next_ticket==UINT64_MAX)return -1;
         int k=ref_control(m.event);
+        if(k<0)return -1;
         s->flight=m;s->ticket=++s->next_ticket;
         s->flight_hwnd=m.event.down?s->hwnd:s->held_hwnd[m.source][k];
         s->flight_generation=m.event.down?s->generation:s->held_generation[m.source][k];
@@ -89,6 +91,7 @@ static int ref_needs_hardware(const RefTaggedSink *s)
 {
     if(!s->inflight)return -1;
     unsigned source=s->flight.source;int k=ref_control(s->flight.event);
+    if(source>=REF_SOURCES||k<0)return -1;
     unsigned own=s->held[source][k],other=0;
     if(own&&s->flight.event.down&&(s->held_hwnd[source][k]!=s->flight_hwnd||
        s->held_generation[source][k]!=s->flight_generation))return -1;
@@ -105,6 +108,7 @@ static int ref_complete(RefTaggedSink *s,uint64_t ticket,uint64_t epoch,int appl
     if(applied<0||(applied&&ref_needs_hardware(s)<0))return -1; /* unknown/timeout retains ownership */
     if(applied){
         unsigned source=s->flight.source;int k=ref_control(s->flight.event);
+        if(source>=REF_SOURCES||k<0)return -1;
         s->held[source][k]=s->flight.event.down;
         s->held_hwnd[source][k]=s->flight_hwnd;
         s->held_generation[source][k]=s->flight_generation;
