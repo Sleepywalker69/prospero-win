@@ -1,0 +1,498 @@
+diff --git a/include/wine/pw_focus_protocol.h b/include/wine/pw_focus_protocol.h
+--- a/include/wine/pw_focus_protocol.h
++++ b/include/wine/pw_focus_protocol.h
+@@ -16,6 +16,9 @@
+ #define PW_FOCUS_CLOSE 5u
+ #define PW_FOCUS_ABANDON 6u
+ #define PW_FOCUS_KEYBOARD 1u
++/* Single canonical left/right/middle edge: code 0..2, x=y=0, down 0..1.
++ * Receipt keys 256..258 cannot alias keyboard virtual keys 1..255. */
++#define PW_FOCUS_MOUSE_BUTTON 2u
+ #define PW_FOCUS_RECEIPT_PHASE(value) ((value) & 0xffu)
+ #define PW_FOCUS_RECEIPT_DISPOSITION(value) (((value) >> 8) & 0xffu)
+ #define PW_FOCUS_RECEIPT_RESERVED_MASK 0xffff0000u
+diff --git a/server/pw_focus_adapter.h b/server/pw_focus_adapter.h
+--- a/server/pw_focus_adapter.h
++++ b/server/pw_focus_adapter.h
+@@ -10,6 +10,7 @@
+ extern void pw_focus_window_detached(struct window *);
+ extern int pw_focus_queue_quiesce(uint32_t, uint64_t, uint64_t);
+ extern void pw_focus_queue_abandon(uint32_t, uint64_t, uint64_t);
++extern int pw_focus_queue_mouse_button(const PwFocusTicket *, struct desktop *, user_handle_t, const union hw_input *);
+ extern int pw_focus_queue_keyboard(const PwFocusTicket *, struct desktop *, user_handle_t, const union hw_input *);
+ extern void pw_focus_stop_key_repeat(struct desktop *);
+ extern int pw_focus_queue_begin(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, unsigned int, PwFocusTicket *);
+diff --git a/server/pw_focus_requests.c b/server/pw_focus_requests.c
+--- a/server/pw_focus_requests.c
++++ b/server/pw_focus_requests.c
+@@ -394,46 +394,65 @@
+     if (result || get_error() ||
+         atomic_load_explicit(&focus_install_state, memory_order_acquire) != FOCUS_STARTED ||
+         context->phase > PW_FOCUS_CLOSED || receipt.outcome > PW_FOCUS_MOTION_NO_CHANGE ||
+-        receipt.repeat || receipt.down > 1 || receipt.key > 255 ||
+-        (receipt.ticket.seq && (!receipt.client_seq || !receipt.outcome || receipt.ticket.cookie != req->cookie ||
+-                                receipt.ticket.epoch != req->epoch || receipt.ticket.slot != req->slot)) ||
+-        (!receipt.ticket.seq && (receipt.client_seq || receipt.key || receipt.down || receipt.outcome ||
+-                                 receipt.hook_error || receipt.desktop_serial)))
+-    { focus_refuse(STATUS_INVALID_PARAMETER); return; }
+-    reply->abi = PW_FOCUS_ABI;
+-    reply->phase_disposition = context->phase | (receipt.outcome << 8);
+-    reply->cookie = req->cookie;
+-    reply->epoch = req->epoch;
+-    reply->sequence = receipt.ticket.seq ? receipt.ticket.seq : final_sequence;
+-    reply->client_sequence = req->opcode == PW_FOCUS_SETTLE ? context->last_client_seq : receipt.client_seq;
+-    reply->desktop_serial = receipt.desktop_serial;
+-    reply->key_edge = receipt.key | (receipt.down << 16);
+-    reply->hook_error = receipt.hook_error;
+-    if (!focus_has_work() && focus_watchdog) { remove_timeout_user(focus_watchdog); focus_watchdog = NULL; }
+-}
+-
+-static unsigned int focus_normalized_key(unsigned int key, unsigned int flags)
+-{
+-    switch (key)
+-    {
+-    case VK_MENU: case VK_LMENU: case VK_RMENU:
+-        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RMENU : VK_LMENU;
+-    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+-        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RCONTROL : VK_LCONTROL;
+-    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+-        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RSHIFT : VK_LSHIFT;
+-    default: return key;
+-    }
+-}
+-DECL_HANDLER(focus_input)
+-{
+-    PwFocusContext *context;
+-    PwFocusTicket ticket;
+-    union hw_input input = {0};
+-    int result;
+-    (void)reply;
+-    if (!focus_header(req->abi)) return;
+-    context = focus_owned(req->slot, req->cookie, req->epoch);
++        receipt.repeat || receipt.down > 1 || receipt.key > 258 ||
++        (receipt.ticket.seq && (!receipt.client_seq || !receipt.outcome || receipt.ticket.cookie != req->cookie ||
++                                receipt.ticket.epoch != req->epoch || receipt.ticket.slot != req->slot)) ||
++        (!receipt.ticket.seq && (receipt.client_seq || receipt.key || receipt.down || receipt.outcome ||
++                                 receipt.hook_error || receipt.desktop_serial)))
++    { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++    reply->abi = PW_FOCUS_ABI;
++    reply->phase_disposition = context->phase | (receipt.outcome << 8);
++    reply->cookie = req->cookie;
++    reply->epoch = req->epoch;
++    reply->sequence = receipt.ticket.seq ? receipt.ticket.seq : final_sequence;
++    reply->client_sequence = req->opcode == PW_FOCUS_SETTLE ? context->last_client_seq : receipt.client_seq;
++    reply->desktop_serial = receipt.desktop_serial;
++    reply->key_edge = receipt.key | (receipt.down << 16);
++    reply->hook_error = receipt.hook_error;
++    if (!focus_has_work() && focus_watchdog) { remove_timeout_user(focus_watchdog); focus_watchdog = NULL; }
++}
++
++static unsigned int focus_normalized_key(unsigned int key, unsigned int flags)
++{
++    switch (key)
++    {
++    case VK_MENU: case VK_LMENU: case VK_RMENU:
++        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RMENU : VK_LMENU;
++    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
++        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RCONTROL : VK_LCONTROL;
++    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
++        return flags & KEYEVENTF_EXTENDEDKEY ? VK_RSHIFT : VK_LSHIFT;
++    default: return key;
++    }
++}
++DECL_HANDLER(focus_input)
++{
++    PwFocusContext *context;
++    PwFocusTicket ticket;
++    union hw_input input = {0};
++    int result;
++    (void)reply;
++    if (!focus_header(req->abi)) return;
++    context = focus_owned(req->slot, req->cookie, req->epoch);
++    if (req->type == PW_FOCUS_MOUSE_BUTTON)
++    {
++        static const unsigned int button_flags[3][2] =
++        {
++            {MOUSEEVENTF_LEFTUP, MOUSEEVENTF_LEFTDOWN},
++            {MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_RIGHTDOWN},
++            {MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MIDDLEDOWN}
++        };
++        if (!context || req->code > 2 || req->x || req->y || req->down > 1)
++        { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++        result = pw_focus_queue_begin(req->slot, req->cookie, req->epoch, req->client_sequence,
++                                      256u + req->code, req->down, &ticket);
++        if (result) { focus_refuse(STATUS_INVALID_PARAMETER); return; }
++        input.mouse.type = INPUT_MOUSE;
++        input.mouse.flags = button_flags[req->code][req->down];
++        result = pw_focus_queue_mouse_button(&ticket, context->desktop, context->handle, &input);
++        if (result) focus_refuse(STATUS_ACCESS_DENIED);
++        return;
++    }
+     if (!context || req->type != PW_FOCUS_KEYBOARD || !req->code || req->code > 255 || req->x > 255 ||
+         (req->y & ~(KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY)) || req->down > 1 ||
+         req->down != !(req->y & KEYEVENTF_KEYUP))
+diff --git a/server/queue.c b/server/queue.c
+--- a/server/queue.c
++++ b/server/queue.c
+@@ -2489,141 +2489,226 @@
+ }
+ 
+ /* queue a hardware message for a mouse event */
+-static int queue_mouse_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
+-                                unsigned int origin, struct msg_queue *sender, bool rawinput )
+-{
+-    static const POINT empty_raw = {0};
+-
+-    desktop_shm_t *desktop_shm = desktop->shared;
+-    unsigned char state = desktop_shm->keystate[VK_LBUTTON] | desktop_shm->keystate[VK_MBUTTON] |
+-                          desktop_shm->keystate[VK_RBUTTON] | desktop_shm->keystate[VK_XBUTTON1] |
+-                          desktop_shm->keystate[VK_XBUTTON2];
+-    struct hardware_msg_data *msg_data;
+-    struct rawinput_message raw_msg;
+-    struct message *msg;
+-    struct thread *foreground, *thread;
+-    unsigned int i, time = get_tick_count(), flags;
+-    struct hw_msg_source source = { IMDT_MOUSE, origin };
+-    lparam_t wparam = input->mouse.data << 16;
+-    const POINT *raw = &empty_raw;
+-    int wait = 0, x, y;
+-
+-    static const unsigned int messages[] =
+-    {
+-        WM_MOUSEMOVE,    /* 0x0001 = MOUSEEVENTF_MOVE */
+-        WM_LBUTTONDOWN,  /* 0x0002 = MOUSEEVENTF_LEFTDOWN */
+-        WM_LBUTTONUP,    /* 0x0004 = MOUSEEVENTF_LEFTUP */
+-        WM_RBUTTONDOWN,  /* 0x0008 = MOUSEEVENTF_RIGHTDOWN */
+-        WM_RBUTTONUP,    /* 0x0010 = MOUSEEVENTF_RIGHTUP */
+-        WM_MBUTTONDOWN,  /* 0x0020 = MOUSEEVENTF_MIDDLEDOWN */
+-        WM_MBUTTONUP,    /* 0x0040 = MOUSEEVENTF_MIDDLEUP */
+-        WM_XBUTTONDOWN,  /* 0x0080 = MOUSEEVENTF_XDOWN */
+-        WM_XBUTTONUP,    /* 0x0100 = MOUSEEVENTF_XUP */
+-        0,               /* 0x0200 = unused */
+-        0,               /* 0x0400 = unused */
+-        WM_MOUSEWHEEL,   /* 0x0800 = MOUSEEVENTF_WHEEL */
+-        WM_MOUSEHWHEEL   /* 0x1000 = MOUSEEVENTF_HWHEEL */
+-    };
+-
+-    if (input->mouse.raw_count != get_req_data_size() / sizeof(*raw))
+-    {
+-        set_error( STATUS_INVALID_PARAMETER );
+-        return 0;
+-    }
+-    if (input->mouse.raw_count) raw = get_req_data();
+-
+-    SHARED_WRITE_BEGIN( desktop_shm, desktop_shm_t )
+-    {
+-        shared->cursor.last_change = time;
+-    }
+-    SHARED_WRITE_END;
+-
+-    flags = input->mouse.flags;
+-    time  = input->mouse.time;
+-    if (!time) time = desktop_shm->cursor.last_change;
+-
+-    if (win && origin == IMO_HARDWARE && flags == (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE) &&
+-        !(state & 0x80) && (thread = get_window_thread( win )))
+-    {
+-        struct rectangle rect = { input->mouse.x, input->mouse.y, input->mouse.x + 1, input->mouse.y + 1 };
+-        struct thread_input *input = thread->queue->input;
+-        if (!input->shared->capture) set_window_rect_visible( win, rect );
+-        release_object( thread );
+-    }
+-
+-    if (flags & MOUSEEVENTF_MOVE)
+-    {
+-        if (flags & MOUSEEVENTF_ABSOLUTE)
+-        {
+-            x = input->mouse.x;
+-            y = input->mouse.y;
+-        }
+-        else
+-        {
+-            x = desktop_shm->cursor.x + input->mouse.x;
+-            y = desktop_shm->cursor.y + input->mouse.y;
+-        }
+-        if (x == desktop_shm->cursor.x && y == desktop_shm->cursor.y)
+-            flags &= ~MOUSEEVENTF_MOVE;
+-    }
+-    else
+-    {
+-        x = desktop_shm->cursor.x;
+-        y = desktop_shm->cursor.y;
+-    }
+-
+-    if ((foreground = get_foreground_thread( desktop, win )))
+-    {
+-        memset( &raw_msg, 0, sizeof(raw_msg) );
+-        raw_msg.foreground = foreground;
+-        raw_msg.source     = source;
+-        raw_msg.time       = time;
+-        raw_msg.message    = WM_INPUT;
+-        raw_msg.flags      = flags;
+-
+-        for (int i = 0, count = max( 1, input->mouse.raw_count ); i < count; i++)
+-        {
+-            int raw_x, raw_y;
+-
+-            raw_x = rawinput ? raw[i].x : x - desktop_shm->cursor.x;
+-            raw_y = rawinput ? raw[i].y : y - desktop_shm->cursor.y;
+-
+-            if (rawmouse_init( &raw_msg.rawinput, &raw_msg.data.mouse, raw_x, raw_y,
+-                               raw_msg.flags, input->mouse.data, input->mouse.info ))
+-                dispatch_rawinput_message( desktop, &raw_msg );
+-        }
+-
+-        release_object( foreground );
+-    }
+-
+-    for (i = 0; i < ARRAY_SIZE( messages ); i++)
+-    {
+-        if (!messages[i]) continue;
+-        if (!(flags & (1 << i))) continue;
+-        flags &= ~(1 << i);
+-
+-        if (!(msg = alloc_hardware_message( input->mouse.info, source, time, 0 ))) return 0;
+-        msg_data = msg->data;
+-
+-        msg->win       = get_user_full_handle( win );
+-        msg->msg       = messages[i];
+-        msg->wparam    = wparam;
+-        msg->lparam    = 0;
+-        msg->x         = x;
+-        msg->y         = y;
+-        if (origin == IMO_INJECTED) msg_data->flags = LLMHF_INJECTED;
+-
+-        /* specify a sender only when sending the last message */
+-        if (!(flags & ((1 << ARRAY_SIZE( messages )) - 1)))
+-        {
+-            if (!(wait = send_hook_ll_message( desktop, msg, WH_MOUSE_LL, wparam, sender )))
+-                queue_hardware_message( desktop, msg, 0 );
+-        }
+-        else if (!send_hook_ll_message( desktop, msg, WH_MOUSE_LL, wparam, NULL ))
+-            queue_hardware_message( desktop, msg, 0 );
+-    }
+-    return wait;
+-}
++static int queue_mouse_message_impl( struct desktop *desktop, user_handle_t win, const union hw_input *input,
++                                     unsigned int origin, struct msg_queue *sender, bool rawinput
++#ifdef PW_FOCUS_SERVER_ADAPTER
++                                     , struct pw_focus_tag *focus
++#endif
++                                     )
++{
++    static const POINT empty_raw = {0};
++
++    desktop_shm_t *desktop_shm = desktop->shared;
++    unsigned char state = desktop_shm->keystate[VK_LBUTTON] | desktop_shm->keystate[VK_MBUTTON] |
++                          desktop_shm->keystate[VK_RBUTTON] | desktop_shm->keystate[VK_XBUTTON1] |
++                          desktop_shm->keystate[VK_XBUTTON2];
++    struct hardware_msg_data *msg_data;
++    struct rawinput_message raw_msg;
++    struct message *msg;
++    struct thread *foreground, *thread;
++    unsigned int i, time = get_tick_count(), flags;
++    struct hw_msg_source source = { IMDT_MOUSE, origin };
++    lparam_t wparam = input->mouse.data << 16;
++    const POINT *raw = &empty_raw;
++    int wait = 0, x, y;
++
++    static const unsigned int messages[] =
++    {
++        WM_MOUSEMOVE,    /* 0x0001 = MOUSEEVENTF_MOVE */
++        WM_LBUTTONDOWN,  /* 0x0002 = MOUSEEVENTF_LEFTDOWN */
++        WM_LBUTTONUP,    /* 0x0004 = MOUSEEVENTF_LEFTUP */
++        WM_RBUTTONDOWN,  /* 0x0008 = MOUSEEVENTF_RIGHTDOWN */
++        WM_RBUTTONUP,    /* 0x0010 = MOUSEEVENTF_RIGHTUP */
++        WM_MBUTTONDOWN,  /* 0x0020 = MOUSEEVENTF_MIDDLEDOWN */
++        WM_MBUTTONUP,    /* 0x0040 = MOUSEEVENTF_MIDDLEUP */
++        WM_XBUTTONDOWN,  /* 0x0080 = MOUSEEVENTF_XDOWN */
++        WM_XBUTTONUP,    /* 0x0100 = MOUSEEVENTF_XUP */
++        0,               /* 0x0200 = unused */
++        0,               /* 0x0400 = unused */
++        WM_MOUSEWHEEL,   /* 0x0800 = MOUSEEVENTF_WHEEL */
++        WM_MOUSEHWHEEL   /* 0x1000 = MOUSEEVENTF_HWHEEL */
++    };
++
++#ifdef PW_FOCUS_SERVER_ADAPTER
++    if (focus)
++    {
++        static const unsigned int button_flags[3][2] =
++        {
++            {MOUSEEVENTF_LEFTUP, MOUSEEVENTF_LEFTDOWN},
++            {MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_RIGHTDOWN},
++            {MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MIDDLEDOWN}
++        };
++        PwFocusContext *context = focus_context(&focus->ticket);
++        PwFocusOperation *op = focus_operation(&focus->ticket);
++        /* One receipt owns exactly one button edge, never motion, wheel,
++         * multiple buttons, raw samples, or an auto-repeat operation. */
++        if (!focus->active || !context || !op || context->desktop != desktop || context->handle != win ||
++            !context->registry || context->poison ||
++            (context->phase != PW_FOCUS_ACTIVE &&
++             !(context->phase == PW_FOCUS_RELEASING && !op->receipt.down)) ||
++            origin != IMO_HARDWARE || sender || rawinput || get_req_data_size() ||
++            input->mouse.type != INPUT_MOUSE || input->mouse.x || input->mouse.y ||
++            input->mouse.data || input->mouse.time || input->mouse.info || input->mouse.raw_count ||
++            op->receipt.repeat || op->receipt.key < 256 || op->receipt.key > 258 || op->receipt.down > 1 ||
++            input->mouse.flags != button_flags[op->receipt.key - 256][op->receipt.down])
++        {
++            focus_complete_tag(focus, PW_FOCUS_FAILED, STATUS_INVALID_PARAMETER, 0);
++            return 0;
++        }
++    }
++#endif
++
++    if (input->mouse.raw_count != get_req_data_size() / sizeof(*raw))
++    {
++        set_error( STATUS_INVALID_PARAMETER );
++        return 0;
++    }
++    if (input->mouse.raw_count) raw = get_req_data();
++
++    SHARED_WRITE_BEGIN( desktop_shm, desktop_shm_t )
++    {
++        shared->cursor.last_change = time;
++    }
++    SHARED_WRITE_END;
++
++    flags = input->mouse.flags;
++    time  = input->mouse.time;
++    if (!time) time = desktop_shm->cursor.last_change;
++
++    if (win && origin == IMO_HARDWARE && flags == (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE) &&
++        !(state & 0x80) && (thread = get_window_thread( win )))
++    {
++        struct rectangle rect = { input->mouse.x, input->mouse.y, input->mouse.x + 1, input->mouse.y + 1 };
++        struct thread_input *input = thread->queue->input;
++        if (!input->shared->capture) set_window_rect_visible( win, rect );
++        release_object( thread );
++    }
++
++    if (flags & MOUSEEVENTF_MOVE)
++    {
++        if (flags & MOUSEEVENTF_ABSOLUTE)
++        {
++            x = input->mouse.x;
++            y = input->mouse.y;
++        }
++        else
++        {
++            x = desktop_shm->cursor.x + input->mouse.x;
++            y = desktop_shm->cursor.y + input->mouse.y;
++        }
++        if (x == desktop_shm->cursor.x && y == desktop_shm->cursor.y)
++            flags &= ~MOUSEEVENTF_MOVE;
++    }
++    else
++    {
++        x = desktop_shm->cursor.x;
++        y = desktop_shm->cursor.y;
++    }
++
++    if ((foreground = get_foreground_thread( desktop, win )))
++    {
++        memset( &raw_msg, 0, sizeof(raw_msg) );
++        raw_msg.foreground = foreground;
++        raw_msg.source     = source;
++        raw_msg.time       = time;
++        raw_msg.message    = WM_INPUT;
++        raw_msg.flags      = flags;
++
++        for (int i = 0, count = max( 1, input->mouse.raw_count ); i < count; i++)
++        {
++            int raw_x, raw_y;
++
++            raw_x = rawinput ? raw[i].x : x - desktop_shm->cursor.x;
++            raw_y = rawinput ? raw[i].y : y - desktop_shm->cursor.y;
++
++            if (rawmouse_init( &raw_msg.rawinput, &raw_msg.data.mouse, raw_x, raw_y,
++                               raw_msg.flags, input->mouse.data, input->mouse.info ))
++                dispatch_rawinput_message( desktop, &raw_msg );
++        }
++
++        release_object( foreground );
++    }
++
++    for (i = 0; i < ARRAY_SIZE( messages ); i++)
++    {
++        if (!messages[i]) continue;
++        if (!(flags & (1 << i))) continue;
++        flags &= ~(1 << i);
++
++        if (!(msg = alloc_hardware_message( input->mouse.info, source, time, 0 )))
++        {
++#ifdef PW_FOCUS_SERVER_ADAPTER
++            if (focus) focus_complete_tag(focus, PW_FOCUS_FAILED, STATUS_NO_MEMORY, 0);
++#endif
++            return 0;
++        }
++#ifdef PW_FOCUS_SERVER_ADAPTER
++        if (focus) { msg->focus = *focus; focus->active = 0; }
++#endif
++        msg_data = msg->data;
++
++        msg->win       = get_user_full_handle( win );
++        msg->msg       = messages[i];
++        msg->wparam    = wparam;
++        msg->lparam    = 0;
++        msg->x         = x;
++        msg->y         = y;
++        if (origin == IMO_INJECTED) msg_data->flags = LLMHF_INJECTED;
++
++        /* specify a sender only when sending the last message */
++        if (!(flags & ((1 << ARRAY_SIZE( messages )) - 1)))
++        {
++            if (!(wait = send_hook_ll_message( desktop, msg, WH_MOUSE_LL, wparam, sender )))
++                queue_hardware_message( desktop, msg, 0 );
++        }
++        else if (!send_hook_ll_message( desktop, msg, WH_MOUSE_LL, wparam, NULL ))
++            queue_hardware_message( desktop, msg, 0 );
++    }
++    return wait;
++}
++
++static int queue_mouse_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
++                                unsigned int origin, struct msg_queue *sender, bool rawinput )
++{
++    return queue_mouse_message_impl(desktop, win, input, origin, sender, rawinput
++#ifdef PW_FOCUS_SERVER_ADAPTER
++                                    , NULL
++#endif
++                                    );
++}
++
++#ifdef PW_FOCUS_SERVER_ADAPTER
++int pw_focus_queue_mouse_button(const PwFocusTicket *ticket, struct desktop *desktop,
++                                user_handle_t win, const union hw_input *input)
++{
++    struct pw_focus_tag tag = {0};
++    uint64_t now;
++    PwFocusContext *context = focus_context(ticket);
++    if (!context || !desktop || !input || context->desktop != desktop || !focus_claim(ticket, &tag))
++        return PW_FOCUS_BAD_ID;
++    grab_object(desktop);
++    /* Revalidate authority and window lifetime after reservation and before
++     * any Wine input effect. A successful return is admission, not release. */
++    if (!focus_now(&now))
++    {
++        focus_complete_tag(&tag, PW_FOCUS_FAILED, STATUS_ACCESS_DENIED, 0);
++        release_object(desktop);
++        return PW_FOCUS_REFUSED;
++    }
++    pw_focus_watchdog(&pw_focus_server_core, ticket->slot, now);
++    focus_sync_timer(desktop);
++    if (!context->registry || context->poison)
++    {
++        focus_complete_tag(&tag, PW_FOCUS_FAILED, STATUS_ACCESS_DENIED, 0);
++        release_object(desktop);
++        return PW_FOCUS_REFUSED;
++    }
++    queue_mouse_message_impl(desktop, win, input, IMO_HARDWARE, NULL, 0, &tag);
++    release_object(desktop);
++    /* Existing POLL/ACK/SETTLE owns factual completion and held state. */
++    return PW_FOCUS_OK;
++}
++#endif
+ 
+ static int queue_keyboard_message_impl( struct desktop *desktop, user_handle_t win, const union hw_input *input,
+                                         unsigned int origin, struct msg_queue *sender, int repeat
