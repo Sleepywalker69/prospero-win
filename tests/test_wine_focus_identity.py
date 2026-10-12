@@ -168,4 +168,18 @@ class Identity(unittest.TestCase):
         self.assertIn('python3 tools/check_focus_makedep.py --wine-source "$PROSPERO_WINE_SOURCE"', flow)
         self.assertIn('--work "$RUNNER_TEMP/focus-makedep" --out "$RUNNER_TEMP/wine-evidence/focus-makedep"', flow)
 
+    def test_makedep_source_header_rules_allow_only_empty_fallbacks(self):
+        import check_focus_makedep as makedep
+        header = 'pw_focus_build.h'
+        for text in ('object.o: /src/include/wine/pw_focus_build.h\n\tcc -c source.c\n',
+                     '/src/a.h \\\n /src/include/wine/pw_focus_build.h /src/z.h:\n\nnext:\n\ttrue\n',
+                     '/src/include/wine/pw_focus_build.h:\n# empty fallback\n'):
+            makedep.verify_source_header_rules(text, header)
+        for text in ('/src/include/wine/pw_focus_build.h: input.in\n',
+                     '/src/a.h /src/include/wine/pw_focus_build.h: ; generate\n',
+                     '/src/include/wine/pw_focus_build.h:\n\tgenerate\n',
+                     '/src/a.h \\\n /src/include/wine/pw_focus_build.h:\n\n# comment\n\tgenerate\n'):
+            with self.assertRaisesRegex(AssertionError, 'generator'):
+                makedep.verify_source_header_rules(text, header)
+
 if __name__=='__main__':unittest.main()

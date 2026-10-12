@@ -25,6 +25,25 @@ def dependencies(text, target):
     return set(' '.join(rows).split())
 
 
+def verify_source_header_rules(text, header):
+    """Makedep emits empty fallback rules for source headers, never recipes."""
+    lines = text.replace('\\\n', ' ').splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith('\t') or ':' not in line:
+            continue
+        targets, remainder = line.split(':', 1)
+        if not any(target == header or target.endswith('/' + header) for target in targets.split()):
+            continue
+        if remainder.strip():
+            raise AssertionError('source header has generator dependencies or inline recipe: ' + header)
+        for following in lines[index+1:]:
+            if not following.strip() or following.lstrip().startswith('#'):
+                continue
+            if following.startswith('\t'):
+                raise AssertionError('source header has generator recipe: ' + header)
+            break
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--wine-source', type=Path, required=True)
@@ -107,8 +126,7 @@ def main():
                 selected.extend(matches)
             graph[name][target] = selected
         # Ordinary source headers must not acquire a generated-header recipe.
-        assert not re.search(r'^[^\n:]*\bpw_focus_build\.h(?:[ \t]+[^\n:]*)?[ \t]*:',
-                             makefile.replace('\\\n', ' '), re.M)
+        verify_source_header_rules(makefile, 'pw_focus_build.h')
         registry = tree/'include/Makefile.in'
         original = registry.read_text()
         for header in focus.HEADERS:
