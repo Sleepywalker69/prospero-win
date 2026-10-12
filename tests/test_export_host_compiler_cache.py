@@ -277,6 +277,14 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(restore['with']['key'], self.proof['key'])
         self.assertTrue(restore['with']['fail-on-cache-miss'])
         self.assertNotIn('restore-keys', restore['with'])
+        self.assertEqual(workflow['jobs']['export']['needs'], 'contracts')
+        self.assertIn("github.event.pull_request.head.sha == 'f683b8ff0d2813db4ec0c45b7f61b8fad3bac5b9'",
+                      workflow['jobs']['export']['if'])
+        contract = workflow['jobs']['contracts']
+        self.assertNotIn('GH_TOKEN', contract.get('env', {}))
+        commands = '\n'.join(s.get('run', '') for s in contract['steps'])
+        self.assertIn('test_export_host_compiler_cache.py', commands)
+        self.assertIn('python3 tests/test_test_reachability.py', commands)
 
 if __name__ == '__main__':
     unittest.main()
