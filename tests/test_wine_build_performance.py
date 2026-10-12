@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -32,7 +33,7 @@ def workflow():
 
 def step_by_id(name):
     matches = [(job, step) for job, value in workflow()['jobs'].items()
-               for step in value['steps'] if step.get('id') == name]
+               for step in value.get('steps', []) if step.get('id') == name]
     if len(matches) != 1:
         raise AssertionError('expected one actual workflow step: ' + name)
     return matches[0]
@@ -70,6 +71,28 @@ def actual_job_gate(expression, context):
         raise AssertionError('unsupported job-gate grammar: ' + ast.dump(node))
 
     return visit(ast.parse('(' + value.strip() + ')', mode='eval').body)
+
+
+class WorkflowStepLookupTests(unittest.TestCase):
+    def test_reusable_job_is_skipped_when_finding_the_exact_step(self):
+        expected = {'id': 'fixture-preflight', 'run': 'inert test body'}
+        flow = {'jobs': {
+            'chromium-ipc-reference': {'uses': './.github/workflows/windows-chromium-ipc-reference.yml'},
+            'matched-runtime': {'steps': [expected]},
+        }}
+        with mock.patch(__name__ + '.workflow', return_value=flow):
+            self.assertEqual(step_by_id('fixture-preflight'), ('matched-runtime', expected))
+
+    def test_missing_or_duplicate_target_step_still_fails(self):
+        reusable = {'uses': './.github/workflows/windows-chromium-ipc-reference.yml'}
+        for steps in ([], [{'id': 'other-step'}],
+                      [{'id': 'fixture-preflight'}, {'id': 'fixture-preflight'}]):
+            with self.subTest(steps=steps):
+                flow = {'jobs': {'chromium-ipc-reference': reusable,
+                                 'matched-runtime': {'steps': steps}}}
+                with mock.patch(__name__ + '.workflow', return_value=flow):
+                    with self.assertRaisesRegex(AssertionError, 'expected one actual workflow step'):
+                        step_by_id('fixture-preflight')
 
 
 class FixturePreflightControls(unittest.TestCase):
