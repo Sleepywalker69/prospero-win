@@ -81,6 +81,7 @@ static struct {
     int64_t launch_read_index,launch_service_index;
     const char *record_event;
     unsigned inject_progress, progress_auto, progress_stage, progress_mutation, progress_records, progress_mask_refused;
+    unsigned net_target_records;uint64_t net_targets[3];
     unsigned failure_frame,failure_flags,failure_mutation,cancel_sends,receive_eof,cancel_send_error;
     PwWineChildFrame sent;
 } m;
@@ -112,6 +113,10 @@ static void record_cb(void *c,const char *event,uint64_t generation,int64_t a,in
 {
     CHECK(c==&m&&event);(void)generation;(void)a;(void)b;(void)d;m.records++;
     if(!strcmp(event,"bootstrap_progress"))m.progress_records++;
+    if(!strcmp(event,"bootstrap_net_targets")){
+        m.progress_records++;m.net_target_records++;
+        m.net_targets[0]=(uint64_t)a;m.net_targets[1]=(uint64_t)b;m.net_targets[2]=(uint64_t)d;
+    }
     if(!strcmp(event,"first_failure")){
         CHECK(!m.inside_callback&&!m.first_failures);
         m.first_failures++;m.first_index=m.records;m.first_api=a;m.first_raw=b;m.first_errno=d;
@@ -229,6 +234,10 @@ static int progress_frame(uint32_t kinds,PwWineChildFrame *out,PwWineChildWireRe
     m.inject_progress--;
     if(!(kinds&PW_WC_KIND(PW_WC_PROGRESS))){m.progress_mask_refused++;r->status=PW_WC_PROTOCOL;r->api=PW_WC_API_RECEIVE;return PW_WC_ERROR;}
     *out=m.sent;out->kind=PW_WC_PROGRESS;out->failure_api=m.progress_stage;if(m.progress_auto)m.progress_stage++;
+    if(out->failure_api==PW_WCP_NET_SOCKET_BEGIN){
+        out->net_socket_target=UINT64_MAX;out->net_errno_target=UINT64_C(0x8000000000000000);
+        out->data_prepare_anchor=UINT64_C(0x0123456789abcdef);
+    }
     if(m.progress_mutation==1)out->generation++;
     if(m.progress_mutation==2)out->child_pid++;
     if(m.progress_mutation==3)out->child_ppid++;
@@ -889,6 +898,9 @@ static void progress_owner_tests(void)
         CHECK(!pw_wine_fixture_owner_pump(&owner));
         CHECK(atomic_load(&g->state)==G_STARTING&&g->helper_possible&&!g->ack&&!m.kills);
         CHECK(g->io.stage_end==stage_end&&g->io.total_end==total_end&&m.progress_records==stage);
+        CHECK(m.net_target_records==(unsigned)(stage>=PW_WCP_NET_SOCKET_BEGIN));
+        if(stage==PW_WCP_NET_SOCKET_BEGIN)CHECK(m.net_targets[0]==UINT64_MAX&&
+            m.net_targets[1]==UINT64_C(0x8000000000000000)&&m.net_targets[2]==UINT64_C(0x0123456789abcdef));
     }
     CHECK(!pw_wine_fixture_owner_pump(&owner));
     CHECK(g->ack&&!g->helper_possible&&atomic_load(&g->state)==G_RUNNING);
@@ -897,13 +909,22 @@ static void progress_owner_tests(void)
     CHECK(m.progress_mask_refused==1&&atomic_load(&owner.blocked));
     for(unsigned malformed=0;malformed<14;malformed++){
         g=progress_waiter();m.inject_progress=1;m.progress_stage=2;
-        if(malformed<10)m.progress_mutation=malformed+1;
+        if(malformed<10){m.progress_mutation=malformed+1;m.progress_stage=PW_WCP_NET_SOCKET_BEGIN;}
         if(malformed==10)m.progress_stage=0;
         if(malformed==11)m.progress_stage=PW_WC_PROGRESS_LAST+1;
         if(malformed>=12){CHECK(!pw_wine_fixture_owner_pump(&owner));m.inject_progress=1;m.progress_stage=malformed==12?2:1;}
         pw_wine_fixture_owner_pump(&owner);
+        if(malformed<10)CHECK(!m.net_target_records);
         CHECK(atomic_load(&g->state)==G_UNCERTAIN&&g->helper_possible&&!g->ack&&!m.kills);
         CHECK(atomic_load(&owner.uncertain)&&!pw_wine_fixture_owner_release_ready(&owner));
+    }
+    for(unsigned repeat=0;repeat<2;repeat++){
+        g=progress_waiter();m.inject_progress=1;m.progress_stage=PW_WCP_NET_SOCKET_BEGIN;
+        CHECK(!pw_wine_fixture_owner_pump(&owner)&&m.net_target_records==1&&g->helper_possible&&!g->ack);
+        if(repeat){m.inject_progress=1;m.progress_stage=PW_WCP_NET_SOCKET_BEGIN;}else m.receive_eof=1;
+        pw_wine_fixture_owner_pump(&owner);
+        CHECK(m.net_target_records==1&&g->helper_possible&&!g->ack&&!m.kills);
+        CHECK(atomic_load(&g->state)==G_UNCERTAIN&&!pw_wine_fixture_owner_release_ready(&owner));
     }
     g=progress_waiter();m.inject_progress=1;m.progress_stage=1;m.now=g->startup_end;
     pw_wine_fixture_owner_pump(&owner);
@@ -929,6 +950,7 @@ static void queued_terminal_before_cancel_tests(void)
         CHECK(!g->helper_possible&&!g->ack&&!atomic_load(&owner.uncertain));
         CHECK(atomic_load(&g->state)==G_CLEANUP&&m.cancel_sends==0);
         CHECK(g->helper_recovery_end==deadline&&!atomic_load(&g->startup_success));
+        CHECK(m.net_target_records==(unsigned)(progress==2));
     }
     for(unsigned bad=0;bad<12;bad++){
         Generation *g=progress_waiter();pw_wine_fixture_owner_cancel(&owner);

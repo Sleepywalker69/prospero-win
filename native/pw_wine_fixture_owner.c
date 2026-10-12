@@ -588,6 +588,20 @@ void pw_wine_fixture_owner_socket_failure(void *context,const PwWineFixtureSocke
 
 static void record(PwWineFixtureOwner *o,const char *event,Generation *g,int64_t a,int64_t b,int64_t c)
 { o->config.record(o->config.context,event,g?g->generation:0,a,b,c); }
+/* Called only after the same-session and increasing-stage checks. Stage 5
+ * replaces, rather than supplements, the ordinary progress log and flush.
+ * These opaque values never drive ownership, cleanup or release decisions. */
+static void record_progress(PwWineFixtureOwner *o,Generation *g,const PwWineChildFrame *f)
+{
+    if(f->failure_api==PW_WCP_NET_SOCKET_BEGIN){
+        int64_t socket_target,errno_target,anchor;
+        _Static_assert(sizeof(socket_target)==sizeof(f->net_socket_target),"diagnostic word size");
+        memcpy(&socket_target,&f->net_socket_target,sizeof(socket_target));
+        memcpy(&errno_target,&f->net_errno_target,sizeof(errno_target));
+        memcpy(&anchor,&f->data_prepare_anchor,sizeof(anchor));
+        record(o,"bootstrap_net_targets",g,socket_target,errno_target,anchor);
+    }else record(o,"bootstrap_progress",g,f->failure_api,0,0);
+}
 /* Only the supervisor emits; callback paths merely publish immutable data. */
 static void record_failure(PwWineFixtureOwner *o)
 {
@@ -873,7 +887,7 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
             failure(o,API_HANDOFF,ack.failure_api,0,0);atomic_store(&g->cleanup_requested,1);return;
         }
         g->progress_stage=ack.failure_api;
-        record(o,"bootstrap_progress",g,ack.failure_api,0,0);
+        record_progress(o,g,&ack);
         if(async)return;
         continue;
     }
@@ -940,7 +954,7 @@ static void drain_helper(PwWineFixtureOwner *o,Generation *g)
     }
     if(frame.kind==PW_WC_PROGRESS){
         if(frame.failure_api<=g->progress_stage||frame.failure_api>PW_WC_PROGRESS_LAST){helper_hold(o,g);return;}
-        g->progress_stage=frame.failure_api;record(o,"bootstrap_progress",g,frame.failure_api,0,0);
+        g->progress_stage=frame.failure_api;record_progress(o,g,&frame);
         continue;
     }
     if(frame.kind==PW_WC_FAILURE){

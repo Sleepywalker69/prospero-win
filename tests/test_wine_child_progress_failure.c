@@ -239,13 +239,22 @@ static ssize_t mock_sendmsg(int fd, const struct msghdr *msg, int flags)
     assert(f.kind != PW_WC_BOOTSTRAP_ACK); /* No failure may be acknowledged as ready. */
     if (f.kind == PW_WC_PROGRESS) {
         assert(f.failure_api == ++m.attempts && f.failure_api <= 6);
+        assert(!f.target_tid && !f.signal && !f.status && !f.native_error &&
+               !f.failure_raw && !f.returned_length && !f.returned_value && !f.errno_valid);
+        if (f.failure_api == PW_WCP_NET_SOCKET_BEGIN) {
+            assert(!m.socket_calls && !m.errno_calls);
+            /* Host controls have no Prospero import slots; raw nonzero values
+             * are covered by the codec/owner tests, not claimed as GOT proof. */
+            assert(!f.net_socket_target && !f.net_errno_target && !f.data_prepare_anchor);
+        } else assert(!f.net_socket_target && !f.net_errno_target && !f.data_prepare_anchor);
         if (f.failure_api == 6 && m.drain_before_six) drain_owner();
         if (f.failure_api == m.fail_stage) {
             if (m.short_send >= 0) return m.short_send;
             errno = m.send_error; return -1;
         }
     } else {
-        assert(f.kind == PW_WC_FAILURE); m.failure_attempts++; m.attempted_failure = f;
+        assert(f.kind == PW_WC_FAILURE && !f.net_socket_target && !f.net_errno_target && !f.data_prepare_anchor);
+        m.failure_attempts++; m.attempted_failure = f;
         if (m.certificate_error) { errno = m.certificate_error; return -1; }
     }
     if (m.queue_count == m.capacity) { errno = EAGAIN; return -1; }
