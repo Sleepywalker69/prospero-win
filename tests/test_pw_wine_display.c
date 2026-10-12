@@ -521,8 +521,155 @@ static void test_configured_controller(void)
     assert(movement.x > 0 && movement.x < INT32_MAX); /* speed capped before multiply */
 }
 
+
+/* Exact native sample -> production tracker -> production router chain.
+ * Only ScePad/user-service calls are mocked; no input state is reconstructed.
+ * A deflection must not survive system interception or disconnect, nor leak
+ * back from empty polls or a still-held control when ownership returns. */
+static PwPadPs5Data interruption_sample;
+static int interruption_count;
+static int interruption_user_init(const void *p) { assert(!p); return 0; }
+static int interruption_user(int32_t *user) { *user = 42; return 0; }
+static int interruption_user_end(void) { return 0; }
+static int interruption_pad_init(void) { return 0; }
+static int interruption_open(int32_t user, int32_t type, int32_t index, const void *p)
+{ assert(user == 42 && !type && !index && !p); return 7; }
+static int interruption_read(int32_t handle, PwPadPs5Data *samples, int32_t capacity)
+{
+    assert(handle == 7 && capacity == PW_PAD_PS5_BATCH);
+    if (interruption_count) samples[0] = interruption_sample;
+    return interruption_count;
+}
+static int interruption_close(int32_t handle) { assert(handle == 7); return 0; }
+static const PwPadPs5Ops interruption_ops = {
+    interruption_user_init, interruption_user, interruption_user_end,
+    interruption_pad_init, interruption_open, interruption_read, interruption_close, NULL
+};
+static const PwPadKeyMap interruption_map[] = {{CROSS, 0x20, 0, 0, "cross"}};
+
+static void interruption_neutral_gamepad(const PwWinePad *game)
+{
+    assert(!game->buttons && !game->left_trigger && !game->right_trigger);
+    assert(!game->thumb_lx && !game->thumb_ly && !game->thumb_rx && !game->thumb_ry);
+}
+static size_t interruption_poll(PwPadPs5 *pad, PwWineInputRouter *router,
+                               const PwGameInput *profile, PwWineInput *events,
+                               PwWinePad *game)
+{
+    assert(pw_pad_ps5_read(pad) == PW_OK);
+    return pw_wine_route_input(router, profile, pad, 1, 16000,
+                               events, PW_WINE_ROUTED_EVENTS, game);
+}
+static void test_native_interception_empty_regain(void)
+{
+    for (unsigned mouse = 0; mouse != 2; ++mouse) {
+        for (unsigned disconnect = 0; disconnect != 2; ++disconnect) {
+            PwPadPs5 pad;
+            PwWineInputRouter router;
+            PwGameInput profile;
+            PwWineInput events[PW_WINE_ROUTED_EVENTS];
+            PwWinePad game;
+            size_t n;
+            pw_game_input_init(&profile);
+            profile.mode = PW_GAME_INPUT_XINPUT;
+            profile.start_mode = mouse ? PW_GAME_START_MOUSE : PW_GAME_START_PROFILE;
+            pw_wine_input_router_init(&router, &profile);
+            assert(pw_pad_ps5_open(&pad, &interruption_ops, interruption_map, 1) == PW_OK);
+
+            interruption_count = 1;
+            interruption_sample = (PwPadPs5Data){
+                .left_stick = {128,128}, .right_stick = {128,128},
+                .connected = 1, .timestamp = 1, .connected_count = 1
+            };
+            assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+            interruption_sample.buttons = CROSS | 8u; /* hold Options too: no late window cycle */
+            interruption_sample.left_stick.x = 255;
+            interruption_sample.right_stick.y = 0;
+            interruption_sample.l2 = 31;
+            interruption_sample.r2 = 200;
+            interruption_sample.timestamp++;
+            n = interruption_poll(&pad, &router, &profile, events, &game);
+            if (mouse) {
+                assert(n == 2 && events[0].type == PW_WINE_INPUT_MOUSE_BUTTON &&
+                       events[0].code == 0 && events[0].down);
+                assert(events[1].type == PW_WINE_INPUT_MOUSE_MOVE && events[1].x > 0);
+                assert(!game.connected);
+            } else {
+                assert(n == 0 && game.connected && game.buttons == (0x1000u | 0x10u));
+                assert(game.thumb_lx > 0 && game.thumb_ry > 0 &&
+                       game.left_trigger == 31 && game.right_trigger == 200);
+            }
+
+            /* Loss wins even though the raw sample retains all held/analog data. */
+            if (disconnect) interruption_sample.connected = 0;
+            else interruption_sample.buttons |= 0x80000000u;
+            interruption_sample.timestamp++;
+            n = interruption_poll(&pad, &router, &profile, events, &game);
+            assert(!pad.core.connected && !router.active && !game.connected);
+            assert(pad.left_stick.x == 128 && pad.right_stick.y == 128 && !pad.l2 && !pad.r2);
+            assert(!router.pointer.x && !router.pointer.y && !router.cycle_armed);
+            interruption_neutral_gamepad(&game);
+            assert(n == mouse);
+            if (mouse) assert(events[0].type == PW_WINE_INPUT_MOUSE_BUTTON &&
+                              events[0].code == 0 && !events[0].down);
+
+            /* 800 ms exceeds our 250 ms stale limit and the reference UI's
+             * 350 ms repeat delay. Empty reads cannot resurrect the old axes,
+             * re-emit releases, or turn held Options into a window cycle. */
+            const uint64_t serial = pad.sample_serial;
+            interruption_count = 0;
+            for (unsigned i = 0; i != 50; ++i) {
+                assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+                assert(pad.sample_serial == serial && !pad.core.pressed_edges && !pad.core.released_edges);
+                assert(!router.active && !game.connected && !router.cycle_armed);
+                assert(!router.pointer.x && !router.pointer.y);
+                interruption_neutral_gamepad(&game);
+            }
+
+            /* A usable stream returns, but the same controls are still held.
+             * Several genuinely fresh samples must remain suppressed until a
+             * neutral sample, not merely until time has passed. */
+            interruption_count = 1;
+            interruption_sample.connected = 1;
+            interruption_sample.buttons = CROSS | 8u;
+            for (unsigned i = 0; i != 6; ++i) {
+                interruption_sample.timestamp++;
+                assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+                assert(router.active && router.analog_blocked && !router.held && !router.cycle_armed);
+                assert(!router.pointer.x && !router.pointer.y);
+                interruption_neutral_gamepad(&game);
+                assert(game.connected == !mouse);
+            }
+            interruption_sample.buttons = 0;
+            interruption_sample.left_stick = interruption_sample.right_stick = (PwPadPs5Stick){128,128};
+            interruption_sample.l2 = interruption_sample.r2 = 0;
+            interruption_sample.timestamp++;
+            assert(interruption_poll(&pad, &router, &profile, events, &game) == 0);
+            assert(!router.analog_blocked && !router.blocked && !router.cycle_armed);
+            interruption_neutral_gamepad(&game);
+
+            /* New input after neutral is usable, proving suppression is not
+             * a permanent lockout. Finish with an actual disconnect release. */
+            interruption_sample.buttons = CROSS;
+            interruption_sample.left_stick.x = 255;
+            interruption_sample.r2 = 200;
+            interruption_sample.timestamp++;
+            n = interruption_poll(&pad, &router, &profile, events, &game);
+            if (mouse) assert(n == 2 && events[0].down && events[1].type == PW_WINE_INPUT_MOUSE_MOVE);
+            else assert(!n && game.buttons == 0x1000u && game.thumb_lx > 0 && game.right_trigger == 200);
+            interruption_sample.connected = 0;
+            interruption_sample.timestamp++;
+            n = interruption_poll(&pad, &router, &profile, events, &game);
+            assert(n == mouse && !game.connected);
+            if (mouse) assert(events[0].type == PW_WINE_INPUT_MOUSE_BUTTON && !events[0].down);
+            assert(pw_pad_ps5_close(&pad) == PW_OK);
+        }
+    }
+}
+
 int main(void)
 {
+    test_native_interception_empty_regain();
     test_configured_controller();
     test_delivery_backpressure();
     test_input_router();
