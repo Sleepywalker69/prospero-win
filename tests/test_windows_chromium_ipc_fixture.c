@@ -25,6 +25,8 @@ static struct {
     int missing_compare,same_control_bad,different_control_bad,candidate_same;
     int candidate_invalid,candidate_error,child_exited,child_exits_after_capture;
     int compare_unknown_error,duplicate_same_failed,included_invalid,included_control_bad;
+    DWORD event_type,pipe_type,candidate_type,event_type_error,candidate_type_error;
+    unsigned error_resets;int candidate_unsupported;
 } m;
 DWORD GetLastError(void){return m.error;}
 DWORD GetCurrentProcessId(void){return 100;}
@@ -80,6 +82,7 @@ BOOL DuplicateHandle(HANDLE source,HANDLE original,HANDLE target,HANDLE *copy,DW
         *copy=(HANDLE)(uintptr_t)43;return TRUE;
     }
     ++m.foreign_captures;
+    if(m.candidate_unsupported){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_NOT_SUPPORTED;return FALSE;}
     if(m.candidate_invalid||m.candidate_error){
         *copy=(HANDLE)(uintptr_t)99;m.error=m.candidate_error?ERROR_ACCESS_DENIED:ERROR_INVALID_HANDLE;return FALSE;
     }
@@ -133,12 +136,21 @@ BOOL VirtualFree(void *address,SIZE_T size,DWORD type)
     assert(address==m.memory+8192&&size==4096&&type==MEM_DECOMMIT);
     m.states[2]=MEM_RESERVE;m.protections[2]=0;return TRUE;
 }
+void SetLastError(DWORD error){m.error=error;++m.error_resets;}
+DWORD GetFileType(HANDLE h)
+{
+    assert(m.error==0);
+    if(h==(HANDLE)(uintptr_t)11){m.error=m.event_type_error;return m.event_type;}
+    if(h==(HANDLE)(uintptr_t)12)return m.pipe_type;
+    assert(h==(HANDLE)(uintptr_t)10);m.error=m.candidate_type_error;return m.candidate_type;
+}
 static void reset(void)
 {
     memset(&m,0,sizeof(m));memset(slots,0,sizeof(slots));m.log_ok=1;
     log_file=(HANDLE)(uintptr_t)1;selected=PW_IPC_PIPE;nonce=1;parent_pid=100;epoch=100;
     worker=log_failed=close_failed=unsettled=stage_failed=0;log_bytes=handles=0;
     m.completed=&slots[0].ov;m.key=IO_KEY;
+    m.event_type_error=ERROR_INVALID_HANDLE;m.pipe_type=FILE_TYPE_PIPE;
 }
 int main(void)
 {
@@ -176,24 +188,44 @@ int main(void)
     {
         struct child child;memset(&child,0,sizeof(child));
         child.decoy=(HANDLE)(uintptr_t)10;child.release=(HANDLE)(uintptr_t)11;child.pi.hProcess=(HANDLE)(uintptr_t)20;
-        reset();CHECK(excluded_object(&child));CHECK(!stage_failed&&!handles&&m.closes==4&&m.foreign_captures==1);
+        reset();CHECK(excluded_object(&child,0));CHECK(!stage_failed&&!handles&&m.closes==4&&m.foreign_captures==1);
         /* Original false positive: a valid recycled numeric handle denotes
          * a different object. It is now correctly accepted, never signaled. */
-        reset();m.candidate_invalid=1;CHECK(excluded_object(&child));CHECK(!stage_failed&&!handles&&m.closes==3);
-        reset();m.candidate_same=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&m.closes==4);
-        reset();m.same_control_bad=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.foreign_captures);
-        reset();m.different_control_bad=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.foreign_captures);
-        reset();m.candidate_error=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&m.closes==3);
-        reset();m.compare_unknown_error=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&m.closes==4);
-        reset();m.child_exited=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.candidate_invalid=1;CHECK(excluded_object(&child,0));CHECK(!stage_failed&&!handles&&m.closes==3);
+        reset();m.candidate_same=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();m.same_control_bad=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.different_control_bad=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.candidate_error=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.compare_unknown_error=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();m.child_exited=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures);
         reset();m.child_exits_after_capture=1;m.candidate_invalid=1;
-        CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&m.closes==3);
+        CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==3);
         reset();m.included_invalid=1;m.candidate_invalid=1;
-        CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==2);
+        CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==2);
         reset();m.included_control_bad=1;
-        CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==3);
-        reset();m.missing_compare=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.closes);
-        reset();m.duplicate_same_failed=1;CHECK(!excluded_object(&child));CHECK(stage_failed&&!handles&&!m.closes);
+        CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==3);
+        reset();m.missing_compare=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.closes);
+        reset();m.duplicate_same_failed=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.closes);
+        for(DWORD kind=FILE_TYPE_DISK;kind<=FILE_TYPE_PIPE;++kind){
+            reset();m.candidate_type=kind;m.error=123;
+            CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==kind);
+            CHECK(m.error_resets==3&&!stage_failed);
+            m.candidate_unsupported=1;CHECK(excluded_object(&child,kind));CHECK(!stage_failed&&!handles&&m.closes==3);
+        }
+        reset();m.candidate_unsupported=1;CHECK(!excluded_object(&child,FILE_TYPE_UNKNOWN));CHECK(stage_failed&&!handles);
+        reset();m.candidate_unsupported=1;CHECK(!excluded_object(&child,0x8003u));CHECK(stage_failed&&!handles);
+        reset();m.candidate_same=1;CHECK(!excluded_object(&child,FILE_TYPE_CHAR));CHECK(stage_failed&&!handles);
+        reset();m.event_type=FILE_TYPE_CHAR;
+        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==UINT32_MAX);CHECK(stage_failed);
+        reset();m.event_type_error=ERROR_NOT_SUPPORTED;
+        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==UINT32_MAX);CHECK(stage_failed);
+        reset();m.pipe_type=FILE_TYPE_CHAR;
+        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==UINT32_MAX);CHECK(stage_failed);
+        reset();m.candidate_type=0x8003u;
+        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==FILE_TYPE_UNKNOWN);CHECK(!stage_failed);
+        reset();m.candidate_type_error=ERROR_ACCESS_DENIED;
+        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==FILE_TYPE_UNKNOWN);CHECK(!stage_failed);
+
     }
     printf("windows_chromium_ipc_fixture: %u mocked decision-path checks passed\n",checks);
     return 0;

@@ -37,14 +37,16 @@ def write(path, rows):
 
 def paired_rows(case):
     parent = good_rows(case)
+    parent.insert(0, row('identity_capture_child_handle', case=case, a=1))
     for item in parent:
         if item['stage'] == 'CreateProcessW_handle_list': item['a'] = 101
         if item['stage'] == 'final': item['a'] = check.CHILD_EXIT
+        if item['stage'] == 'child_hello': item['b'] = 1
         if item['stage'] == 'identity_different_control': item['error'] = 1656
         if item['stage'] in ('identity_child_live', 'identity_child_still_live'): item['a'] = 258
         if item['stage'] == 'identity_capture_child_handle': item['a'] = 1
         if item['stage'] == 'handle_list_excluded': item['a'] = 1;item['error'] = 1656
-    child_stages = {'handle_list_acknowledged'}
+    child_stages = {'handle_list_acknowledged', 'identity_file_type_event_control', 'identity_file_type_pipe_control'}
     if case in ('live-memory', 'suspended-memory'):
         child_stages |= {'child_actual_private_value', 'WaitForSingleObject_release'}
     elif case.startswith('section-'):
@@ -55,6 +57,9 @@ def paired_rows(case):
         child_stages |= {'CreateIoCompletionPort', 'GetQueuedCompletionStatus', 'iocp_peer_record'}
     child = [row(stage, case=case, role='child', pid=101) for stage in sorted(child_stages)]
     next(r for r in child if r['stage'] == 'handle_list_acknowledged')['a'] = 1
+    next(r for r in child if r['stage'] == 'identity_file_type_event_control')['error'] = 6
+    next(r for r in child if r['stage'] == 'identity_file_type_pipe_control')['a'] = 3
+    child.insert(0, row('identity_candidate_file_type', 'observation_only', case=case, role='child', pid=101, error=6))
     child += [row('guest_cleanup', case=case, role='child', pid=101),
               row('final', case=case, role='child', pid=101, a=check.CHILD_EXIT)]
     if case.startswith('section-'):
@@ -205,6 +210,31 @@ class ReferenceTests(unittest.TestCase):
         next(r for r in child if r['stage'] == 'handle_list_acknowledged')['a'] = 0
         write(child_path, child)
         with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+
+    def test_nonduplicable_file_kind_requires_independent_calibration(self):
+        case = 'live-memory';child_path = self.directory / 'ipc-10-101.log'
+        for kind in (1, 2, 3):
+            parent, child = paired_rows(case)
+            next(r for r in parent if r['stage'] == 'child_hello')['b'] = 1 | (kind << 8)
+            candidate = next(r for r in child if r['stage'] == 'identity_candidate_file_type')
+            candidate['a'] = kind;candidate['error'] = 0
+            capture = next(r for r in parent if r['stage'] == 'identity_capture_child_handle')
+            capture.update(result='non_event', error=50, a=0, b=kind)
+            excluded = next(r for r in parent if r['stage'] == 'handle_list_excluded')
+            excluded.update(error=50, a=2, b=kind)
+            write(self.path, parent);write(child_path, child)
+            self.assertEqual(check.verify(self.directory, case, 64, 0)['windows_reference'], 'pass')
+            for rows, stage, field, bad in ((child, 'identity_candidate_file_type', 'a', 0),
+                    (child, 'identity_candidate_file_type', 'a', 0x8003),
+                    (child, 'identity_candidate_file_type', 'error', 5),
+                    (child, 'identity_file_type_event_control', 'error', 50),
+                    (child, 'identity_file_type_pipe_control', 'a', 2),
+                    (parent, 'child_hello', 'b', 1),
+                    (parent, 'identity_capture_child_handle', 'error', 5)):
+                item = next(r for r in rows if r['stage'] == stage);saved = item[field];item[field] = bad
+                write(self.path, parent);write(child_path, child)
+                with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+                item[field] = saved
 
     def test_source_safety_and_independent_identity(self):
         source = (ROOT / 'tests/fixtures/windows_chromium_ipc.c').read_text()

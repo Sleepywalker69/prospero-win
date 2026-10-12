@@ -116,6 +116,26 @@ security-isolation claim. The identity test requires cross-process
 `DuplicateHandle` and dynamically resolved `CompareObjectHandles` (Windows 10 /
 Server 2016 or newer; also present in the pinned Wine source). Unsupported or
 unexpected errors remain nonpass; they do not establish a leak or exclusion.
+A reused console handle can legitimately refuse cross-process duplication:
+Microsoft restricts console handles to same-process duplication. Error 50 alone
+still proves nothing. Before HELLO, the child makes read-only `GetFileType`
+queries calibrated against its known included event (UNKNOWN/INVALID_HANDLE)
+and its known control pipe (PIPE). Only exact DISK, CHAR or PIPE classifications
+of the candidate become nonce/PID-bound HELLO flags. UNKNOWN, REMOTE-bit variants
+and unrecognized values supply no non-event evidence. LastError is cleared before
+each query and interpreted only for UNKNOWN results.
+
+If and only if foreign capture returns NOT_SUPPORTED and those calibrated records
+prove a non-event file kind, the capture record is explicitly `non_event`, with
+the failed API error retained. The separate exclusion record identifies this
+classification path. It does not claim successful candidate duplication or
+absence of a handle. The known included-event foreign-capture control remains
+mandatory, and a captured same-event candidate fails regardless of file-type
+claims. The checker cross-binds controls, candidate query, HELLO, failed capture
+and final verdict. The claim is only that this original child observed a non-event
+candidate while awaiting ACK, not that arbitrary applications cannot replace
+handles. No unknown candidate is signaled, closed or waited on in the child.
+
 A 5-second acknowledgement timeout and external 90-second process deadline bound
 the exchange; child termination during capture cannot satisfy the control.
 
@@ -232,6 +252,7 @@ Only the Windows x64/x86 MSVC jobs establish build and reference execution.
 ## API references
 
 - [Explicit handle list](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+- [GetFileType classifications and UNKNOWN errors](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype)
 - [CompareObjectHandles identity and error contract](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles)
 - [DuplicateHandle access and source-close semantics](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)
 - [CancelIoEx and completion lifetime](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)

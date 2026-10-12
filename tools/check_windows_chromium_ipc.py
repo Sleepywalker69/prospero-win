@@ -13,14 +13,14 @@ FIELDS = {'schema', 'role', 'case', 'stage', 'result', 'nonce', 'pid', 'parent',
           'elapsed_ms', 'deadline_ms', 'error', 'ntstatus', 'bytes', 'a', 'b'}
 NUMBERS = FIELDS - {'role', 'case', 'stage', 'result'}
 RESULTS = {'attempt', 'pass', 'fail', 'pending', 'immediate', 'timeout', 'not_run',
-           'unsupported', 'uncertain', 'cleanup_uncertain', 'unverified', 'observation_only'}
+           'unsupported', 'uncertain', 'cleanup_uncertain', 'unverified', 'observation_only', 'non_event'}
 WIDE = {'elapsed_ms', 'bytes', 'a', 'b'}
 COMMON_CHILD = {'Windows_child_identity', 'child_hello', 'CreateProcessW_handle_list',
                 'InitializeProcThreadAttributeList_size', 'InitializeProcThreadAttributeList',
                 'UpdateProcThreadAttribute_HANDLE_LIST', 'wait_child_exit', 'GetExitCodeProcess',
                 'identity_same_control', 'identity_different_control', 'identity_child_live',
                 'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
-                'identity_capture_child_handle', 'handle_list_excluded'}
+                'handle_list_excluded'}
 PARENT_STAGES = {
     'self-memory': {'OpenProcess_self', 'self_actual_value', 'reduced_WriteProcessMemory', 'reduced_NtWriteVirtualMemory', 'reduced_ReadProcessMemory',
         'reduced_NtReadVirtualMemory', 'self_reduced_unchanged'} |
@@ -69,6 +69,9 @@ def parse_log(path):
                 raise ValueError(f'{path.name}: out-of-range {key}')
         if row['result'] not in RESULTS or not re.fullmatch(r'[A-Za-z0-9_]+', row['stage']):
             raise ValueError(f'{path.name}: unknown result or invalid stage label')
+        if row['result'] == 'non_event' and (row['stage'] != 'identity_capture_child_handle' or
+                row['role'] != 'parent' or row['case'] in ('self-memory', 'page-regression')):
+            raise ValueError(f'{path.name}: non-event classification outside its narrow capture stage')
         if row['schema'] != 1 or row['bits'] not in (32, 64) or row['role'] not in ('parent', 'child'):
             raise ValueError(f'{path.name}: unsupported identity')
         rows.append(row)
@@ -123,7 +126,7 @@ def verify(directory, case, bits, exit_code):
         child = children[0]
         if child[0]['pid'] == parent[0]['pid']:
             raise ValueError('child must be a distinct Windows process')
-        require_pass(child, {'handle_list_acknowledged'})
+        require_pass(child, {'handle_list_acknowledged', 'identity_file_type_event_control', 'identity_file_type_pipe_control'})
         identity = {}
         for stage in ('identity_same_control', 'identity_different_control', 'identity_child_live',
                       'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
@@ -140,8 +143,26 @@ def verify(directory, case, bits, exit_code):
             raise ValueError('child must remain live across object capture')
         captured = identity['identity_capture_child_handle']
         excluded = identity['handle_list_excluded']
-        if (captured['error'], captured['a'], excluded['error'], excluded['a']) not in ((0, 1, 1656, 1), (6, 0, 6, 0)):
-            raise ValueError('exclusion requires absent handle or proven distinct captured object')
+        types = {}
+        for stage in ('identity_file_type_event_control', 'identity_file_type_pipe_control', 'identity_candidate_file_type'):
+            matches = [r for r in child if r['stage'] == stage and r['result'] != 'attempt']
+            if len(matches) != 1:
+                raise ValueError('one calibrated child file-type observation per stage required')
+            types[stage] = matches[0]
+        event_type, pipe_type, candidate_type = (types[stage] for stage in
+            ('identity_file_type_event_control', 'identity_file_type_pipe_control', 'identity_candidate_file_type'))
+        if (event_type['a'], event_type['error'], pipe_type['a'], pipe_type['error']) != (0, 6, 3, 0):
+            raise ValueError('known event and pipe must calibrate file-type queries')
+        if candidate_type['result'] != 'observation_only':
+            raise ValueError('candidate file-type query is an observation, not an identity verdict')
+        kind = candidate_type['a'] if candidate_type['a'] in (1, 2, 3) and candidate_type['error'] == 0 else 0
+        hello = [r for r in parent if r['stage'] == 'child_hello' and r['result'] != 'attempt']
+        if len(hello) != 1 or hello[0]['b'] != 1 | (kind << 8) or captured['b'] != kind or excluded['b'] != kind:
+            raise ValueError('file-type evidence must match the nonce-bound HELLO and identity verdict')
+        proof = (captured['result'], captured['error'], captured['a'], excluded['error'], excluded['a'])
+        if proof not in (('pass', 0, 1, 1656, 1), ('pass', 6, 0, 6, 0)):
+            if proof != ('non_event', 50, 0, 50, 2) or kind not in (1, 2, 3):
+                raise ValueError('unsupported capture alone cannot prove exclusion')
         acknowledgements = [r for r in child if r['stage'] == 'handle_list_acknowledged' and r['result'] != 'attempt']
         if len(acknowledgements) != 1 or acknowledgements[0]['a'] != 1:
             raise ValueError('child did not acknowledge the parent identity verdict')

@@ -52,6 +52,10 @@ typedef struct { void *BaseAddress,*AllocationBase; DWORD AllocationProtect; SIZ
 #define DUPLICATE_CLOSE_SOURCE 1u
 #define DUPLICATE_SAME_ACCESS 2u
 #define ERROR_NOT_SAME_OBJECT 1656u
+#define FILE_TYPE_UNKNOWN 0u
+#define FILE_TYPE_DISK 1u
+#define FILE_TYPE_CHAR 2u
+#define FILE_TYPE_PIPE 3u
 #define PIPE_ACCESS_DUPLEX 3u
 #define PIPE_TYPE_BYTE 0u
 #define PIPE_READMODE_BYTE 0u
@@ -75,6 +79,8 @@ void DeleteProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST);
 void *HeapAlloc(HANDLE,DWORD,SIZE_T);
 BOOL HeapFree(HANDLE,DWORD,void *);
 DWORD ResumeThread(HANDLE);
+void SetLastError(DWORD);
+DWORD GetFileType(HANDLE);
 HMODULE GetModuleHandleW(const wchar_t *);
 FARPROC GetProcAddress(HMODULE,const char *);
 BOOL ReadProcessMemory(HANDLE,const void *,void *,SIZE_T,SIZE_T *);

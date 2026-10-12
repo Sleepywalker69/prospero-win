@@ -381,9 +381,28 @@ static int pipe_child(HANDLE pipe,HANDLE rx,HANDLE tx)
     if(port)ok&=settle_slots(pipe,port);
     close_handle(&port);return ok;
 }
+static int known_file_kind(DWORD kind)
+{ return kind==FILE_TYPE_DISK||kind==FILE_TYPE_CHAR||kind==FILE_TYPE_PIPE; }
+static DWORD candidate_file_kind(HANDLE candidate,HANDLE event,HANDLE pipe)
+{
+    DWORD kind,error;
+    attempt("identity_file_type_event_control");SetLastError(0);kind=GetFileType(event);
+    error=kind==FILE_TYPE_UNKNOWN?GetLastError():0;
+    if(!observation("identity_file_type_event_control",kind==FILE_TYPE_UNKNOWN&&error==ERROR_INVALID_HANDLE,
+        error,0,0,kind,0))return UINT32_MAX;
+    attempt("identity_file_type_pipe_control");SetLastError(0);kind=GetFileType(pipe);
+    error=kind==FILE_TYPE_UNKNOWN?GetLastError():0;
+    if(!observation("identity_file_type_pipe_control",kind==FILE_TYPE_PIPE,error,0,0,kind,0))return UINT32_MAX;
+    attempt("identity_candidate_file_type");SetLastError(0);kind=GetFileType(candidate);
+    error=kind==FILE_TYPE_UNKNOWN?GetLastError():0;
+    trace("identity_candidate_file_type","observation_only",error,0,0,kind,0);
+    /* UNKNOWN and unrecognized/REMOTE-bit values prove nothing. Their
+     * candidate still requires the original capture/comparison path. */
+    return known_file_kind(kind)?kind:FILE_TYPE_UNKNOWN;
+}
 static int worker_main(int argc,char **argv)
 {
-    uint64_t numbers[8];unsigned i;HANDLE rx,tx,release,extra;DWORD wait;
+    uint64_t numbers[8];unsigned i;HANDLE rx,tx,release,extra;DWORD wait,file_kind;
     struct pw_ipc_packet p;int ok=0;
     if(argc!=10)return 2;
     for(i=0;i<8;++i)if(!pw_ipc_number(argv[i+2],i<3?UINT32_MAX:UINTPTR_MAX,&numbers[i]))return 2;
@@ -393,8 +412,10 @@ static int worker_main(int argc,char **argv)
     rx=own((HANDLE)(uintptr_t)numbers[3]);tx=own((HANDLE)(uintptr_t)numbers[4]);
     release=own((HANDLE)(uintptr_t)numbers[5]);extra=own((HANDLE)(uintptr_t)numbers[6]);
     start_log();
+    file_kind=candidate_file_kind((HANDLE)(uintptr_t)numbers[7],release,rx);
+    if(file_kind==UINT32_MAX)goto done;
     p=packet(PW_IPC_HELLO,0);p.address=(uint64_t)(uintptr_t)&private_value;p.value=private_value;
-    p.flags=1;p.argument=numbers[7];
+    p.flags=1u|(file_kind<<8);p.argument=numbers[7];
     if(!send_packet(tx,&p))goto done;
     /* Numeric handles can be reused by the loader/CRT or this log file.
      * The parent pins any candidate and checks object identity, without the
@@ -424,7 +445,7 @@ static int worker_main(int argc,char **argv)
     if(log_file!=INVALID_HANDLE_VALUE && !CloseHandle(log_file))ok=0;
     return ok?(int)PW_IPC_EXIT:(int)PW_IPC_CHILD_ERROR;
 }
-static int excluded_object(struct child *c)
+static int excluded_object(struct child *c,DWORD file_kind)
 {
     HANDLE same=NULL,different=NULL,included=NULL,candidate=NULL;compare_objects_fn compare=NULL;
     FARPROC symbol;BOOL api;DWORD error,wait;int ok=0;
@@ -454,16 +475,20 @@ static int excluded_object(struct child *c)
     attempt("identity_capture_child_handle");
     api=DuplicateHandle(c->pi.hProcess,c->decoy,GetCurrentProcess(),&candidate,0,FALSE,DUPLICATE_SAME_ACCESS);
     error=api?0:GetLastError();if(api)own(candidate);else candidate=NULL;
-    if(!observation("identity_capture_child_handle",(api&&candidate&&candidate!=INVALID_HANDLE_VALUE)||
-        (!api&&error==ERROR_INVALID_HANDLE),error,0,0,api?1:0,0))goto done;
+    if(!api&&error==ERROR_NOT_SUPPORTED&&known_file_kind(file_kind))
+        trace("identity_capture_child_handle","non_event",error,0,0,0,file_kind);
+    else if(!observation("identity_capture_child_handle",(api&&candidate&&candidate!=INVALID_HANDLE_VALUE)||
+        (!api&&error==ERROR_INVALID_HANDLE),error,0,0,api?1:0,file_kind))goto done;
     /* An invalid candidate is evidence of absence only while the exact
      * nonce-bound child is still alive and awaiting this acknowledgement. */
     wait=WaitForSingleObject(c->pi.hProcess,0);
     if(!observation("identity_child_still_live",wait==WAIT_TIMEOUT,wait==WAIT_FAILED?GetLastError():0,0,0,wait,0))goto done;
     if(candidate){
         attempt("identity_compare_candidate");api=compare(c->decoy,candidate);error=api?0:GetLastError();
-        ok=observation("handle_list_excluded",!api&&error==ERROR_NOT_SAME_OBJECT,error,0,0,1,0);
-    }else ok=observation("handle_list_excluded",1,ERROR_INVALID_HANDLE,0,0,0,0);
+        ok=observation("handle_list_excluded",!api&&error==ERROR_NOT_SAME_OBJECT,error,0,0,1,file_kind);
+    }else if(error==ERROR_NOT_SUPPORTED&&known_file_kind(file_kind))
+        ok=observation("handle_list_excluded",1,error,0,0,2,file_kind);
+    else ok=observation("handle_list_excluded",1,ERROR_INVALID_HANDLE,0,0,0,file_kind);
  done:
     close_handle(&candidate);close_handle(&included);close_handle(&different);close_handle(&same);
     return ok&&!close_failed;
@@ -474,9 +499,9 @@ static int hello(struct child *c,struct pw_ipc_packet *p)
     DWORD pid,error;int ok;attempt("Windows_child_identity");pid=GetProcessId(c->pi.hProcess);error=pid?0:GetLastError();
     ok=observation("Windows_child_identity",pid==c->pi.dwProcessId&&pid&&pid!=parent_pid,error,0,0,pid,c->pi.dwProcessId);
     if(!ok||!receive_packet(c->rx,p,c->pi.dwProcessId,0,PW_IPC_HELLO))return 0;
-    if(!observation("child_hello",p->value==PW_IPC_A&&p->address&&p->flags==1&&
+    if(!observation("child_hello",p->value==PW_IPC_A&&p->address&&(p->flags==1u||p->flags==257u||p->flags==513u||p->flags==769u)&&
         p->argument==(uint64_t)(uintptr_t)c->decoy&&WaitForSingleObject(c->decoy,0)==WAIT_TIMEOUT,
-        0,0,sizeof(*p),p->address,p->flags)||!excluded_object(c))return 0;
+        0,0,sizeof(*p),p->address,p->flags)||!excluded_object(c,p->flags>>8))return 0;
     acknowledgement=packet(PW_IPC_COMMAND,0);acknowledgement.value=1;
     return send_packet(c->tx,&acknowledgement);
 }
