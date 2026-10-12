@@ -221,6 +221,10 @@ def selected_title(value, values):
             'title eboot identity differs')
     child = 'console/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe'
     require(value['fixture_child_sha256'] == values[child]['sha256'], 'title original fixture differs')
+    embedded = value['embedded_child']
+    require(type(embedded['address']) is int and embedded['address'] > 0 and
+            all(embedded[k] == values[SELF][k] for k in ('bytes', 'sha256')),
+            'title embedded child identity differs')
     result = {k: value[k] for k in ('schema', 'project', 'build_id', 'embedded_child',
                                   'service_manifest_sha256', 'title_compile_receipt',
                                   'fixture_child_sha256', 'console_execution_verified')}
