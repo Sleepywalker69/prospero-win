@@ -1078,3 +1078,8 @@ tests/test_wine_child_progress_failure.c
 tools/reuse_host_wine.py
 tests/test_reuse_host_wine.py
 docs/verified-host-reuse.md
+tools/wine_incremental_source.py
+tools/wine_reuse_decision.py
+tests/test_wine_incremental_source.py
+.github/workflows/wine-incremental-policy.yml
+docs/wine-incremental-policy.md
