@@ -26,6 +26,7 @@ from native_service_converter import (prepare_converter_source, inspect_service_
 from build_native_child_probe import streamable_self, verify_reconstruction, compare_service_preload
 from check_private_dispatch_abi import check_build
 from tls_manifest import llvm_identity, tree_files
+from windows_chromium_ipc_package import worker_capabilities as ipc_worker_capabilities
 
 ROOT = Path(__file__).resolve().parents[1]
 CRT_SHA = 'a99fe406e36d8ce82e68e0245898ba064e28a56a9853f746e9cf13d23cc17a00'
@@ -34,7 +35,7 @@ WRAPPER_SHA = 'c90881bd828048981da08644ae1e1730a0ef10692b6322cbd6a294de8c5c5346'
 UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'native/pw_wine_child_main.c', 'native/pw_wine_child_data.c',
          'native/pw_native_child_protocol.c', 'src/pw_wine_start.c', 'wine/ps5/pw_wine_prx.c', 'wine/ps5/pw_wine_threads.c',
          'native/pw_wine_child_ui.c', 'native/pw_wine_child_ui_handoff.c', 'native/pw_wine_child_ui_channel.c')
-HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
+HEADERS = ('native/pw_wine_child_data.h', 'native/pw_wine_ipc_profile.h', 'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
            'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h', 'wine/ps5/pw_wine_creation.h',
            'native/pw_wine_child_ui_config.h', 'native/pw_wine_child_ui.h', 'native/pw_wine_child_ui_handoff.h',
@@ -81,7 +82,9 @@ def source_identity(root, commands):
                'tree': commands.run('git', '-C', root, 'rev-parse', 'HEAD^{tree}').strip()}
     sources = {name: sha(root / name) for name in (*UNITS, *HEADERS, 'tools/build_wine_service_child.py',
                'tools/native_service_converter.py', 'tools/native_probe_elf.py', 'tools/check_native_suite.py',
-               'tools/build_owned_helper.py', 'tools/build_native.sh', 'tools/wine_creation_abi.py')}
+               'tools/build_owned_helper.py', 'tools/build_native.sh', 'tools/wine_creation_abi.py',
+               'wine/ps5/pw_wine_fixture_provider.c', 'wine/ps5/pw_wine_fixture_provider.h',
+               'tools/windows_chromium_ipc_contract.py', 'tools/windows_chromium_ipc_package.py')}
     return project, sources
 
 
@@ -195,6 +198,8 @@ def inspect_code(path, bindir, commands):
 
 
 def inputs(args, commands):
+    require(getattr(args, 'ipc_fixture', None) is None or not getattr(args, 'child_ui', False),
+            'child preview and IPC admission require separate matched cohorts')
     root, sdk, foundation, runtime, bindir = [Path(p).resolve(strict=True) for p in
         (args.work, args.sdk, args.foundation, args.runtime, args.llvm_bindir)]
     require(sdk.name == 'ps5-payload-sdk' and sdk.parent.name == 'native' and sdk.parent.parent.name == '.deps',
@@ -234,7 +239,8 @@ def inputs(args, commands):
                   {'mode': 3, 'prefix': 'windows-child-user-v1', 'guest_machine': 'AMD64',
                    'backend': 'native-amd64', 'runtime_validated': False},
                   {'mode': 4, 'prefix': 'windows-child-net-v1', 'guest_machine': 'AMD64',
-                   'backend': 'native-amd64', 'runtime_validated': False}],
+                   'backend': 'native-amd64', 'runtime_validated': False},
+                  *([] if getattr(args, 'child_ui', False) else ipc_worker_capabilities())],
               'title_foundation': TITLE_FOUNDATION, 'converter_foundation': TITLE_FOUNDATION,
               'prx_foundation': FOUNDATION,
               'app_crt_sha256': CRT_SHA, 'layout_sha256': LAYOUT_SHA, 'wrapper_sha256': WRAPPER_SHA,
@@ -264,6 +270,8 @@ def child_header(bound, build_id):
 
 
 def build(args):
+    require(getattr(args, 'ipc_fixture', None) is None or not getattr(args, 'child_ui', False),
+            'child preview and IPC admission require separate matched cohorts')
     require(args.helper_directory is not None, 'child build needs source-bound helper directory')
     out = output_directory(args.out, (args.sdk, args.foundation, args.runtime, args.helper_directory))
     commands = Commands(out / 'inspection')
@@ -438,7 +446,7 @@ TITLE_USER_SOURCES = ('native/wine64_main.c', 'native/pw_wine_child_title.c', 'n
                       'native/pw_wine_fixture_owner.c', 'native/pw_wine_fixture_owner.h',
                       'native/pw_data_mount.c', 'native/pw_data_mount.h',
                       'native/pw_lapy_elevation.c', 'native/pw_lapy_elevation.h',
-                      'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_sha256.h',
+                      'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_sha256.h', 'native/pw_wine_ipc_profile.h',
                       'native/pw_wine_child_ui_config.h', 'native/pw_wine_child_ui.c', 'native/pw_wine_child_ui.h',
                       'native/pw_wine_child_ui_handoff.c', 'native/pw_wine_child_ui_handoff.h',
                       'native/pw_wine_child_ui_channel.c', 'native/pw_wine_child_ui_channel.h',
@@ -495,10 +503,12 @@ def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=
 
 
 def title_profiles_input_contract(root, service_work, fixture, user_fixture=None,
-                                  run_id=None, run_attempt=None, network_fixture=None):
+                                  run_id=None, run_attempt=None, network_fixture=None, ipc_fixture=None):
     """Keep leaf/USER admission independent; optional network needs its own original pair."""
     result, header, pair, user_pair = title_input_contract(root, service_work, fixture,
                                                          user_fixture, run_id, run_attempt)
+    require(ipc_fixture is None or not result['child_ui']['enabled'],
+            'child preview and IPC admission require separate matched cohorts')
     network_pair = None
     if network_fixture is not None:
         require(isinstance(run_id, str) and re.fullmatch('[1-9][0-9]*', run_id) and
@@ -524,6 +534,21 @@ def title_profiles_input_contract(root, service_work, fixture, user_fixture=None
                        'run_id': run_id, 'run_attempt': run_attempt})
         header += '#define PW_WINE_NET_PROFILE_ENABLED 1\n'
         header += '#define PW_WINE_NET_CHILD_SHA256 "' + result['network_child_sha256'] + '"\n'
+    if ipc_fixture is not None:
+        require(pair.get('run_id') == run_id and pair.get('run_attempt') == run_attempt,
+                'original fixture is not the expected IPC run/attempt')
+        import windows_chromium_ipc_contract as ipc_contract
+        require(Path(ipc_contract.__file__).resolve() == (root / 'tools/windows_chromium_ipc_contract.py').resolve(),
+                'IPC validator loaded from another project')
+        cohort = ipc_contract.validate_bundle(ipc_fixture, result['project'], root, run_id, run_attempt)
+        require(cohort.get('project') == result['project'] and cohort.get('run_id') == run_id and
+                cohort.get('run_attempt') == run_attempt and cohort.get('admitted_architecture') == 'x64',
+                'IPC validator returned a different complete cohort')
+        result.update(ipc_enabled=True, ipc_child_sha256=cohort['references']['x64']['image']['sha256'],
+                      ipc_reference=cohort, ipc_validator_sha256=sha(root / 'tools/windows_chromium_ipc_contract.py'),
+                      run_id=run_id, run_attempt=run_attempt)
+        header += '#define PW_WINE_IPC_PROFILE_ENABLED 1\n'
+        header += '#define PW_WINE_IPC_CHILD_SHA256 "' + result['ipc_child_sha256'] + '"\n'
     return result, header, pair, user_pair, network_pair
 
 
@@ -566,7 +591,10 @@ def title_compile_record(root, build, project, compiler, common, units):
             'native_source_inputs': {name: record(root / name) for name in TITLE_USER_SOURCES}}
 
 
-def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False, child_ui_enabled=False):
+def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False, child_ui_enabled=False, *, ipc_enabled=False):
+    require(type(ipc_enabled) is bool and type(child_ui_enabled) is bool and
+            not (ipc_enabled and child_ui_enabled),
+            'child preview and IPC admission require separate matched cohorts')
     path = build / 'wine-child-title-compile.json'
     actual = json.loads(path.read_text())
     require(actual.get('schema') == 'pw-windows-child-title-compile/1' and actual.get('project') == project,
@@ -579,7 +607,7 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             Path(compiler[3]).resolve() == (title / 'tooling/prospero-clang18').resolve() and
             sha(Path(compiler[3])) == WRAPPER_SHA, 'title compiler launcher/wrapper differs')
     require(not any(v in ('-D', '-U', '-include', '-imacros', '-undef') or
-                    v.startswith(('-UPW_WINE_USER_PROFILE_ENABLED', '-UPW_WINE_NET_PROFILE_ENABLED', '-UPW_WINE_CHILD_UI_ENABLED',
+                    v.startswith(('-UPW_WINE_USER_PROFILE_ENABLED', '-UPW_WINE_NET_PROFILE_ENABLED', '-UPW_WINE_IPC_PROFILE_ENABLED', '-UPW_WINE_CHILD_UI_ENABLED',
                                   '-DPW_WINE_CHILD_UI_COHORT', '-UPW_WINE_CHILD_UI_COHORT')) for v in common), 'ambiguous title preprocessor flags')
     require([v for v in common if v.startswith('-DPW_WINE_USER_PROFILE_ENABLED')] ==
             ['-DPW_WINE_USER_PROFILE_ENABLED=' + str(int(enabled))] and
@@ -595,6 +623,11 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             ui_flags in ([], ['-DPW_WINE_CHILD_UI_ENABLED=0']), 'title child UI enable flag differs')
     require(not any(v.startswith(('-DPW_WINE_NET_CHILD_SHA256', '-UPW_WINE_NET_CHILD_SHA256')) for v in common),
             'network child hash must come only from the validated generated header')
+    require(type(ipc_enabled) is bool and
+            [v for v in common if v.startswith('-DPW_WINE_IPC_PROFILE_ENABLED')] ==
+            (['-DPW_WINE_IPC_PROFILE_ENABLED=1'] if ipc_enabled else []), 'title IPC enable flags differ')
+    require(not any(v.startswith(('-DPW_WINE_IPC_CHILD_SHA256', '-UPW_WINE_IPC_CHILD_SHA256')) for v in common),
+            'IPC image hash must come only from the validated generated header')
     from build_owned_helper import validate_owned_helper
     admitted = validate_owned_helper(build / 'owned-helper', root, project, sdk)
     require([v for v in common if v.startswith(('-DPW_LAPY_HELPER_SHA256', '-UPW_LAPY_HELPER_SHA256'))] ==
@@ -607,27 +640,31 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             'title actual source/object/command record differs')
     return {**record(path), 'user_enabled': bool(enabled), 'network_enabled': network_enabled,
             'child_ui': child_ui_contract(child_ui_enabled),
-            'network_hash_source': 'validated-generated-header' if network_enabled else None, 'record': actual,
+            'network_hash_source': 'validated-generated-header' if network_enabled else None,
+            'ipc_enabled': ipc_enabled, 'ipc_hash_source': 'validated-generated-header' if ipc_enabled else None, 'record': actual,
             'source_to_binary_reproducibility_verified': False}
 
 
 def check_title(args):
     user_fixture = getattr(args, 'user_fixture', None)
     network_fixture = getattr(args, 'network_fixture', None)
+    ipc_fixture = getattr(args, 'ipc_fixture', None)
+    require(ipc_fixture is None or not getattr(args, 'child_ui', False),
+            'child preview and IPC admission require separate matched cohorts')
     inputs = (args.app, args.build, args.service_work, args.sdk, args.runtime, args.fixture)
-    out = output_directory(args.out, inputs + tuple(p for p in (user_fixture, network_fixture) if p is not None))
+    out = output_directory(args.out, inputs + tuple(p for p in (user_fixture, network_fixture, ipc_fixture) if p is not None))
     commands = Commands(out / 'inspection')
     manifest, paths = verify_child(args, commands)
     root, sdk, foundation, runtime, bindir, title = paths
     app, build = args.app.resolve(strict=True), args.build.resolve(strict=True)
     title_inputs = json.loads((build / 'wine-child-title-inputs.json').read_text())
     expected_inputs, header, pair, user_pair, network_pair = title_profiles_input_contract(root, args.service_work, args.fixture,
-        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture)
+        user_fixture, getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture, ipc_fixture)
     fixture_sha = pair['files']['child.exe']['sha256']
     require(title_inputs == expected_inputs and (build / 'wine-child-title-config.h').read_text() == header,
             'title fixture/USER macro/source input record differs')
     compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None,
-                                                checked_child_ui(manifest)['enabled'])
+                                                checked_child_ui(manifest)['enabled'], ipc_enabled=ipc_fixture is not None)
     # Retain actual bytes before parser/analyzer refusal for independent review.
     for name, original in (('title.linked.elf', build / 'llvm-pie.elf'), ('title.converted.elf', build / 'eboot.elf'),
                             ('title.self', app / 'eboot.bin')):
@@ -659,6 +696,13 @@ def check_title(args):
     fixture_identity = fixture_title_identity(image, title_inputs, pair)
     user_identity = user_title_identity(image, title_inputs, user_pair) if user_pair is not None else None
     network_identity = network_title_identity(image, title_inputs, network_pair) if network_pair is not None else None
+    ipc_identity = None
+    if ipc_fixture is not None:
+        ipc_identity = compiled_identity(image, title_inputs['ipc_child_sha256'])
+        for address in ipc_identity['addresses']:
+            offset = image.offset(address, 65, 4)
+            require(any(p[0] == 1 and p[3] == address for p in image.programs) or
+                    (offset > 0 and image.data[offset - 1] == 0), 'IPC hash is not a standalone title literal')
     embedded = embedded_image(image, (app / 'native-wine-child.self').read_bytes())
     route = check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'))
     user_route = {**check_route(linked, image, commands.run(bindir / 'llvm-readelf', '-sW', build / 'llvm-pie.elf'), TITLE_USER_FUNCTIONS),
@@ -682,10 +726,10 @@ def check_title(args):
             record(app / 'lapy.elf') == manifest['helper']['elf'], 'helper changed during title inspection')
     require(source_identity(root, commands)[0] == manifest['project'], 'project changed during title inspection')
     require(title_profiles_input_contract(root, args.service_work, args.fixture, user_fixture,
-        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture) ==
+        getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture, ipc_fixture) ==
         (expected_inputs, header, pair, user_pair, network_pair), 'original/USER/network fixture changed during title inspection')
     require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None,
-                                                checked_child_ui(manifest)['enabled']) == compile_inputs,
+                                                checked_child_ui(manifest)['enabled'], ipc_enabled=ipc_fixture is not None) == compile_inputs,
             'title compile inputs changed during inspection')
     report = {'schema': 'pw-windows-child-title/2', 'project': manifest['project'],
               'build_id': manifest['project']['commit'], 'compiler': manifest['host_llvm'],
@@ -700,6 +744,9 @@ def check_title(args):
               'network_child_sha256': title_inputs.get('network_child_sha256'),
               'network_reference_sha256': title_inputs.get('network_reference_sha256'),
               'network_child_identity': network_identity, 'network_route': network_route,
+              'ipc_enabled': ipc_fixture is not None, 'ipc_child_sha256': title_inputs.get('ipc_child_sha256'),
+              'ipc_reference': title_inputs.get('ipc_reference'), 'ipc_child_identity': ipc_identity,
+              'ipc_route': {**network_route, 'mode': None, 'modes': list(range(16, 24)), 'enabled': ipc_fixture is not None},
               'title_compile_inputs': compile_inputs,
               'title_compile_receipt': record(build / 'wine-child-title-compile.json'),
               'service_manifest_sha256': sha(args.service_work / 'native-wine-child-build.json'),
@@ -716,11 +763,13 @@ def main():
     parser.add_argument('--child-ui', action='store_true', help='opt-in matched v3 child software-frame preview; input disabled')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper-directory'):
+    for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'ipc-fixture', 'helper-directory'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--run-id')
     parser.add_argument('--run-attempt')
     args = parser.parse_args()
+    require(args.ipc_fixture is None or not args.child_ui,
+            'child preview and IPC admission require separate matched cohorts')
     if args.check_title:
         require(all((args.build, args.app, args.service_work, args.sdk_source_archive, args.fixture)), 'title check requires title/child/SDK source inputs')
         result = check_title(args)

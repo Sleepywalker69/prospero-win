@@ -138,6 +138,9 @@ int main(void)
     reset();m.profile=5;assert(prepare()&&!m.loads&&!m.envs);
     reset();m.profile=PW_WC_PROFILE_BATTLENET;m.machine=0xaa64;assert(prepare()&&!m.loads&&!m.envs);
 #if PW_WINE_CHILD_UI_ENABLED
+    for(unsigned profile=PW_WC_PROFILE_IPC_FIRST;profile<=PW_WC_PROFILE_IPC_LAST;profile++){
+        reset();m.profile=profile;assert(prepare()&&!m.loads&&!m.envs&&!b.ui_attached&&!ui_present_sets&&!ui_release_sets);
+    }
     reset();ops.ui=NULL;assert(prepare()&&!m.loads);
     reset();test_ui.tx.identity.generation=8;assert(prepare()&&!m.loads);
 #endif

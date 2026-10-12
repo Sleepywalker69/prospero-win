@@ -126,12 +126,19 @@ class TitleInputs(unittest.TestCase):
      wrong=copy.deepcopy(record);wrong['sources'].pop(name);receipt.write_text(json.dumps(wrong))
      with self.assertRaisesRegex(ValueError,'source cohort incomplete'):self.check_compile(True)
      receipt.write_text(json.dumps(record))
- def test_worker_metadata_declares_exact_four_compiled_capabilities(self):
+ def test_worker_metadata_preserves_four_original_and_fixed_ipc_capabilities(self):
   tree=ast.parse((ROOT/'tools/build_wine_service_child.py').read_text())
   function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='inputs')
   result=next(n.value for n in function.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='result' for t in n.targets))
   value=next(v for k,v in zip(result.keys,result.values) if isinstance(k,ast.Constant) and k.value=='candidate_capabilities')
-  self.assertEqual(ast.literal_eval(value),[
+  self.assertEqual(len(value.elts),5)
+  self.assertIsInstance(value.elts[-1],ast.Starred)
+  expression=ast.Expression(body=value);ast.fix_missing_locations(expression)
+  for ui in (False,True):
+   actual=eval(compile(expression,'<actual-worker-capabilities>','eval'),{'args':types.SimpleNamespace(child_ui=ui),'ipc_worker_capabilities':b.ipc_worker_capabilities})
+   self.assertEqual([x['mode'] for x in actual],[1,2,3,4]+([] if ui else list(range(16,24))))
+  self.assertEqual([x['mode'] for x in b.ipc_worker_capabilities()],list(range(16,24)))
+  self.assertEqual(ast.literal_eval(ast.List(elts=value.elts[:4],ctx=ast.Load())),[
    {'mode':1,'prefix':'windows-child-fixture-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False},
    {'mode':2,'prefix':'battlenet-experimental-v1','guest_machine':'I386','backend':'wowprospero','runtime_validated':False},
    {'mode':3,'prefix':'windows-child-user-v1','guest_machine':'AMD64','backend':'native-amd64','runtime_validated':False},

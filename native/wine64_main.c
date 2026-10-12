@@ -1264,6 +1264,10 @@ int main(int argc, char **argv)
     else if (child_profile == 4)
         pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_network=observation child_gui=unsupported",
                                  pw_wine_child_title_marker, child_profile, game->app.id);
+    else if (pw_wine_ipc_profile(child_profile))
+        pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_gui=unsupported diagnostic=original_ipc child_limit=%u root_arguments=empty worker_arguments=fixture_bound",
+                                 pw_wine_child_title_marker, child_profile, game->app.id,
+                                 pw_wine_ipc_profile(child_profile)->direct_children);
     else
         pw_diagnostics_log_local("PW_WINE_CHILD selection marker=%s profile=%u id=%s descendants=unsupported child_gui=unsupported",
                                  pw_wine_child_title_marker, child_profile, game->app.id);
@@ -1547,6 +1551,9 @@ int main(int argc, char **argv)
 #endif
 #if PW_WINE_NET_PROFILE_ENABLED
             if (child_profile == 4) child_hash = PW_WINE_NET_CHILD_SHA256;
+#endif
+#if PW_WINE_IPC_PROFILE_ENABLED
+            if (pw_wine_ipc_profile(child_profile)) child_hash = PW_WINE_IPC_CHILD_SHA256;
 #endif
             status = pw_wine_child_title_prepare(child_profile, child_hash);
             pw_diagnostics_log_local("PW_WINE_CHILD owner_prepare status=%d", status);

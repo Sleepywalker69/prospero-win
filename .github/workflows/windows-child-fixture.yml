@@ -3,6 +3,11 @@ name: Matched original Windows child fixture
 on:
   workflow_dispatch:
     inputs:
+      enable_chromium_ipc:
+        description: 'Include exact original IPC diagnostics; requires fresh x64 and x86 references in this complete cohort'
+        type: boolean
+        required: false
+        default: false
       child_ui_preview:
         description: Also build the isolated child software preview for static validation only
         type: boolean
@@ -15,32 +20,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  # Skipped events must not replace a pending admitted build in its group.
+  # Ignored and rejected events cannot replace a pending accepted build.
   group: >-
-    windows-child-fixture-${{ (github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'push' &&
-         github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
-         github.event.deleted == false) ||
-        (github.event_name == 'pull_request' &&
-         github.event.pull_request.head.repo.full_name == github.repository &&
-         github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-         (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
-            github.event.action == 'reopened') &&
-           (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
-            contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
-          (github.event.action == 'labeled' &&
-           ((github.event.label.name == 'build-windows-child-fixture' &&
-             contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
-            (github.event.label.name == 'build-child-ui-preview-static' &&
-             contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))))))) && github.ref || github.run_id }}
-  cancel-in-progress: false
-env:
-  PYTHONDONTWRITEBYTECODE: "1"
-  LLVM_CONFIG: /usr/bin/llvm-config-18
-jobs:
-  original-x64-reference:
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+    windows-child-fixture-${{ ((github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' &&
            github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
            github.event.deleted == false) ||
@@ -50,12 +32,106 @@ jobs:
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
              (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
-              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+                contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+                contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) ||
             (github.event.action == 'labeled' &&
              ((github.event.label.name == 'build-windows-child-fixture' &&
                contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
               (github.event.label.name == 'build-child-ui-preview-static' &&
-               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))) && github.ref || github.run_id }}
+  cancel-in-progress: false
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  LLVM_CONFIG: /usr/bin/llvm-config-18
+jobs:
+  reject-conflicting-options:
+    # This small job fails explicitly; all build/reference jobs reject the same
+    # combination in their own job conditions before any expensive work starts.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+           github.event.deleted == false) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+                contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+                contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          ((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Reject mixed IPC and preview cohorts
+        shell: bash
+        run: |
+          echo '::error::Strict IPC and child UI preview are separate cohorts. Select only one input or opt-in label.'
+          exit 1
+  chromium-ipc-reference:
+    if: >-
+      ${{ ((github.event_name == 'workflow_dispatch' && inputs.enable_chromium_ipc == true) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+            github.event.action == 'reopened' ||
+            (github.event.action == 'labeled' && github.event.label.name == 'build-windows-chromium-ipc-strict')))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) }}
+    uses: ./.github/workflows/windows-chromium-ipc-reference.yml
+    permissions:
+      contents: read
+      actions: read
+  original-x64-reference:
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' &&
+           github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+           github.event.deleted == false) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+                contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+                contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) }}
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -110,7 +186,7 @@ jobs:
           if-no-files-found: error
   original-user-x64-reference:
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+      ${{ (github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' &&
            github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
            github.event.deleted == false) ||
@@ -120,12 +196,20 @@ jobs:
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
              (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
-              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+                contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+                contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) ||
             (github.event.action == 'labeled' &&
              ((github.event.label.name == 'build-windows-child-fixture' &&
                contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
               (github.event.label.name == 'build-child-ui-preview-static' &&
-               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) }}
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -148,7 +232,7 @@ jobs:
           if-no-files-found: error
   original-network-x64-reference:
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+      ${{ (github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' &&
            github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
            github.event.deleted == false) ||
@@ -158,12 +242,20 @@ jobs:
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
              (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
-              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+                contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+                contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) ||
             (github.event.action == 'labeled' &&
              ((github.event.label.name == 'build-windows-child-fixture' &&
                contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
               (github.event.label.name == 'build-child-ui-preview-static' &&
-               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) }}
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -186,7 +278,7 @@ jobs:
           if-no-files-found: error
   matched-runtime:
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+      ${{ (github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' &&
            github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
            github.event.deleted == false) ||
@@ -196,12 +288,20 @@ jobs:
            (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
               github.event.action == 'reopened') &&
              (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
-              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+                contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') ||
+                contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))) ||
             (github.event.action == 'labeled' &&
              ((github.event.label.name == 'build-windows-child-fixture' &&
                contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
               (github.event.label.name == 'build-child-ui-preview-static' &&
-               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')) ||
+              (github.event.label.name == 'build-windows-chromium-ipc-strict' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict'))))))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) }}
     permissions:
       contents: read
       actions: read
@@ -212,6 +312,20 @@ jobs:
         shell: bash
     env:
       BUILD_JOBS: "2"
+      PW_IPC_REQUESTED: >-
+        ${{ (((github.event_name == 'workflow_dispatch' && inputs.enable_chromium_ipc == true) ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+            github.event.action == 'reopened' ||
+            (github.event.action == 'labeled' && github.event.label.name == 'build-windows-chromium-ipc-strict')))) &&
+          !((github.event_name == 'workflow_dispatch' &&
+           inputs.enable_chromium_ipc == true && inputs.child_ui_preview == true) ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'build-windows-chromium-ipc-strict') &&
+           contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))) && '1' || '0' }}
     steps:
       - name: Initialize paths on the allocated runner
         id: runtime-paths
@@ -594,6 +708,27 @@ jobs:
             --fixture "$RUNNER_TEMP/network-x64" --cpu-output "$RUNNER_TEMP/fixture-cpu" \
             --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --out "$RUNNER_TEMP/network-console" \
             --report "$RUNNER_TEMP/network-prefix.json" > "$RUNNER_TEMP/network-prefix-export.log" 2>&1
+      - name: Join both actual IPC references from this complete run attempt
+        if: ${{ env.PW_IPC_REQUESTED == '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/join_windows_chromium_ipc.py --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/ipc-reference"
+          python3 tools/windows_chromium_ipc_contract.py --directory "$RUNNER_TEMP/ipc-reference" \
+            --repo "$GITHUB_WORKSPACE" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --report "$RUNNER_TEMP/fixture-evidence/ipc-preflight.json"
+      - name: Prepare the dedicated fresh eight-profile IPC prefix
+        if: ${{ env.PW_IPC_REQUESTED == '1' }}
+        run: |
+          timeout --kill-after=15s 5m xvfb-run -a python3 tools/prepare_windows_child_prefix.py initialize-ipc \
+            --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" --cohort "$COHORT" \
+            --work "$RUNNER_TEMP/ipc-prefix-work" > "$RUNNER_TEMP/ipc-initialization.log" 2>&1
+          python3 tools/prepare_windows_child_prefix.py export-ipc --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" \
+            --cohort "$COHORT" --work "$RUNNER_TEMP/ipc-prefix-work" --wine-work "$WINE_WORK" \
+            --wine-source "$WINE_SOURCE" --wine-archive "$RUNNER_TEMP/wine-source.tar.gz" \
+            --fixture "$RUNNER_TEMP/ipc-reference" --cpu-output "$RUNNER_TEMP/fixture-cpu" \
+            --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --out "$RUNNER_TEMP/ipc-console" \
+            --report "$RUNNER_TEMP/ipc-prefix.json" > "$RUNNER_TEMP/ipc-prefix-export.log" 2>&1
       - name: Build the full-CRT child once and the matched title
         env:
           PW_WINE_CHILD_FIXTURE_MODE: "1"
@@ -609,13 +744,18 @@ jobs:
           PW_NATIVE_SDK_SOURCE_ARCHIVE: ${{ runner.temp }}/sdk-source.tar.gz
           PS5LOG_DEV_CONF: ${{ runner.temp }}/no-private-dev-conf
         run: |
+          ipc_args=()
+          if [[ "$PW_IPC_REQUESTED" == 1 ]]; then
+            export PW_WINDOWS_CHROMIUM_IPC_DIR="$RUNNER_TEMP/ipc-reference"
+            ipc_args=(--ipc-fixture "$PW_WINDOWS_CHROMIUM_IPC_DIR")
+          fi
           timeout 30m bash tools/build_native.sh 2>&1 | tee "$RUNNER_TEMP/fixture-evidence/title-build.log"
           python3 tools/build_wine_service_child.py --check-title --work "$GITHUB_WORKSPACE" \
             --sdk "$PS5_PAYLOAD_SDK" --foundation "$FOUNDATION" --runtime "$WINE_WORK" \
             --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --build "$GITHUB_WORKSPACE/build/native-windows-child-fixture" \
             --app "$GITHUB_WORKSPACE/dist/PPSA99995-windows-child-fixture" \
             --service-work "$GITHUB_WORKSPACE/build/native-windows-child-fixture/wine-child" --fixture "$RUNNER_TEMP/fixture-x64" \
-            --user-fixture "$RUNNER_TEMP/user-x64" --network-fixture "$RUNNER_TEMP/network-x64" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --user-fixture "$RUNNER_TEMP/user-x64" --network-fixture "$RUNNER_TEMP/network-x64" "${ipc_args[@]}" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --sdk-source-archive "$RUNNER_TEMP/sdk-source.tar.gz" --out "$RUNNER_TEMP/fixture-evidence/title-inspection" \
             2>&1 | tee "$RUNNER_TEMP/fixture-evidence/title-check.log"
       - name: Retain corresponding sources and assemble the exact matched package
@@ -654,8 +794,12 @@ jobs:
               'sources_root': temp / 'retained-sources', 'sources_manifest': temp / 'retained-sources.json',
               'wine_archive': temp / 'wine-source.tar.gz', 'sdk': Path(os.environ['PS5_PAYLOAD_SDK']),
               'foundation': foundation, 'llvm_bindir': Path('/usr/lib/llvm-18/bin')}
+          ipc_enabled = os.environ['PW_IPC_REQUESTED'] == '1'
+          if ipc_enabled:
+              package_paths.update(ipc_prefix=temp / 'ipc-console', ipc_prefix_report=temp / 'ipc-prefix.json',
+                                   ipc_fixture=temp / 'ipc-reference')
           (temp / 'package-inputs.json').write_text(json.dumps({'schema': 'pw-windows-child-package-inputs/1', 'battlenet_enabled': True,
-              'user_enabled': True, 'network_enabled': True, 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'user_enabled': True, 'network_enabled': True, 'ipc_enabled': ipc_enabled, 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
               'run_url': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
               'paths': {k: str(v) for k, v in package_paths.items()}}, indent=2) + '\n')
           PY
@@ -817,7 +961,7 @@ jobs:
                   shutil.copyfile(path, destination)
           # The prefix auditor emits only bounded path/hash/classification metadata.
           # Raw initialization/export logs and raw registry/prefix files stay local.
-          for kind in ('fixture', 'battlenet', 'user', 'network'):
+          for kind in ('fixture', 'battlenet', 'user', 'network', 'ipc'):
               prefix = Path(os.environ['RUNNER_TEMP']) / (kind + '-prefix-work')
               for name in ('UNAPPROVED-FILES.json', 'TEXT-AUDIT.json'):
                   path = prefix / name

@@ -105,7 +105,7 @@ def recipe_contract(flow, native):
             'compiler diagnostics must be collected before the preview evidence upload')
     require(evidence['with']['path'] == '${{ runner.temp }}/preview-evidence/',
             'preview compiler diagnostics must share the existing evidence artifact')
-    names = [s['with']['name'] for j in flow['jobs'].values() for s in j['steps']
+    names = [s['with']['name'] for j in flow['jobs'].values() for s in j.get('steps', [])
              if s.get('uses', '').startswith('actions/upload-artifact@')]
     require(len(names) == len(set(names)), 'workflow artifact collision')
     require(len([s for s in ordered if '--stage target-runtime --' in s.get('run', '')]) == 1,
