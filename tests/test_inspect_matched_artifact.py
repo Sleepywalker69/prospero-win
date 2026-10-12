@@ -129,5 +129,44 @@ class ArchiveEvidence(unittest.TestCase):
         self.assertEqual(m.TAR_SHA, 'd8f35234b740af9c5517a4c5ef441aa9574aa0518c563b3e9969c1bf172a67e8')
         self.assertNotEqual(m.CANDIDATE, m.COMPILED)
 
+    def native(self):
+        value = {'schema': 'pw-wine-service-child/2', 'project': {'commit': m.COMPILED, 'tree': m.TREE},
+                 'worker': {'bytes': 8, 'sha256': 'b' * 64, 'build_id': 'c' * 40},
+                 'linked': {}, 'converted': {}, 'reconstructed': {}, 'reconstruction': {}, 'framing': {},
+                 'linkage': {'sceNetSocket': {}, 'sceNetErrnoLoc': {}},
+                 'console_execution_verified': False, 'windows_process_support': False,
+                 'platform_authentication_verified': False,
+                 'net_target_observation': {'schema': 'pw-wine-child-net-target-observation/1',
+                     'stage': 5, 'wire_bytes': 136, 'functions': {}, 'got_slots': {},
+                     'observation_instructions': {}, 'anchor_instruction': 1,
+                     'original_call_instructions': {}, 'focused_disassembly': [],
+                     'target_executed': False, 'runtime_validated': False}}
+        return value, {m.SELF: {'bytes': 8, 'sha256': 'b' * 64}}
+
+    def test_native_self_source_and_false_claims_bound(self):
+        value, files = self.native()
+        result = m.selected_native(value, files)
+        self.assertNotEqual(result['worker']['build_id'], result['project']['commit'])
+        for field, replacement in [('console_execution_verified', True),
+                                   ('schema', 'wrong')]:
+            bad = copy.deepcopy(value)
+            bad[field] = replacement
+            with self.assertRaises(ValueError):
+                m.selected_native(bad, files)
+        for field in ('bytes', 'sha256'):
+            bad = copy.deepcopy(files)
+            bad[m.SELF][field] = 0
+            with self.assertRaises(ValueError):
+                m.selected_native(value, bad)
+        bad = copy.deepcopy(value)
+        bad['project']['commit'] = m.CANDIDATE
+        with self.assertRaises(ValueError):
+            m.selected_native(bad, files)
+        for field, replacement in [('stage', 4), ('wire_bytes', 135), ('runtime_validated', True)]:
+            bad = copy.deepcopy(value)
+            bad['net_target_observation'][field] = replacement
+            with self.assertRaises(ValueError):
+                m.selected_native(bad, files)
+
 if __name__ == '__main__':
     unittest.main()
