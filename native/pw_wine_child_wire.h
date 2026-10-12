@@ -68,6 +68,10 @@ typedef struct PwWineChildFrame {
      * maps these values to the existing 24 payload bytes; all logical control
      * and FAILURE fields remain zero for this stage. A matched rebuild is required. */
     uint64_t net_socket_target, net_errno_target, data_prepare_anchor;
+    /* Stage5 only: immediate signed loader handle and module-start output.
+     * Missing-mask bits0..6 are Socket/Connect/Send/Recv/Setsockopt/SocketClose/
+     * ErrnoLoc; bit7 is LoadStartModule. A bit means its observed cell was zero.
+     * These payload values never certify target validity or execution. */
     int32_t net_load_result, net_start_result;
     uint32_t net_load_attempted, net_missing_mask;
 } PwWineChildFrame;

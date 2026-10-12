@@ -260,6 +260,8 @@ def check_net_target_observation(linked, converted, recovered, graph, symbols, d
     require(all(calls.values()), 'data preparation no longer calls through the observed GOT slots')
     return {'schema': 'pw-wine-child-net-target-observation/2', 'stages': [4, 5], 'wire_version': 3, 'wire_bytes': 136,
             'load_path': '/system/common/lib/libSceNet.sprx', 'guard_instructions': guards,
+            'guard_slot_order': [*NET_FUNCTIONS, 'sceKernelLoadStartModule'],
+            'missing_mask_meaning': 'bit i is one iff guard_slot_order[i] was zero',
             'functions': functions, 'got_slots': slots, 'observation_instructions': observations,
             'anchor_instruction': anchors[0], 'original_call_instructions': calls,
             'focused_disassembly': focused, 'target_executed': False, 'runtime_validated': False}

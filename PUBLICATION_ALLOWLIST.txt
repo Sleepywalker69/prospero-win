@@ -1084,3 +1084,8 @@ docs/verified-host-reuse.md
 tools/export_host_compiler_cache.py
 tests/test_export_host_compiler_cache.py
 docs/host-cache-113-save.json
+
+# Native-only derivative of exact accepted matched113 components.
+tools/derived_native_package.py
+tests/test_derived_native_package.py
+.github/workflows/derived-native-child.yml

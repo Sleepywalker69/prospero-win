@@ -405,6 +405,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_network_workflow.py
 	python3 tests/test_battlenet_prefix.py
 	python3 tests/test_wine_service_child_build.py
+	python3 tests/test_derived_native_package.py
 	python3 tests/test_windows_child_failure_retention.py
 	python3 tests/test_package_windows_child_fixture.py
 	python3 tests/test_publish_release.py
