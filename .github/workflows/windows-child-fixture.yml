@@ -287,6 +287,8 @@ jobs:
         run: |
           python3 tools/wine_compile_cache.py prepare --repo "$GITHUB_WORKSPACE" --phase host \
             --out "$RUNNER_TEMP/fixture-evidence/ccache-host" --cache-dir "$RUNNER_TEMP/ccache-host"
+      - name: Start host cache restore clock
+        run: python3 tools/wine_reuse_decision.py start --clock "$RUNNER_TEMP/host-cache-clock"
       - name: Restore host compiler results only
         id: host-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -294,6 +296,13 @@ jobs:
           path: ${{ runner.temp }}/ccache-host
           key: ${{ steps.host-cache-key.outputs.key }}
           restore-keys: ${{ steps.host-cache-key.outputs.restore-prefix }}
+      - name: Retain host cache restore decision
+        env:
+          PW_CACHE_RESTORE_HIT: ${{ steps.host-cache.outputs.cache-hit }}
+          PW_CACHE_MATCHED_KEY: ${{ steps.host-cache.outputs.cache-matched-key }}
+        run: |
+          python3 tools/wine_reuse_decision.py cache --clock "$RUNNER_TEMP/host-cache-clock" \
+            --output "$RUNNER_TEMP/fixture-evidence/host-cache-restore.json"
       - name: Build only matching host tools for early target checks
         env:
           PW_CACHE_RESTORE_HIT: ${{ steps.host-cache.outputs.cache-hit }}
@@ -371,6 +380,8 @@ jobs:
         run: |
           python3 tools/wine_workflow_join.py --job original-network-x64-reference \
             --output "$RUNNER_TEMP/fixture-evidence/early-network-reference-join.json"
+      - name: Start host admission clock
+        run: python3 tools/wine_reuse_decision.py start --clock "$RUNNER_TEMP/host-admission-clock"
       - name: Reuse an exactly matched accepted host runtime when available
         id: host-reuse
         env:
@@ -379,6 +390,19 @@ jobs:
           python3 tools/reuse_host_wine.py --repo "$GITHUB_WORKSPACE" --host-work "$HOST_WORK" \
             --cohort "$COHORT" --cache-state "$RUNNER_TEMP/fixture-evidence/ccache-host" \
             --run 38223633711 --report "$RUNNER_TEMP/fixture-evidence/host-reuse.json"
+      - name: Publish concise host admission decision
+        run: |
+          python3 tools/wine_reuse_decision.py admission --clock "$RUNNER_TEMP/host-admission-clock" \
+            --reuse "$RUNNER_TEMP/fixture-evidence/host-reuse.json" \
+            --cache "$RUNNER_TEMP/fixture-evidence/host-cache-restore.json" \
+            --output "$RUNNER_TEMP/fixture-evidence/host-admission-decision.json"
+      - name: Upload host decision before any full build fallback
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: host-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fixture-evidence/host-admission-decision.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Build complete matching host Wine
         if: ${{ steps.host-reuse.outputs.reused != 'true' }}
         env:

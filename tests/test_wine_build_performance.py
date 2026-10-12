@@ -234,8 +234,17 @@ class WorkflowPerformanceContracts(unittest.TestCase):
         host_index = next(i for i, step in enumerate(steps)
                           if '--stage host-runtime --' in step.get('run', ''))
         self.assertLess(target_index, early_index)
-        self.assertEqual(early_index + 4, host_index)
-        self.assertEqual(steps[early_index + 3]['id'], 'host-reuse')
+        self.assertEqual([step.get('name') for step in steps[early_index + 1:host_index]], [
+            'Require separate USER reference success before the expensive host runtime',
+            'Require separate network reference success before the expensive host runtime',
+            'Start host admission clock',
+            'Reuse an exactly matched accepted host runtime when available',
+            'Publish concise host admission decision',
+            'Upload host decision before any full build fallback'])
+        for step in steps[early_index + 1:host_index]:
+            self.assertNotIn('if', step)
+            self.assertNotIn('continue-on-error', step)
+        self.assertEqual(steps[early_index + 4]['id'], 'host-reuse')
         self.assertIn('--job original-network-x64-reference', steps[early_index + 2]['run'])
         self.assertIn('--job original-user-x64-reference', steps[early_index + 1]['run'])
         join_source = (ROOT / 'tools/wine_workflow_join.py').read_text()
@@ -289,8 +298,13 @@ class WorkflowPerformanceContracts(unittest.TestCase):
                              '"$RUNNER_TEMP/fixture-evidence/' + output + '.json"')
         host = next(i for i, step in enumerate(steps)
                     if '--stage host-runtime --' in step.get('run', ''))
-        self.assertEqual(early + 3, host)
-        self.assertEqual(steps[early + 2]['id'], 'host-reuse')
+        self.assertEqual([step.get('name') for step in steps[early + 1:host]], [
+            'Require separate network reference success before the expensive host runtime',
+            'Start host admission clock',
+            'Reuse an exactly matched accepted host runtime when available',
+            'Publish concise host admission decision',
+            'Upload host decision before any full build fallback'])
+        self.assertEqual(steps[early + 3]['id'], 'host-reuse')
         self.assertIn('--job original-network-x64-reference', steps[early + 1]['run'])
         self.assertEqual(steps[early - 1]['id'], 'early-reference-join')
         downloads = [i for i, step in enumerate(steps)

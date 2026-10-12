@@ -89,8 +89,14 @@ class NetworkWorkflow(unittest.TestCase):
         self.assertEqual([role(i) for i in joins],['original','user','network']*2)
         early,late=[i for i in joins if role(i)=='network']
         host=next(i for i,s in enumerate(self.steps) if '--stage host-runtime --' in s.get('run',''))
-        self.assertEqual(early+2,host)
-        admission=self.steps[early+1]
+        self.assertEqual([s.get('name') for s in self.steps[early+1:host]], [
+            'Start host admission clock',
+            'Reuse an exactly matched accepted host runtime when available',
+            'Publish concise host admission decision',
+            'Upload host decision before any full build fallback'])
+        for step in self.steps[early+1:host]:
+            self.assertNotIn('if',step);self.assertNotIn('continue-on-error',step)
+        admission=self.steps[early+2]
         self.assertEqual(admission['id'],'host-reuse')
         self.assertNotIn('if',admission);self.assertNotIn('continue-on-error',admission)
         self.assertIn('tools/reuse_host_wine.py',admission['run'])
