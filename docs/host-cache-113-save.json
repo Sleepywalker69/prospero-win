@@ -1,0 +1,60 @@
+{
+  "schema": "pw-host-cache-reviewed-save/1",
+  "repository": "Sleepywalker69/prospero-win",
+  "run_id": 38241186538,
+  "run_attempt": 1,
+  "job_id": 114783912333,
+  "head": "bbfa02476c6794538be1aad46886ec45976a4af9",
+  "compiled": "7acf08abea63640a737c7cec0cae4c0da61b82f5",
+  "tree": "e28679c3d6c1a8735b9069509062c4114c166c47",
+  "key": "wine-ccache-v2-host-b00746243624c07795511efe030575672cc9a3f18458b93705cb126fac7d6d8a-52a8dc3deb6c085d346cd9ceab2a8591b893785b75fc17e83fce1f88a81c6a7e",
+  "capture": {
+    "source": "GitHub connector fetch_workflow_job_logs",
+    "representation": "Connector-decoded text re-encoded as UTF-8, including initial U+FEFF; no newline or escape normalization. Not an original HTTP-byte digest.",
+    "unicode_characters": 636122,
+    "utf8_bytes": 636204,
+    "sha256": "2eb353e61c4c30be27c8831944e9b0fc97277dfb3e1cdf9e9600ce8122dd7245"
+  },
+  "save_line": "2026-10-12T12:16:20.3426455Z Cache saved with key: wine-ccache-v2-host-b00746243624c07795511efe030575672cc9a3f18458b93705cb126fac7d6d8a-52a8dc3deb6c085d346cd9ceab2a8591b893785b75fc17e83fce1f88a81c6a7e",
+  "steps": [
+    {
+      "number": 23,
+      "name": "Build complete matching host Wine",
+      "started_at": "2026-10-12T11:27:05Z",
+      "completed_at": "2026-10-12T12:16:14Z"
+    },
+    {
+      "number": 25,
+      "name": "Save checked host compiler results only",
+      "started_at": "2026-10-12T12:16:14Z",
+      "completed_at": "2026-10-12T12:16:20Z"
+    },
+    {
+      "number": 26,
+      "name": "Retain early full host runtime and corresponding source",
+      "started_at": "2026-10-12T12:16:20Z",
+      "completed_at": "2026-10-12T12:16:37Z"
+    },
+    {
+      "number": 27,
+      "name": "Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "started_at": "2026-10-12T12:16:37Z",
+      "completed_at": "2026-10-12T12:16:45Z"
+    }
+  ],
+  "artifacts": {
+    "evidence": {
+      "id": 11747637406,
+      "name": "windows-child-fixture-evidence-7acf08abea63640a737c7cec0cae4c0da61b82f5-1",
+      "size_in_bytes": 192181819,
+      "digest": "sha256:d795a5dedf06c42c51b9a0db15376c4777e5ac582969bd8559257e2cde67e85e"
+    },
+    "host": {
+      "id": 11746209239,
+      "name": "windows-child-host-checkpoint-7acf08abea63640a737c7cec0cae4c0da61b82f5-1",
+      "size_in_bytes": 209799066,
+      "digest": "sha256:9ee89dcee59531fb42d931761902bf958f7a8dd96fc79dc3c6b49aca182ceae3"
+    }
+  },
+  "limits": "Reviewed service-mediated successful-save/key association. No original donor cache file inventory was captured. Exporter will measure restored bytes; consumers must separately verify current toolchain partition."
+}
