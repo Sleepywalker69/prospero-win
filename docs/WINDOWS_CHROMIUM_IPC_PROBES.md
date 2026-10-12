@@ -91,57 +91,56 @@ there is separately admitted, actual PE32 target-child support.
    private allocation success says nothing about shared mappings. PE32 packet
    pointer validation rejects values above 4 GiB.
 
-All child cases use `STARTUPINFOEX`/`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` with only
-the required endpoints, event and optional section/client handle. A deliberately
-inheritable decoy event is excluded. The child reports its expected numeric
-value in its nonce/PID-bound HELLO, then waits up to 5 seconds for a parent
-acknowledgement before touching the test payload. Numeric values can be reused
-by the loader, CRT or log file; a valid numeric handle is not itself leakage.
+All child cases use `STARTUPINFOEX`/`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` with
+four required handles (two pipe endpoints, the release event and an identity
+reference), plus the optional section/client handle. The parent creates an
+inheritable decoy Event, then a distinct inheritable duplicate referencing the
+same Event. Only that duplicate is listed; the original decoy handle is omitted.
+The list builder rejects null, invalid, duplicate or original-decoy entries.
 
-The parent duplicates that candidate from the still-live child into its own
-table, pinning its object without closing or signaling the child's original.
-An invalid candidate is absence only with successful child-liveness checks
-before and after capture. A valid candidate must compare different from the
-parent's excluded event using `CompareObjectHandles`, with
-`ERROR_NOT_SAME_OBJECT`. Same-object leakage fails. Both a parent-local duplicate
-of the decoy and an independently created event calibrate same/different-object
-comparisons first. The known included release event is also duplicated back
-from the child and must compare equal to the parent's event, ensuring that a
-broken foreign-duplication path cannot pass by reporting every handle invalid.
-No unknown child object is signaled, waited on or mutated.
-Only successfully acquired parent-local copies are closed.
+This tests exclusion of the **original handle slot**, not unavailability of the
+Event object: the identity reference deliberately grants access to that object.
+Microsoft documents that inherited handles retain their numeric values and refer
+to the same objects. After parsing its arguments, the child resolves
+`CompareObjectHandles` and snapshots the original numeric slot against the
+continuously held inherited reference, before opening its log or allocating any
+control/diagnostic duplicate. A valid recycled slot is not itself leakage.
 
-This is a narrow explicit-handle-list test, not a complete handle enumeration or
-security-isolation claim. The identity test requires cross-process
-`DuplicateHandle` and dynamically resolved `CompareObjectHandles` (Windows 10 /
-Server 2016 or newer; also present in the pinned Wine source). Unsupported or
-unexpected errors remain nonpass; they do not establish a leak or exclusion.
-A reused console handle can legitimately refuse cross-process duplication:
-Microsoft restricts console handles to same-process duplication. Error 50 alone
-still proves nothing. Before HELLO, the child makes read-only `GetFileType`
-queries calibrated against its known included event (UNKNOWN/INVALID_HANDLE)
-and its known control pipe (PIPE). Only exact DISK, CHAR or PIPE classifications
-of the candidate become nonce/PID-bound HELLO flags. UNKNOWN, REMOTE-bit variants
-and unrecognized values supply no non-event evidence. LastError is cleared before
-each query and interpreted only for UNKNOWN results.
+The saved comparison must report either a different object
+(`ERROR_NOT_SAME_OBJECT`) or an absent slot (`ERROR_INVALID_HANDLE`). Same-object
+identity is a genuine exclusion failure. False with any other error, including
+zero or NOT_SUPPORTED, remains nonpass. The child then calibrates same identity
+using a distinct duplicate of the reference, different identity using the release
+Event, different-type identity using its process pseudo-handle, and invalid-handle
+behavior using NULL. A control duplicate may reuse the original slot after the
+snapshot; the verdict uses the saved result and never re-reads that slot.
 
-If and only if foreign capture returns NOT_SUPPORTED and those calibrated records
-prove a non-event file kind, the capture record is explicitly `non_event`, with
-the failed API error retained. The separate exclusion record identifies this
-classification path. It does not claim successful candidate duplication or
-absence of a handle. The known included-event foreign-capture control remains
-mandatory, and a captured same-event candidate fails regardless of file-type
-claims. The checker cross-binds controls, candidate query, HELLO, failed capture
-and final verdict. The claim is only that this original child observed a non-event
-candidate while awaiting ACK, not that arbitrary applications cannot replace
-handles. No unknown candidate is signaled, closed or waited on in the child.
+The nonce/PID-bound HELLO binds the original handle and calibrated verdict. The
+child holds its reference and waits up to five seconds for ACK. The parent retains
+its own decoy continuously, checks child liveness before/after the exchange, and
+duplicates both the known release event and known reference back from the child.
+They must compare equal to the corresponding parent objects. Parent-local
+same/different controls remain required. The strict checker also binds original
+and reference values, exact comparison errors, HELLO flag, list size, ordered
+child snapshot/controls/verdict, capture-back identity and ACK across both logs.
 
-A 5-second acknowledgement timeout and external 90-second process deadline bound
-the exchange; child termination during capture cannot satisfy the control.
+The unknown slot is never duplicated as part of acceptance, signaled, closed or
+waited on. There is no special ETW, file-kind or error-50 acceptance. Actual Windows
+run 38192946748 observed `EtwRegistration` at previously failing slots and showed
+both local/foreign duplication rejecting them. Direct same-process comparison
+avoids requiring duplication of that unknown object; the Windows reference must
+still establish its actual comparison behavior on both architectures.
+
+This is a checkpoint observation, not a complete handle enumeration, a history
+of what CRT/loader initialization may have closed, or a security-isolation claim.
+It requires known-event cross-process `DuplicateHandle` and dynamically resolved
+`CompareObjectHandles` (Windows 10 / Server 2016 or newer). The existing 90-second
+external process deadline bounds the overall exchange. Child termination cannot
+satisfy the live-child controls, and no helper is killed to create a pass.
 
 ### Additional observation-only handle diagnosis
 
-Before the existing exclusion exchange, the child records GetHandleInformation
+After saving and validating the slot comparison, the child records GetHandleInformation
 and attempts same-process duplication of the candidate before creating any other
 diagnostic handle. A successful copy pins the object for inspection. If that
 fails, any query of the original slot is explicitly labeled `unpinned_racy`.
@@ -159,17 +158,17 @@ to close an owned diagnostic duplicate remains a real cleanup failure; optional
 observation status does not excuse leaked resources. Native query calls have no fixture-side asynchronous timeout; the existing outer runner
 deadline remains the bound.
 
-These records **do not grant exclusion success** or add another error-50
-exception. A reported ALPC_Port or other category is diagnostic evidence to
-review before designing another control. The existing identity/file-kind gates
-and their failure outcome remain unchanged.
+These records **do not grant exclusion success**. A reported EtwRegistration,
+ALPC_Port or other category remains observation-only; the earlier calibrated
+comparison and parent capture-back are the sole identity gate.
 
 ## Evidence and bounded cleanup
 
 Each machine-readable line includes schema, case, role, nonce, Windows PID,
 claimed parent, pointer width, elapsed time, stage wait budget, result, Win32
 error, NTSTATUS, transferred bytes and two stage-specific numeric observations.
-API attempts precede measured calls. Child addresses
+API attempts precede measured calls except the deliberately early candidate
+comparison, whose saved result is logged after the log opens. Child addresses
 are only fixture-owned writable memory. No command lines, authentication data,
 network contents or installer arguments are recorded.
 
@@ -287,3 +286,10 @@ Only the Windows x64/x86 MSVC jobs establish build and reference execution.
 
 The pinned Chromium source is a comparison for required operations, not an
 identification of the CEF version in a particular installer.
+
+The handle-slot witness follows Microsoft’s [handle-inheritance contract](https://learn.microsoft.com/en-us/windows/win32/procthread/inheritance),
+[explicit handle-list contract](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute),
+and [object comparison contract](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles).
+The latter explicitly permits comparing different object types without requiring
+object-specific access rights. The invalid-handle branch is separately calibrated
+on each child rather than inferred from a bare false return.

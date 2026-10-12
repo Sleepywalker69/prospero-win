@@ -13,14 +13,15 @@ FIELDS = {'schema', 'role', 'case', 'stage', 'result', 'nonce', 'pid', 'parent',
           'elapsed_ms', 'deadline_ms', 'error', 'ntstatus', 'bytes', 'a', 'b'}
 NUMBERS = FIELDS - {'role', 'case', 'stage', 'result'}
 RESULTS = {'attempt', 'pass', 'fail', 'pending', 'immediate', 'timeout', 'not_run',
-           'unsupported', 'uncertain', 'cleanup_uncertain', 'unverified', 'observation_only', 'non_event'}
+           'unsupported', 'uncertain', 'cleanup_uncertain', 'unverified', 'observation_only'}
 WIDE = {'elapsed_ms', 'bytes', 'a', 'b'}
 COMMON_CHILD = {'Windows_child_identity', 'child_hello', 'CreateProcessW_handle_list',
                 'InitializeProcThreadAttributeList_size', 'InitializeProcThreadAttributeList',
                 'UpdateProcThreadAttribute_HANDLE_LIST', 'wait_child_exit', 'GetExitCodeProcess',
                 'identity_same_control', 'identity_different_control', 'identity_child_live',
                 'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
-                'handle_list_excluded'}
+                'DuplicateHandle_inherited_reference', 'identity_reference_values',
+                'identity_capture_reference', 'identity_reference_control', 'handle_list_excluded'}
 PARENT_STAGES = {
     'self-memory': {'OpenProcess_self', 'self_actual_value', 'reduced_WriteProcessMemory', 'reduced_NtWriteVirtualMemory', 'reduced_ReadProcessMemory',
         'reduced_NtReadVirtualMemory', 'self_reduced_unchanged'} |
@@ -69,9 +70,6 @@ def parse_log(path):
                 raise ValueError(f'{path.name}: out-of-range {key}')
         if row['result'] not in RESULTS or not re.fullmatch(r'[A-Za-z0-9_]+', row['stage']):
             raise ValueError(f'{path.name}: unknown result or invalid stage label')
-        if row['result'] == 'non_event' and (row['stage'] != 'identity_capture_child_handle' or
-                row['role'] != 'parent' or row['case'] in ('self-memory', 'page-regression')):
-            raise ValueError(f'{path.name}: non-event classification outside its narrow capture stage')
         if row['schema'] != 1 or row['bits'] not in (32, 64) or row['role'] not in ('parent', 'child'):
             raise ValueError(f'{path.name}: unsupported identity')
         rows.append(row)
@@ -126,43 +124,61 @@ def verify(directory, case, bits, exit_code):
         child = children[0]
         if child[0]['pid'] == parent[0]['pid']:
             raise ValueError('child must be a distinct Windows process')
-        require_pass(child, {'handle_list_acknowledged', 'identity_file_type_event_control', 'identity_file_type_pipe_control'})
-        identity = {}
-        for stage in ('identity_same_control', 'identity_different_control', 'identity_child_live',
-                      'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
-                      'identity_capture_child_handle', 'handle_list_excluded'):
-            matches = [r for r in parent if r['stage'] == stage and r['result'] != 'attempt']
+        child_controls = ('identity_child_duplicate_same', 'identity_child_same_control',
+                          'identity_child_different_control', 'identity_child_cross_type_control',
+                          'identity_child_invalid_control')
+        require_pass(child, {'handle_list_acknowledged', 'identity_child_reference_values',
+                            'identity_child_slot_verdict'} | set(child_controls))
+        def unique(rows, stage):
+            matches = [r for r in rows if r['stage'] == stage and r['result'] != 'attempt']
             if len(matches) != 1:
-                raise ValueError('one conclusive object-identity observation per stage required')
-            identity[stage] = matches[0]
+                raise ValueError('one conclusive slot-identity observation per stage required')
+            return matches[0]
+        identity = {stage: unique(parent, stage) for stage in
+                    ('identity_same_control', 'identity_different_control', 'identity_child_live',
+                     'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
+                     'identity_capture_reference', 'identity_reference_control', 'identity_reference_values',
+                     'handle_list_excluded', 'child_hello', 'UpdateProcThreadAttribute_HANDLE_LIST')}
         if identity['identity_same_control']['error'] != 0 or identity['identity_different_control']['error'] != 1656:
             raise ValueError('same/different object identity controls invalid')
-        if any(identity[stage]['error'] != 0 for stage in ('identity_capture_included', 'identity_included_control')):
-            raise ValueError('included child event must calibrate foreign handle capture')
+        if any(identity[stage]['error'] != 0 for stage in ('identity_capture_included', 'identity_included_control',
+                                                        'identity_capture_reference', 'identity_reference_control')):
+            raise ValueError('included release and exact decoy reference must calibrate foreign capture')
         if any(identity[stage]['a'] != 258 for stage in ('identity_child_live', 'identity_child_still_live')):
-            raise ValueError('child must remain live across object capture')
-        captured = identity['identity_capture_child_handle']
+            raise ValueError('child must remain live across known reference capture')
+        values = identity['identity_reference_values']
+        original, reference = values['a'], values['b']
+        if original == reference or not 0 < original < (1 << bits) - 1 or not 0 < reference < (1 << bits) - 1:
+            raise ValueError('original excluded handle and inherited reference must be distinct valid-width values')
+        expected_count = 5 if case in ('section-readonly', 'mojo-pipe') else 4
+        if identity['UpdateProcThreadAttribute_HANDLE_LIST']['a'] != expected_count:
+            raise ValueError('explicit handle list must include the separate identity reference')
+        snapshot = unique(child, 'identity_candidate_snapshot')
+        child_values = unique(child, 'identity_child_reference_values')
+        verdict = unique(child, 'identity_child_slot_verdict')
+        controls = [unique(child, stage) for stage in child_controls]
+        if [r['error'] for r in controls] != [0, 0, 1656, 1656, 6]:
+            raise ValueError('child same, different, cross-type and invalid comparison controls required')
+        if snapshot['result'] != 'observation_only' or (snapshot['a'], snapshot['b']) != (original, reference) or \
+                (child_values['a'], child_values['b']) != (original, reference):
+            raise ValueError('snapshot must bind the exact original slot and continuously held reference')
+        expected_error = {1: 1656, 2: 6}.get(verdict['a'])
         excluded = identity['handle_list_excluded']
-        types = {}
-        for stage in ('identity_file_type_event_control', 'identity_file_type_pipe_control', 'identity_candidate_file_type'):
-            matches = [r for r in child if r['stage'] == stage and r['result'] != 'attempt']
-            if len(matches) != 1:
-                raise ValueError('one calibrated child file-type observation per stage required')
-            types[stage] = matches[0]
-        event_type, pipe_type, candidate_type = (types[stage] for stage in
-            ('identity_file_type_event_control', 'identity_file_type_pipe_control', 'identity_candidate_file_type'))
-        if (event_type['a'], event_type['error'], pipe_type['a'], pipe_type['error']) != (0, 6, 3, 0):
-            raise ValueError('known event and pipe must calibrate file-type queries')
-        if candidate_type['result'] != 'observation_only':
-            raise ValueError('candidate file-type query is an observation, not an identity verdict')
-        kind = candidate_type['a'] if candidate_type['a'] in (1, 2, 3) and candidate_type['error'] == 0 else 0
-        hello = [r for r in parent if r['stage'] == 'child_hello' and r['result'] != 'attempt']
-        if len(hello) != 1 or hello[0]['b'] != 1 | (kind << 8) or captured['b'] != kind or excluded['b'] != kind:
-            raise ValueError('file-type evidence must match the nonce-bound HELLO and identity verdict')
-        proof = (captured['result'], captured['error'], captured['a'], excluded['error'], excluded['a'])
-        if proof not in (('pass', 0, 1, 1656, 1), ('pass', 6, 0, 6, 0)):
-            if proof != ('non_event', 50, 0, 50, 2) or kind not in (1, 2, 3):
-                raise ValueError('unsupported capture alone cannot prove exclusion')
+        if expected_error is None or any(r['error'] != expected_error for r in (snapshot, verdict, excluded)) or \
+                verdict['b'] != reference or excluded['b'] != reference or excluded['a'] != verdict['a'] or \
+                identity['child_hello']['b'] != verdict['a'] or identity['identity_capture_reference']['a'] != reference:
+            raise ValueError('only calibrated different-object or absent-slot comparisons establish exclusion')
+        ordered = [snapshot] + controls + [verdict, unique(child, 'handle_list_acknowledged')]
+        positions = [child.index(r) for r in ordered]
+        if positions != sorted(positions):
+            raise ValueError('candidate snapshot must precede control allocations and the acknowledged verdict')
+        if any(r['stage'] == 'CloseHandle' and r['result'] == 'pass' and r['a'] == reference
+               for r in child[:positions[-1]]):
+            raise ValueError('child identity reference must remain owned through ACK')
+        exclusion_position = parent.index(excluded)
+        if any(r['stage'] == 'CloseHandle' and r['result'] == 'pass' and r['a'] in (original, reference)
+               for r in parent[:exclusion_position]):
+            raise ValueError('parent must retain original and reference through identity acceptance')
         acknowledgements = [r for r in child if r['stage'] == 'handle_list_acknowledged' and r['result'] != 'attempt']
         if len(acknowledgements) != 1 or acknowledgements[0]['a'] != 1:
             raise ValueError('child did not acknowledge the parent identity verdict')

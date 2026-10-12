@@ -23,7 +23,7 @@ static int worker, log_failed, close_failed, unsettled, stage_failed;
 static HANDLE log_file=INVALID_HANDLE_VALUE;
 static volatile DWORD private_value=PW_IPC_A;
 static ULONGLONG epoch;
-struct child { PROCESS_INFORMATION pi; HANDLE rx,tx,release,decoy; int created,resumed; };
+struct child { PROCESS_INFORMATION pi; HANDLE rx,tx,release,decoy,reference; int created,resumed; };
 struct io_slot { OVERLAPPED ov; struct pw_ipc_packet data; int pending; };
 /* Process-lifetime storage: on a missing cancellation completion, nothing in
  * the I/O's reachable storage is freed or reused before process teardown. */
@@ -120,11 +120,23 @@ static int inherit_off(HANDLE h)
     BOOL ok;DWORD error;attempt("SetHandleInformation");ok=SetHandleInformation(h,HANDLE_FLAG_INHERIT,0);
     error=ok?0:GetLastError();return observation("SetHandleInformation",ok,error,0,0,(uint64_t)(uintptr_t)h,0);
 }
+static unsigned explicit_handle_list(HANDLE list[5],HANDLE rx,HANDLE tx,HANDLE release,
+                                     HANDLE reference,HANDLE extra,HANDLE excluded)
+{
+    unsigned i,j,count=extra?5u:4u;
+    list[0]=rx;list[1]=tx;list[2]=release;list[3]=reference;list[4]=extra;
+    if(!excluded||excluded==INVALID_HANDLE_VALUE)return 0;
+    for(i=0;i<count;++i){
+        if(!list[i]||list[i]==INVALID_HANDLE_VALUE||list[i]==excluded)return 0;
+        for(j=0;j<i;++j)if(list[i]==list[j])return 0;
+    }
+    return count;
+}
 static int launch(struct child *c,HANDLE extra,int suspended)
 {
     SECURITY_ATTRIBUTES sa={sizeof(sa),NULL,TRUE};STARTUPINFOEXW si;
-    HANDLE child_rx=NULL,child_tx=NULL,list[4]; SIZE_T bytes=0;BOOL ok;DWORD error;
-    wchar_t path[MAX_PATH],command[1024];DWORD path_size;int length,initialized=0,result=0;
+    HANDLE child_rx=NULL,child_tx=NULL,list[5]; SIZE_T bytes=0;BOOL ok;DWORD error;
+    wchar_t path[MAX_PATH],command[1024];DWORD path_size;unsigned list_count;int length,initialized=0,result=0;
     memset(c,0,sizeof(*c));memset(&si,0,sizeof(si));si.StartupInfo.cb=sizeof(si);
     if(!pipe_pair(&c->rx,&child_tx,&sa)||!pipe_pair(&child_rx,&c->tx,&sa)||
        !inherit_off(c->rx)||!inherit_off(c->tx))goto done;
@@ -132,7 +144,13 @@ static int launch(struct child *c,HANDLE extra,int suspended)
     if(!observation("CreateEvent_release",!!c->release,c->release?0:GetLastError(),0,0,0,0))goto done;
     attempt("CreateEvent_excluded_decoy");c->decoy=own(CreateEventW(&sa,TRUE,FALSE,NULL));
     if(!observation("CreateEvent_excluded_decoy",!!c->decoy,c->decoy?0:GetLastError(),0,0,0,0))goto done;
-    list[0]=child_rx;list[1]=child_tx;list[2]=c->release;list[3]=extra;
+    attempt("DuplicateHandle_inherited_reference");
+    ok=DuplicateHandle(GetCurrentProcess(),c->decoy,GetCurrentProcess(),&c->reference,0,TRUE,DUPLICATE_SAME_ACCESS);
+    error=ok?0:GetLastError();if(ok)own(c->reference);else c->reference=NULL;
+    if(!observation("DuplicateHandle_inherited_reference",ok,error,0,0,0,0))goto done;
+    list_count=explicit_handle_list(list,child_rx,child_tx,c->release,c->reference,extra,c->decoy);
+    if(!observation("identity_reference_values",list_count!=0,0,0,0,
+        (uint64_t)(uintptr_t)c->decoy,(uint64_t)(uintptr_t)c->reference))goto done;
     attempt("InitializeProcThreadAttributeList_size");
     ok=InitializeProcThreadAttributeList(NULL,1,0,&bytes);error=ok?0:GetLastError();
     if(!observation("InitializeProcThreadAttributeList_size",!ok&&error==ERROR_INSUFFICIENT_BUFFER&&bytes,
@@ -143,16 +161,16 @@ static int launch(struct child *c,HANDLE extra,int suspended)
     if(!observation("InitializeProcThreadAttributeList",ok,ok?0:GetLastError(),0,bytes,0,0))goto done;
     initialized=1;attempt("UpdateProcThreadAttribute_HANDLE_LIST");
     ok=UpdateProcThreadAttribute(si.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,list,
-        (extra?4:3)*sizeof(HANDLE),NULL,NULL);
-    if(!observation("UpdateProcThreadAttribute_HANDLE_LIST",ok,ok?0:GetLastError(),0,0,extra?4:3,0))goto done;
+        list_count*sizeof(HANDLE),NULL,NULL);
+    if(!observation("UpdateProcThreadAttribute_HANDLE_LIST",ok,ok?0:GetLastError(),0,0,list_count,0))goto done;
     attempt("GetModuleFileNameW");path_size=GetModuleFileNameW(NULL,path,MAX_PATH);
     if(!observation("GetModuleFileNameW",path_size&&path_size<MAX_PATH,
         path_size&&path_size<MAX_PATH?0:GetLastError(),0,path_size,0,0))goto done;
-    length=swprintf(command,sizeof(command)/sizeof(command[0]),L"\"%ls\" --worker %u %lu %lu %llu %llu %llu %llu %llu",
+    length=swprintf(command,sizeof(command)/sizeof(command[0]),L"\"%ls\" --worker %u %lu %lu %llu %llu %llu %llu %llu %llu",
         path,selected,(unsigned long)nonce,(unsigned long)parent_pid,
         (unsigned long long)(uintptr_t)child_rx,(unsigned long long)(uintptr_t)child_tx,
         (unsigned long long)(uintptr_t)c->release,(unsigned long long)(uintptr_t)extra,
-        (unsigned long long)(uintptr_t)c->decoy);
+        (unsigned long long)(uintptr_t)c->decoy,(unsigned long long)(uintptr_t)c->reference);
     if(length<0||(size_t)length>=sizeof(command)/sizeof(command[0]))goto done;
     attempt("CreateProcessW_handle_list");
     ok=CreateProcessW(path,command,NULL,NULL,TRUE,EXTENDED_STARTUPINFO_PRESENT|(suspended?CREATE_SUSPENDED:0),
@@ -195,7 +213,7 @@ static int cleanup_child(struct child *c,DWORD *exit_code)
         if(!waited)unsettled=1;
     }
     close_handle(&c->pi.hThread);close_handle(&c->pi.hProcess);
-    close_handle(&c->rx);close_handle(&c->tx);close_handle(&c->release);close_handle(&c->decoy);
+    close_handle(&c->rx);close_handle(&c->tx);close_handle(&c->release);close_handle(&c->reference);close_handle(&c->decoy);
     return waited;
 }
 static int memory_api(HANDLE process,void *address,const char *prefix,int native,int write,DWORD expected)
@@ -470,46 +488,72 @@ static void inspect_candidate_object(HANDLE candidate,HANDLE event,HANDLE pipe)
  done:
     close_handle(&control);close_handle(&pinned);
 }
-static int known_file_kind(DWORD kind)
-{ return kind==FILE_TYPE_DISK||kind==FILE_TYPE_CHAR||kind==FILE_TYPE_PIPE; }
-static DWORD candidate_file_kind(HANDLE candidate,HANDLE event,HANDLE pipe)
+/* Snapshot before opening the log or making diagnostic/control duplicates.
+ * The inherited reference remains owned and open through the parent's ACK. */
+struct slot_snapshot { compare_objects_fn compare; BOOL same; DWORD error; };
+static struct slot_snapshot snapshot_slot(HANDLE candidate,HANDLE reference)
 {
-    DWORD kind,error;
-    attempt("identity_file_type_event_control");SetLastError(0);kind=GetFileType(event);
-    error=kind==FILE_TYPE_UNKNOWN?GetLastError():0;
-    if(!observation("identity_file_type_event_control",kind==FILE_TYPE_UNKNOWN&&error==ERROR_INVALID_HANDLE,
-        error,0,0,kind,0))return UINT32_MAX;
-    attempt("identity_file_type_pipe_control");SetLastError(0);kind=GetFileType(pipe);
-    error=kind==FILE_TYPE_UNKNOWN?GetLastError():0;
-    if(!observation("identity_file_type_pipe_control",kind==FILE_TYPE_PIPE,error,0,0,kind,0))return UINT32_MAX;
-    attempt("identity_candidate_file_type");SetLastError(0);kind=GetFileType(candidate);
-    error=kind==FILE_TYPE_UNKNOWN?GetLastError():0;
-    trace("identity_candidate_file_type","observation_only",error,0,0,kind,0);
-    /* UNKNOWN and unrecognized/REMOTE-bit values prove nothing. Their
-     * candidate still requires the original capture/comparison path. */
-    return known_file_kind(kind)?kind:FILE_TYPE_UNKNOWN;
+    struct slot_snapshot saved={NULL,FALSE,0};FARPROC symbol;
+    symbol=GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),"CompareObjectHandles");
+    if(!symbol){saved.error=GetLastError();return saved;}
+    _Static_assert(sizeof(saved.compare)==sizeof(symbol),"Windows comparison pointer width");
+    memcpy(&saved.compare,&symbol,sizeof(saved.compare));
+    SetLastError(0);saved.same=saved.compare(candidate,reference);
+    saved.error=saved.same?0:GetLastError();return saved;
+}
+static DWORD validate_slot(struct slot_snapshot saved,HANDLE candidate,HANDLE reference,HANDLE release)
+{
+    HANDLE same=NULL;BOOL api;DWORD error,verdict=0;
+    if(!saved.compare){trace("identity_child_compare_resolve","unsupported",saved.error,0,0,0,0);return 0;}
+    trace("identity_candidate_snapshot","observation_only",saved.error,0,0,
+          (uint64_t)(uintptr_t)candidate,(uint64_t)(uintptr_t)reference);
+    if(!observation("identity_child_reference_values",reference&&reference!=INVALID_HANDLE_VALUE&&
+        candidate&&candidate!=INVALID_HANDLE_VALUE&&candidate!=reference&&reference!=release,
+        0,0,0,(uint64_t)(uintptr_t)candidate,(uint64_t)(uintptr_t)reference))return 0;
+    /* A control duplicate may reuse a previously free candidate slot. Never
+     * re-read that slot: all verdicts use the saved pre-allocation result. */
+    attempt("identity_child_duplicate_same");
+    api=DuplicateHandle(GetCurrentProcess(),reference,GetCurrentProcess(),&same,0,FALSE,DUPLICATE_SAME_ACCESS);
+    error=api?0:GetLastError();if(api)own(same);else same=NULL;
+    if(!observation("identity_child_duplicate_same",api&&same&&same!=INVALID_HANDLE_VALUE&&same!=reference,
+        error,0,0,0,0))goto done;
+    attempt("identity_child_same_control");SetLastError(0);api=saved.compare(reference,same);error=api?0:GetLastError();
+    if(!observation("identity_child_same_control",api,error,0,0,0,0))goto done;
+    attempt("identity_child_different_control");SetLastError(0);api=saved.compare(reference,release);error=api?0:GetLastError();
+    if(!observation("identity_child_different_control",!api&&error==ERROR_NOT_SAME_OBJECT,error,0,0,0,0))goto done;
+    attempt("identity_child_cross_type_control");SetLastError(0);api=saved.compare(reference,GetCurrentProcess());error=api?0:GetLastError();
+    if(!observation("identity_child_cross_type_control",!api&&error==ERROR_NOT_SAME_OBJECT,error,0,0,0,0))goto done;
+    attempt("identity_child_invalid_control");SetLastError(0);api=saved.compare(NULL,reference);error=api?0:GetLastError();
+    if(!observation("identity_child_invalid_control",!api&&error==ERROR_INVALID_HANDLE,error,0,0,0,0))goto done;
+    if(!saved.same&&saved.error==ERROR_NOT_SAME_OBJECT)verdict=1;
+    else if(!saved.same&&saved.error==ERROR_INVALID_HANDLE)verdict=2;
+    observation("identity_child_slot_verdict",verdict!=0,saved.error,0,0,verdict,(uint64_t)(uintptr_t)reference);
+ done:
+    close_handle(&same);return !close_failed?verdict:0;
 }
 static int worker_main(int argc,char **argv)
 {
-    uint64_t numbers[8];unsigned i;HANDLE rx,tx,release,extra;DWORD wait,file_kind;
+    uint64_t numbers[9];unsigned i;HANDLE rx,tx,release,extra,reference;DWORD wait,verdict;
+    struct slot_snapshot saved;
     struct pw_ipc_packet p;int ok=0;
-    if(argc!=10)return 2;
-    for(i=0;i<8;++i)if(!pw_ipc_number(argv[i+2],i<3?UINT32_MAX:UINTPTR_MAX,&numbers[i]))return 2;
+    if(argc!=11)return 2;
+    for(i=0;i<9;++i)if(!pw_ipc_number(argv[i+2],i<3?UINT32_MAX:UINTPTR_MAX,&numbers[i]))return 2;
     selected=(unsigned)numbers[0];nonce=(DWORD)numbers[1];parent_pid=(DWORD)numbers[2];
     if(selected<PW_IPC_LIVE||selected>PW_IPC_PIPE||!nonce||!parent_pid||parent_pid==GetCurrentProcessId())return 2;
     worker=1;epoch=GetTickCount64();
     rx=own((HANDLE)(uintptr_t)numbers[3]);tx=own((HANDLE)(uintptr_t)numbers[4]);
     release=own((HANDLE)(uintptr_t)numbers[5]);extra=own((HANDLE)(uintptr_t)numbers[6]);
+    reference=own((HANDLE)(uintptr_t)numbers[8]);
+    saved=snapshot_slot((HANDLE)(uintptr_t)numbers[7],reference);
     start_log();
+    verdict=validate_slot(saved,(HANDLE)(uintptr_t)numbers[7],reference,release);
+    if(!verdict)goto done;
     inspect_candidate_object((HANDLE)(uintptr_t)numbers[7],release,rx);
-    file_kind=candidate_file_kind((HANDLE)(uintptr_t)numbers[7],release,rx);
-    if(file_kind==UINT32_MAX)goto done;
     p=packet(PW_IPC_HELLO,0);p.address=(uint64_t)(uintptr_t)&private_value;p.value=private_value;
-    p.flags=1u|(file_kind<<8);p.argument=numbers[7];
+    p.flags=verdict;p.argument=numbers[7];
     if(!send_packet(tx,&p))goto done;
-    /* Numeric handles can be reused by the loader/CRT or this log file.
-     * The parent pins any candidate and checks object identity, without the
-     * child signaling or otherwise acting on an unknown local object. */
+    /* Parent captures the continuously held known reference, never the
+     * unknown slot, and verifies it denotes the exact decoy before ACK. */
     if(!receive_packet(rx,&p,parent_pid,0,PW_IPC_COMMAND))goto done;
     if(!observation("handle_list_acknowledged",p.value==1,0,0,sizeof(p),p.value,0))goto done;
     if(selected==PW_IPC_LIVE||selected==PW_IPC_SUSPENDED){
@@ -527,7 +571,7 @@ static int worker_main(int argc,char **argv)
     if(selected!=PW_IPC_PIPE){p=packet(PW_IPC_RESULT,2);p.value=ok?1u:0u;p.address=(uint64_t)(uintptr_t)&private_value;
         p.argument=private_value;ok&=send_packet(tx,&p);}
  done:
-    close_handle(&extra);close_handle(&release);close_handle(&rx);close_handle(&tx);
+    close_handle(&extra);close_handle(&reference);close_handle(&release);close_handle(&rx);close_handle(&tx);
     trace("guest_cleanup",!handles&&!close_failed&&!unsettled?"pass":"uncertain",0,0,0,handles,unsettled);
     ok=ok&&!handles&&!close_failed&&!unsettled&&!log_failed&&!stage_failed;
     trace("final",ok?"pass":"fail",0,0,0,ok?PW_IPC_EXIT:PW_IPC_CHILD_ERROR,0);
@@ -535,9 +579,9 @@ static int worker_main(int argc,char **argv)
     if(log_file!=INVALID_HANDLE_VALUE && !CloseHandle(log_file))ok=0;
     return ok?(int)PW_IPC_EXIT:(int)PW_IPC_CHILD_ERROR;
 }
-static int excluded_object(struct child *c,DWORD file_kind)
+static int excluded_object(struct child *c,DWORD verdict)
 {
-    HANDLE same=NULL,different=NULL,included=NULL,candidate=NULL;compare_objects_fn compare=NULL;
+    HANDLE same=NULL,different=NULL,included=NULL,reference=NULL;compare_objects_fn compare=NULL;
     FARPROC symbol;BOOL api;DWORD error,wait;int ok=0;
     attempt("CompareObjectHandles_resolve");
     symbol=GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),"CompareObjectHandles");
@@ -562,25 +606,20 @@ static int excluded_object(struct child *c,DWORD file_kind)
     if(!observation("identity_capture_included",api&&included&&included!=INVALID_HANDLE_VALUE,error,0,0,0,0))goto done;
     attempt("identity_included_control");api=compare(c->release,included);error=api?0:GetLastError();
     if(!observation("identity_included_control",api,error,0,0,0,0))goto done;
-    attempt("identity_capture_child_handle");
-    api=DuplicateHandle(c->pi.hProcess,c->decoy,GetCurrentProcess(),&candidate,0,FALSE,DUPLICATE_SAME_ACCESS);
-    error=api?0:GetLastError();if(api)own(candidate);else candidate=NULL;
-    if(!api&&error==ERROR_NOT_SUPPORTED&&known_file_kind(file_kind))
-        trace("identity_capture_child_handle","non_event",error,0,0,0,file_kind);
-    else if(!observation("identity_capture_child_handle",(api&&candidate&&candidate!=INVALID_HANDLE_VALUE)||
-        (!api&&error==ERROR_INVALID_HANDLE),error,0,0,api?1:0,file_kind))goto done;
-    /* An invalid candidate is evidence of absence only while the exact
-     * nonce-bound child is still alive and awaiting this acknowledgement. */
+    attempt("identity_capture_reference");
+    api=DuplicateHandle(c->pi.hProcess,c->reference,GetCurrentProcess(),&reference,0,FALSE,DUPLICATE_SAME_ACCESS);
+    error=api?0:GetLastError();if(api)own(reference);else reference=NULL;
+    if(!observation("identity_capture_reference",api&&reference&&reference!=INVALID_HANDLE_VALUE,error,0,0,
+        (uint64_t)(uintptr_t)c->reference,0))goto done;
+    attempt("identity_reference_control");api=compare(c->decoy,reference);error=api?0:GetLastError();
+    if(!observation("identity_reference_control",api,error,0,0,0,0))goto done;
     wait=WaitForSingleObject(c->pi.hProcess,0);
     if(!observation("identity_child_still_live",wait==WAIT_TIMEOUT,wait==WAIT_FAILED?GetLastError():0,0,0,wait,0))goto done;
-    if(candidate){
-        attempt("identity_compare_candidate");api=compare(c->decoy,candidate);error=api?0:GetLastError();
-        ok=observation("handle_list_excluded",!api&&error==ERROR_NOT_SAME_OBJECT,error,0,0,1,file_kind);
-    }else if(error==ERROR_NOT_SUPPORTED&&known_file_kind(file_kind))
-        ok=observation("handle_list_excluded",1,error,0,0,2,file_kind);
-    else ok=observation("handle_list_excluded",1,ERROR_INVALID_HANDLE,0,0,0,file_kind);
+    ok=observation("handle_list_excluded",verdict==1||verdict==2,
+        verdict==1?ERROR_NOT_SAME_OBJECT:verdict==2?ERROR_INVALID_HANDLE:0,
+        0,0,verdict,(uint64_t)(uintptr_t)c->reference);
  done:
-    close_handle(&candidate);close_handle(&included);close_handle(&different);close_handle(&same);
+    close_handle(&reference);close_handle(&included);close_handle(&different);close_handle(&same);
     return ok&&!close_failed;
 }
 static int hello(struct child *c,struct pw_ipc_packet *p)
@@ -589,9 +628,9 @@ static int hello(struct child *c,struct pw_ipc_packet *p)
     DWORD pid,error;int ok;attempt("Windows_child_identity");pid=GetProcessId(c->pi.hProcess);error=pid?0:GetLastError();
     ok=observation("Windows_child_identity",pid==c->pi.dwProcessId&&pid&&pid!=parent_pid,error,0,0,pid,c->pi.dwProcessId);
     if(!ok||!receive_packet(c->rx,p,c->pi.dwProcessId,0,PW_IPC_HELLO))return 0;
-    if(!observation("child_hello",p->value==PW_IPC_A&&p->address&&(p->flags==1u||p->flags==257u||p->flags==513u||p->flags==769u)&&
+    if(!observation("child_hello",p->value==PW_IPC_A&&p->address&&(p->flags==1u||p->flags==2u)&&
         p->argument==(uint64_t)(uintptr_t)c->decoy&&WaitForSingleObject(c->decoy,0)==WAIT_TIMEOUT,
-        0,0,sizeof(*p),p->address,p->flags)||!excluded_object(c,p->flags>>8))return 0;
+        0,0,sizeof(*p),p->address,p->flags)||!excluded_object(c,p->flags))return 0;
     acknowledgement=packet(PW_IPC_COMMAND,0);acknowledgement.value=1;
     return send_packet(c->tx,&acknowledgement);
 }

@@ -29,6 +29,8 @@ static struct {
     unsigned error_resets;int candidate_unsupported;
     DWORD local_pin_error;unsigned object_queries,info_classes,pinned_type_seen,raw_type_seen;
     int missing_query,malformed_type,type_query_failed,private_type_text_leaked;
+    int reference_duplicate_reuses_slot,slot_reused,cross_type_bad,invalid_control_bad,reference_control_bad;
+    unsigned slot_comparisons;int close_control_failed;
 } m;
 DWORD GetLastError(void){return m.error;}
 DWORD GetCurrentProcessId(void){return 100;}
@@ -57,6 +59,21 @@ HANDLE GetCurrentProcess(void){return (HANDLE)(intptr_t)-1;}
 HMODULE GetModuleHandleW(const wchar_t *name){(void)name;return (HMODULE)(uintptr_t)3;}
 static BOOL WINAPI compare_mock(HANDLE first,HANDLE second)
 {
+    if(first==(HANDLE)(uintptr_t)10&&second==(HANDLE)(uintptr_t)13){
+        ++m.slot_comparisons;
+        if(m.candidate_same||m.slot_reused){m.error=0;return TRUE;}
+        m.error=m.candidate_invalid?ERROR_INVALID_HANDLE:m.candidate_unsupported?ERROR_NOT_SUPPORTED:
+            m.candidate_error?ERROR_ACCESS_DENIED:m.compare_unknown_error?0:ERROR_NOT_SAME_OBJECT;
+        return FALSE;
+    }
+    if(!first){assert(second==(HANDLE)(uintptr_t)13);m.error=m.invalid_control_bad?ERROR_NOT_SAME_OBJECT:ERROR_INVALID_HANDLE;return FALSE;}
+    if(first==(HANDLE)(uintptr_t)13){
+        if(second==(HANDLE)(uintptr_t)45||(m.reference_duplicate_reuses_slot&&second==(HANDLE)(uintptr_t)10)){
+            m.error=m.same_control_bad?ERROR_NOT_SAME_OBJECT:0;return !m.same_control_bad;
+        }
+        if(second==GetCurrentProcess()){m.error=m.cross_type_bad?ERROR_NOT_SUPPORTED:ERROR_NOT_SAME_OBJECT;return FALSE;}
+        assert(second==(HANDLE)(uintptr_t)11);m.error=m.different_control_bad?0:ERROR_NOT_SAME_OBJECT;return m.different_control_bad;
+    }
     if(first==(HANDLE)(uintptr_t)11){
         assert(second==(HANDLE)(uintptr_t)43||second==(HANDLE)(uintptr_t)44);m.error=m.included_control_bad?ERROR_NOT_SAME_OBJECT:0;
         return !m.included_control_bad;
@@ -65,8 +82,7 @@ static BOOL WINAPI compare_mock(HANDLE first,HANDLE second)
     if(second==(HANDLE)(uintptr_t)40){m.error=m.same_control_bad?ERROR_NOT_SAME_OBJECT:0;return !m.same_control_bad;}
     if(second==(HANDLE)(uintptr_t)41){m.error=m.different_control_bad?0:ERROR_NOT_SAME_OBJECT;return m.different_control_bad;}
     assert(second==(HANDLE)(uintptr_t)42);
-    m.error=m.candidate_same?0:m.compare_unknown_error?ERROR_ACCESS_DENIED:ERROR_NOT_SAME_OBJECT;
-    return m.candidate_same;
+    m.error=m.reference_control_bad?ERROR_NOT_SAME_OBJECT:0;return !m.reference_control_bad;
 }
 static LONG NTAPI query_object_mock(HANDLE handle,ULONG info_class,void *buffer,ULONG capacity,ULONG *returned)
 {
@@ -106,9 +122,13 @@ FARPROC GetProcAddress(HMODULE module,const char *name)
 }
 BOOL DuplicateHandle(HANDLE source,HANDLE original,HANDLE target,HANDLE *copy,DWORD rights,BOOL inherit,DWORD options)
 {
-    assert((original==(HANDLE)(uintptr_t)10||original==(HANDLE)(uintptr_t)11)&&target==GetCurrentProcess());
+    assert((original==(HANDLE)(uintptr_t)10||original==(HANDLE)(uintptr_t)11||original==(HANDLE)(uintptr_t)13)&&target==GetCurrentProcess());
     assert(!rights&&!inherit&&options==DUPLICATE_SAME_ACCESS);
     if(source==GetCurrentProcess()){
+        if(original==(HANDLE)(uintptr_t)13){
+            if(m.duplicate_same_failed){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_ACCESS_DENIED;return FALSE;}
+            *copy=(HANDLE)(uintptr_t)(m.reference_duplicate_reuses_slot?10:45);m.slot_reused=m.reference_duplicate_reuses_slot;return TRUE;
+        }
         if(original==(HANDLE)(uintptr_t)11){*copy=(HANDLE)(uintptr_t)44;return TRUE;}
         if(m.local_pin_error){*copy=(HANDLE)(uintptr_t)99;m.error=m.local_pin_error;return FALSE;}
         if(m.duplicate_same_failed){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_ACCESS_DENIED;return FALSE;}
@@ -119,7 +139,7 @@ BOOL DuplicateHandle(HANDLE source,HANDLE original,HANDLE target,HANDLE *copy,DW
         if(m.included_invalid){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_INVALID_HANDLE;return FALSE;}
         *copy=(HANDLE)(uintptr_t)43;return TRUE;
     }
-    ++m.foreign_captures;
+    assert(original==(HANDLE)(uintptr_t)13);++m.foreign_captures;
     if(m.candidate_unsupported){*copy=(HANDLE)(uintptr_t)99;m.error=ERROR_NOT_SUPPORTED;return FALSE;}
     if(m.candidate_invalid||m.candidate_error){
         *copy=(HANDLE)(uintptr_t)99;m.error=m.candidate_error?ERROR_ACCESS_DENIED:ERROR_INVALID_HANDLE;return FALSE;
@@ -131,8 +151,8 @@ HANDLE CreateEventW(SECURITY_ATTRIBUTES *sa,BOOL manual,BOOL initial,const wchar
 BOOL CloseHandle(HANDLE h)
 {
     /* Only successfully acquired parent-local copies may be closed. */
-    assert(h==(HANDLE)(uintptr_t)40||h==(HANDLE)(uintptr_t)41||h==(HANDLE)(uintptr_t)42||h==(HANDLE)(uintptr_t)43||h==(HANDLE)(uintptr_t)44);
-    ++m.closes;return TRUE;
+    assert(h==(HANDLE)(uintptr_t)40||h==(HANDLE)(uintptr_t)41||h==(HANDLE)(uintptr_t)42||h==(HANDLE)(uintptr_t)43||h==(HANDLE)(uintptr_t)44||h==(HANDLE)(uintptr_t)45||(m.reference_duplicate_reuses_slot&&h==(HANDLE)(uintptr_t)10));
+    ++m.closes;if(m.close_control_failed){m.error=ERROR_ACCESS_DENIED;return FALSE;}return TRUE;
 }
 DWORD WaitForSingleObject(HANDLE h,DWORD wait)
 {
@@ -228,43 +248,62 @@ int main(void)
     {
         struct child child;memset(&child,0,sizeof(child));
         child.decoy=(HANDLE)(uintptr_t)10;child.release=(HANDLE)(uintptr_t)11;child.pi.hProcess=(HANDLE)(uintptr_t)20;
-        reset();CHECK(excluded_object(&child,0));CHECK(!stage_failed&&!handles&&m.closes==4&&m.foreign_captures==1);
-        /* Original false positive: a valid recycled numeric handle denotes
-         * a different object. It is now correctly accepted, never signaled. */
-        reset();m.candidate_invalid=1;CHECK(excluded_object(&child,0));CHECK(!stage_failed&&!handles&&m.closes==3);
-        reset();m.candidate_same=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==4);
-        reset();m.same_control_bad=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures);
-        reset();m.different_control_bad=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures);
-        reset();m.candidate_error=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==3);
-        reset();m.compare_unknown_error=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==4);
-        reset();m.child_exited=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures);
-        reset();m.child_exits_after_capture=1;m.candidate_invalid=1;
-        CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==3);
-        reset();m.included_invalid=1;m.candidate_invalid=1;
-        CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==2);
-        reset();m.included_control_bad=1;
-        CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==3);
-        reset();m.missing_compare=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.closes);
-        reset();m.duplicate_same_failed=1;CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&!m.closes);
-        for(DWORD kind=FILE_TYPE_DISK;kind<=FILE_TYPE_PIPE;++kind){
-            reset();m.candidate_type=kind;m.error=123;
-            CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==kind);
-            CHECK(m.error_resets==3&&!stage_failed);
-            m.candidate_unsupported=1;CHECK(excluded_object(&child,kind));CHECK(!stage_failed&&!handles&&m.closes==3);
+        child.reference=(HANDLE)(uintptr_t)13;
+        {
+            HANDLE list[5],rx=(HANDLE)(uintptr_t)14,tx=(HANDLE)(uintptr_t)15,extra=(HANDLE)(uintptr_t)16;
+            CHECK(explicit_handle_list(list,rx,tx,child.release,child.reference,NULL,child.decoy)==4);
+            CHECK(list[0]==rx&&list[1]==tx&&list[2]==child.release&&list[3]==child.reference&&!list[4]);
+            CHECK(explicit_handle_list(list,rx,tx,child.release,child.reference,extra,child.decoy)==5&&list[4]==extra);
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,child.decoy,extra,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,child.reference,child.reference,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,NULL,child.release,child.reference,extra,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,INVALID_HANDLE_VALUE,extra,child.decoy));
+            CHECK(!explicit_handle_list(list,rx,tx,child.release,child.reference,extra,NULL));
         }
-        reset();m.candidate_unsupported=1;CHECK(!excluded_object(&child,FILE_TYPE_UNKNOWN));CHECK(stage_failed&&!handles);
-        reset();m.candidate_unsupported=1;CHECK(!excluded_object(&child,0x8003u));CHECK(stage_failed&&!handles);
-        reset();m.candidate_same=1;CHECK(!excluded_object(&child,FILE_TYPE_CHAR));CHECK(stage_failed&&!handles);
-        reset();m.event_type=FILE_TYPE_CHAR;
-        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==UINT32_MAX);CHECK(stage_failed);
-        reset();m.event_type_error=ERROR_NOT_SUPPORTED;
-        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==UINT32_MAX);CHECK(stage_failed);
-        reset();m.pipe_type=FILE_TYPE_CHAR;
-        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==UINT32_MAX);CHECK(stage_failed);
-        reset();m.candidate_type=0x8003u;
-        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==FILE_TYPE_UNKNOWN);CHECK(!stage_failed);
-        reset();m.candidate_type_error=ERROR_ACCESS_DENIED;
-        CHECK(candidate_file_kind(child.decoy,child.release,(HANDLE)(uintptr_t)12)==FILE_TYPE_UNKNOWN);CHECK(!stage_failed);
+        reset();CHECK(excluded_object(&child,1));CHECK(!stage_failed&&!handles&&m.closes==4&&m.foreign_captures==1);
+        reset();CHECK(excluded_object(&child,2));CHECK(!stage_failed&&!handles&&m.closes==4);
+        reset();CHECK(!excluded_object(&child,0));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();CHECK(!excluded_object(&child,257));CHECK(stage_failed&&!handles);
+        reset();m.same_control_bad=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.different_control_bad=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.candidate_error=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.candidate_invalid=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.candidate_unsupported=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==3);
+        reset();m.reference_control_bad=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();m.child_exited=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures);
+        reset();m.child_exits_after_capture=1;
+        CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&m.closes==4);
+        reset();m.included_invalid=1;
+        CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==2);
+        reset();m.included_control_bad=1;
+        CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.foreign_captures&&m.closes==3);
+        reset();m.missing_compare=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.closes);
+        reset();m.duplicate_same_failed=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles&&!m.closes);
+        {
+            struct slot_snapshot snapshot;
+#define SNAPSHOT() snapshot_slot(child.decoy,child.reference)
+#define VALIDATE() validate_slot(snapshot,child.decoy,child.reference,child.release)
+            reset();snapshot=SNAPSHOT();CHECK(VALIDATE()==1);CHECK(!stage_failed&&!handles&&m.closes==1&&m.slot_comparisons==1);
+            reset();m.candidate_invalid=1;snapshot=SNAPSHOT();CHECK(VALIDATE()==2);CHECK(!stage_failed&&!handles&&m.closes==1);
+            reset();m.candidate_same=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.candidate_unsupported=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.candidate_error=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.compare_unknown_error=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.missing_compare=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles&&!m.closes);
+            reset();m.same_control_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.different_control_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.cross_type_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.invalid_control_bad=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles);
+            reset();m.duplicate_same_failed=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&!handles&&!m.closes);
+            /* The control duplicate occupies the formerly free slot, but the
+             * stored pre-allocation comparison remains absence, not a leak. */
+            reset();m.candidate_invalid=1;m.reference_duplicate_reuses_slot=1;snapshot=SNAPSHOT();
+            CHECK(VALIDATE()==2);CHECK(m.slot_reused&&m.slot_comparisons==1&&!stage_failed&&!handles&&m.closes==1);
+            reset();m.close_control_failed=1;snapshot=SNAPSHOT();CHECK(!VALIDATE());CHECK(stage_failed&&close_failed&&handles==1);
+            reset();snapshot=SNAPSHOT();CHECK(!validate_slot(snapshot,child.decoy,child.decoy,child.release));CHECK(stage_failed&&!handles&&!m.closes);
+#undef VALIDATE
+#undef SNAPSHOT
+        }
         reset();inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
         CHECK(m.object_queries==3&&m.info_classes==(1u<<2)&&m.pinned_type_seen&&!m.raw_type_seen);
         CHECK(!stage_failed&&!handles&&m.closes==2);
@@ -272,7 +311,7 @@ int main(void)
         inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
         CHECK(m.raw_type_seen&&!m.pinned_type_seen&&m.object_queries==3);
         CHECK(!stage_failed&&!handles&&m.closes==1);
-        m.candidate_unsupported=1;CHECK(!excluded_object(&child,FILE_TYPE_UNKNOWN));CHECK(stage_failed&&!handles);
+        m.candidate_unsupported=1;CHECK(!excluded_object(&child,1));CHECK(stage_failed&&!handles);
         for(int malformed=1;malformed<=8;++malformed){
             reset();m.malformed_type=malformed;inspect_candidate_object(child.decoy,child.release,(HANDLE)(uintptr_t)12);
             CHECK(!m.pinned_type_seen&&!m.raw_type_seen&&!m.private_type_text_leaked);

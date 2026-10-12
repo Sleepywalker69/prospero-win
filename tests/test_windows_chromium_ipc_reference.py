@@ -37,16 +37,17 @@ def write(path, rows):
 
 def paired_rows(case):
     parent = good_rows(case)
-    parent.insert(0, row('identity_capture_child_handle', case=case, a=1))
     for item in parent:
         if item['stage'] == 'CreateProcessW_handle_list': item['a'] = 101
         if item['stage'] == 'final': item['a'] = check.CHILD_EXIT
         if item['stage'] == 'child_hello': item['b'] = 1
         if item['stage'] == 'identity_different_control': item['error'] = 1656
         if item['stage'] in ('identity_child_live', 'identity_child_still_live'): item['a'] = 258
-        if item['stage'] == 'identity_capture_child_handle': item['a'] = 1
-        if item['stage'] == 'handle_list_excluded': item['a'] = 1;item['error'] = 1656
-    child_stages = {'handle_list_acknowledged', 'identity_file_type_event_control', 'identity_file_type_pipe_control'}
+        if item['stage'] == 'identity_reference_values': item['a'] = 10;item['b'] = 13
+        if item['stage'] == 'identity_capture_reference': item['a'] = 13
+        if item['stage'] == 'UpdateProcThreadAttribute_HANDLE_LIST': item['a'] = 5 if case in ('section-readonly', 'mojo-pipe') else 4
+        if item['stage'] == 'handle_list_excluded': item['a'] = 1;item['error'] = 1656;item['b'] = 13
+    child_stages = {'handle_list_acknowledged'}
     if case in ('live-memory', 'suspended-memory'):
         child_stages |= {'child_actual_private_value', 'WaitForSingleObject_release'}
     elif case.startswith('section-'):
@@ -57,9 +58,16 @@ def paired_rows(case):
         child_stages |= {'CreateIoCompletionPort', 'GetQueuedCompletionStatus', 'iocp_peer_record'}
     child = [row(stage, case=case, role='child', pid=101) for stage in sorted(child_stages)]
     next(r for r in child if r['stage'] == 'handle_list_acknowledged')['a'] = 1
-    next(r for r in child if r['stage'] == 'identity_file_type_event_control')['error'] = 6
-    next(r for r in child if r['stage'] == 'identity_file_type_pipe_control')['a'] = 3
-    child.insert(0, row('identity_candidate_file_type', 'observation_only', case=case, role='child', pid=101, error=6))
+    evidence = [('identity_candidate_snapshot', 'observation_only', 1656, 10, 13),
+                ('identity_child_reference_values', 'pass', 0, 10, 13),
+                ('identity_child_duplicate_same', 'pass', 0, 0, 0),
+                ('identity_child_same_control', 'pass', 0, 0, 0),
+                ('identity_child_different_control', 'pass', 1656, 0, 0),
+                ('identity_child_cross_type_control', 'pass', 1656, 0, 0),
+                ('identity_child_invalid_control', 'pass', 6, 0, 0),
+                ('identity_child_slot_verdict', 'pass', 1656, 1, 13)]
+    child[0:0] = [row(stage, result, case=case, role='child', pid=101, error=error, a=a, b=b)
+                  for stage, result, error, a, b in evidence]
     child += [row('guest_cleanup', case=case, role='child', pid=101),
               row('final', case=case, role='child', pid=101, a=check.CHILD_EXIT)]
     if case.startswith('section-'):
@@ -196,64 +204,86 @@ class ReferenceTests(unittest.TestCase):
                                 ('identity_different_control', 'error', 0),
                                 ('identity_capture_included', 'error', 6), ('identity_included_control', 'error', 1656),
                                 ('identity_child_live', 'a', 0), ('identity_child_still_live', 'a', 0),
-                                ('identity_capture_child_handle', 'error', 5),
+                                ('identity_capture_reference', 'error', 5),
+                                ('identity_reference_control', 'error', 1656),
+                                ('identity_reference_values', 'b', 10),
+                                ('UpdateProcThreadAttribute_HANDLE_LIST', 'a', 3),
                                 ('handle_list_excluded', 'error', 0)):
             rows = [r.copy() for r in parent];next(r for r in rows if r['stage'] == stage)[key] = bad
             write(self.path, rows)
             with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
-        # A genuinely absent child handle also passes, with both source-child
-        # liveness observations and the parent's acknowledged conclusion.
-        for stage in ('identity_capture_child_handle', 'handle_list_excluded'):
-            item = next(r for r in parent if r['stage'] == stage);item['error'] = 6;item['a'] = 0
-        write(self.path, parent)
+        # A genuinely absent slot also passes after the same exact-reference controls.
+        next(r for r in parent if r['stage'] == 'handle_list_excluded').update(error=6, a=2)
+        next(r for r in parent if r['stage'] == 'child_hello')['b'] = 2
+        next(r for r in child if r['stage'] == 'identity_candidate_snapshot')['error'] = 6
+        next(r for r in child if r['stage'] == 'identity_child_slot_verdict').update(error=6, a=2)
+        write(self.path, parent);write(child_path, child)
         self.assertEqual(check.verify(self.directory, case, 64, 0)['windows_reference'], 'pass')
         next(r for r in child if r['stage'] == 'handle_list_acknowledged')['a'] = 0
         write(child_path, child)
         with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
 
-    def test_nonduplicable_file_kind_requires_independent_calibration(self):
+    def test_slot_witness_requires_every_control_and_exact_binding(self):
         case = 'live-memory';child_path = self.directory / 'ipc-10-101.log'
-        for kind in (1, 2, 3):
+        mutations = [('identity_candidate_snapshot', 'error', 50),
+                     ('identity_candidate_snapshot', 'result', 'pass'),
+                     ('identity_candidate_snapshot', 'a', 99),
+                     ('identity_child_reference_values', 'b', 99),
+                     ('identity_child_same_control', 'error', 1656),
+                     ('identity_child_different_control', 'error', 0),
+                     ('identity_child_cross_type_control', 'error', 50),
+                     ('identity_child_invalid_control', 'error', 1656),
+                     ('identity_child_slot_verdict', 'a', 2),
+                     ('identity_child_slot_verdict', 'b', 99)]
+        for stage, field, bad in mutations:
             parent, child = paired_rows(case)
-            next(r for r in parent if r['stage'] == 'child_hello')['b'] = 1 | (kind << 8)
-            candidate = next(r for r in child if r['stage'] == 'identity_candidate_file_type')
-            candidate['a'] = kind;candidate['error'] = 0
-            capture = next(r for r in parent if r['stage'] == 'identity_capture_child_handle')
-            capture.update(result='non_event', error=50, a=0, b=kind)
-            excluded = next(r for r in parent if r['stage'] == 'handle_list_excluded')
-            excluded.update(error=50, a=2, b=kind)
+            next(r for r in child if r['stage'] == stage)[field] = bad
             write(self.path, parent);write(child_path, child)
-            self.assertEqual(check.verify(self.directory, case, 64, 0)['windows_reference'], 'pass')
-            for rows, stage, field, bad in ((child, 'identity_candidate_file_type', 'a', 0),
-                    (child, 'identity_candidate_file_type', 'a', 0x8003),
-                    (child, 'identity_candidate_file_type', 'error', 5),
-                    (child, 'identity_file_type_event_control', 'error', 50),
-                    (child, 'identity_file_type_pipe_control', 'a', 2),
-                    (parent, 'child_hello', 'b', 1),
-                    (parent, 'identity_capture_child_handle', 'error', 5)):
-                item = next(r for r in rows if r['stage'] == stage);saved = item[field];item[field] = bad
-                write(self.path, parent);write(child_path, child)
+            with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+        for stage in ('identity_candidate_snapshot', 'identity_child_duplicate_same', 'identity_child_same_control',
+                      'identity_child_different_control', 'identity_child_cross_type_control', 'identity_child_invalid_control',
+                      'identity_child_slot_verdict'):
+            parent, child = paired_rows(case)
+            for altered in ([r for r in child if r['stage'] != stage], child[:-1] +
+                            [next(r for r in child if r['stage'] == stage).copy()] + child[-1:]):
+                write(self.path, parent);write(child_path, altered)
                 with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
-                item[field] = saved
 
-    def test_object_type_diagnostics_cannot_authorize_unsupported_capture(self):
+    def test_snapshot_must_precede_control_allocation(self):
         case = 'live-memory';parent, child = paired_rows(case)
-        child.insert(0, row('identity_candidate_unpinned_racy_ALPC_Port', 'observation_only',
-                           case=case, role='child', pid=101, a=3))
-        child.insert(0, row('identity_diagnostic_event_control', 'observation_only',
-                           case=case, role='child', pid=101, a=1, b=1))
-        child.insert(0, row('identity_diagnostic_pipe_control', 'observation_only',
-                           case=case, role='child', pid=101, a=1, b=2))
-        capture = next(r for r in parent if r['stage'] == 'identity_capture_child_handle')
-        capture.update(result='non_event', error=50, a=0, b=0)
-        next(r for r in parent if r['stage'] == 'handle_list_excluded').update(error=50, a=2, b=0)
+        snapshot = child.pop(0);child.insert(4, snapshot)
         write(self.path, parent);write(self.directory / 'ipc-10-101.log', child)
         with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+
+    def test_known_reference_cannot_be_closed_before_identity_acknowledgement(self):
+        case = 'live-memory'
+        for role, handle in (('child', 13), ('parent', 10), ('parent', 13)):
+            parent, child = paired_rows(case)
+            rows = child if role == 'child' else parent
+            rows.insert(0, row('CloseHandle', case=case, role=role, pid=101 if role == 'child' else 100, a=handle))
+            write(self.path, parent);write(self.directory / 'ipc-10-101.log', child)
+            with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+
+    def test_type_observations_and_old_file_kind_flags_cannot_authorize_comparison(self):
+        case = 'live-memory'
+        for error, flag in ((50, 1), (50, 257), (0, 1), (5, 2)):
+            parent, child = paired_rows(case)
+            child.insert(0, row('identity_candidate_unpinned_racy_EtwRegistration', 'observation_only',
+                               case=case, role='child', pid=101, a=19))
+            next(r for r in child if r['stage'] == 'identity_candidate_snapshot')['error'] = error
+            next(r for r in child if r['stage'] == 'identity_child_slot_verdict').update(error=error, a=flag)
+            next(r for r in parent if r['stage'] == 'child_hello')['b'] = flag
+            next(r for r in parent if r['stage'] == 'handle_list_excluded').update(error=error, a=flag)
+            write(self.path, parent);write(self.directory / 'ipc-10-101.log', child)
+            with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
 
     def test_source_safety_and_independent_identity(self):
         source = (ROOT / 'tests/fixtures/windows_chromium_ipc.c').read_text()
         for forbidden in ('TerminateProcess(', 'INFINITE', '--no-sandbox', '--single-process', 'CreateRemoteThread(', 'AdjustTokenPrivileges('):
             self.assertNotIn(forbidden, source)
+        self.assertNotIn('known_file_kind', source)
+        self.assertNotIn('identity_capture_child_handle', source)
+        self.assertLess(source.index('saved=snapshot_slot('), source.index('start_log();', source.index('static int worker_main')))
         self.assertIn('PIPE_REJECT_REMOTE_CLIENTS', source)
         self.assertIn('static struct io_slot slots[4]', source)
         self.assertIn('overlapped==&slot->ov && key==IO_KEY', source)
