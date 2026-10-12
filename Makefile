@@ -214,7 +214,8 @@ $(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_
 $(BUILD)/test_wine_child_data $(BUILD)/test_wine_child_data_owner $(BUILD)/test_wine_child_data_flow: native/pw_lapy_client.h
 $(BUILD)/test_pw_wine_child_main $(BUILD)/test_bootstrap_diagnostic_flow: native/pw_wine_child_data.h
 # Integrated pre-Wine failures use the real main/data/wire with OS-only mocks.
-$(eval $(call test_rule,test_wine_child_progress_failure,tests/test_wine_child_progress_failure.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_DATA_TEST_FLAGS) -Itests/data_child_fixture))
+PW_WINE_PROGRESS_TEST_FLAGS := $(PW_WINE_DATA_TEST_FLAGS) -Itests/data_child_fixture
+$(eval $(call test_rule,test_wine_child_progress_failure,tests/test_wine_child_progress_failure.c native/pw_wine_child_bootstrap.c native/pw_native_child_protocol.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,$(PW_WINE_PROGRESS_TEST_FLAGS)))
 $(BUILD)/test_wine_child_progress_failure: native/pw_wine_child_main.c native/pw_wine_child_data.c native/pw_wine_child_wire.c native/pw_wine_child_data.h native/pw_wine_child_wire.h native/pw_wine_child_bootstrap.h native/pw_native_child_protocol.h native/pw_lapy_client.h native/lapy_elevation_protocol.h wine/ps5/pw_wine_threads.h wine/ps5/pw_wine_creation.h wine/ps5/pw_wine_fixture_provider.h wine/ps5/pw_wine_fixture_socket.h wine/ps5/pw_wine_prx.h src/pw_wine_start.h tests/data_child_fixture/wine-child-build.h tests/wine_child_fixture/wine-child-build.h
 $(eval $(call test_rule,test_pw_wine_child_wire,tests/test_pw_wine_child_wire.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
 $(eval $(call test_rule,test_pw_wine_child_bootstrap,tests/test_pw_wine_child_bootstrap.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c native/pw_native_child_protocol.c,$(PW_WINE_CHILD_TEST_FLAGS)))
