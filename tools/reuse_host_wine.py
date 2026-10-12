@@ -366,7 +366,7 @@ def main():
     except Exception as error:
         # Reuse is optional. Malformed or unavailable evidence never weakens the
         # required build; the ordinary full host path remains the only fallback.
-        if not had_install and install.exists() and not install.is_symlink():
+        if not had_install and install.is_dir() and not install.is_symlink():
             shutil.rmtree(install)
         result = {'schema': 'pw-verified-host-reuse/1', 'reused': False,
                   'reason': type(error).__name__ + ': ' + str(error), 'fallback': 'unchanged full host build'}
