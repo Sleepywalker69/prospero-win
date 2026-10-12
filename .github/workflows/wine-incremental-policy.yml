@@ -31,9 +31,21 @@ jobs:
           python-version: "3.12"
       - name: Install workflow parser
         run: python3 -m pip install pyyaml==6.0.1
+      - name: Read pinned Wine dependency-generator contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wine-mirror/wine
+          ref: 490f6d5dcbb2a5047345b8af88d114bbcaad69a8
+          path: .deps/policy-wine
+          persist-credentials: false
+          sparse-checkout: |
+            tools/makedep.c
+            configure.ac
+          sparse-checkout-cone-mode: false
       - name: Test existing workflow and mocked host reuse contracts
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          PROSPERO_WINE_SOURCE: ${{ github.workspace }}/.deps/policy-wine
         run: |
           python3 tests/test_wine_build_performance.py
           python3 tests/test_reuse_host_wine.py
@@ -46,15 +58,6 @@ jobs:
             WineChildIntegration.test_fixture_provenance_preflight_runs_before_first_consumption \
             WineChildIntegration.test_workflow_job_environment_contexts \
             WineChildIntegration.test_runner_paths_execute_before_consumers
-      - name: Read pinned Wine dependency-generator contract
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: wine-mirror/wine
-          ref: 490f6d5dcbb2a5047345b8af88d114bbcaad69a8
-          path: .deps/policy-wine
-          persist-credentials: false
-          sparse-checkout: tools/makedep.c
-          sparse-checkout-cone-mode: false
       - name: Test policy and compile the small owned DAG
         env:
           PROSPERO_WINE_SOURCE: ${{ github.workspace }}/.deps/policy-wine
