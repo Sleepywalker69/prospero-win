@@ -28,6 +28,8 @@ def digest(path):
 
 def inventory(root):
     root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("source root must be a real directory")
     result = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
@@ -47,23 +49,29 @@ def inventory(root):
 def validate(value):
     if not isinstance(value, dict) or set(value) != {"schema", "context", "files"}:
         raise ValueError("source manifest shape differs")
-    if value["schema"] != SCHEMA or set(value["context"]) != CONTEXT:
+    if value["schema"] != SCHEMA or not isinstance(value["context"], dict) or set(value["context"]) != CONTEXT:
         raise ValueError("source manifest context differs")
     context = value["context"]
     for name in ("toolchain_partition", "configuration"):
-        if not re.fullmatch("[0-9a-f]{64}", context[name]):
+        if not isinstance(context[name], str) or not re.fullmatch("[0-9a-f]{64}", context[name]):
             raise ValueError("missing exact context digest")
-    if not context["recipes"] or any(not re.fullmatch("[0-9a-f]{64}", v)
-                                     for v in context["recipes"].values()):
+    if (not isinstance(context["recipes"], dict) or set(context["recipes"]) != {"builder", "stager"} or
+            any(not isinstance(v, str) or not re.fullmatch("[0-9a-f]{64}", v)
+                for v in context["recipes"].values())):
         raise ValueError("missing build/staging recipe identity")
     for name in ("source_path", "build_path"):
-        if not Path(context[name]).is_absolute():
+        if (not isinstance(context[name], str) or not Path(context[name]).is_absolute() or
+                str(Path(context[name])) != context[name] or ".." in Path(context[name]).parts):
             raise ValueError("build paths must be exact absolute paths")
+    if not isinstance(value["files"], dict):
+        raise ValueError("source files must be an object")
     for name, record in value["files"].items():
+        if not isinstance(name, str) or not isinstance(record, dict):
+            raise ValueError("source records must be named objects")
         p = Path(name)
         if not name or p.is_absolute() or any(x in ("", ".", "..", ".git") for x in name.split("/")):
             raise ValueError("unsafe source path")
-        if set(record) != {"sha256", "mode", "mtime_ns"} or not re.fullmatch("[0-9a-f]{64}", record["sha256"]):
+        if set(record) != {"sha256", "mode", "mtime_ns"} or not isinstance(record["sha256"], str) or not re.fullmatch("[0-9a-f]{64}", record["sha256"]):
             raise ValueError("invalid source record")
         if type(record["mode"]) is not int or record["mode"] not in (0o644, 0o755):
             raise ValueError("unsupported source mode")
@@ -106,6 +114,14 @@ def prepare_staged_timestamps(previous, current, staged, build_barrier_ns, *, no
         return {"eligible": False, "reason": "clock cannot order new source after donor objects", "changed": plan["changed"]}
     if any(r["mtime_ns"] > build_barrier_ns for r in previous["files"].values()):
         raise ValueError("donor source timestamp exceeds verified checkpoint barrier")
+    staged = Path(staged)
+    if staged.is_symlink() or not staged.is_dir():
+        raise ValueError("staged root must be a real directory")
+    for name in ("source_path", "build_path"):
+        live = Path(current["context"][name]).resolve()
+        fresh = staged.resolve()
+        if fresh == live or fresh.is_relative_to(live) or live.is_relative_to(fresh):
+            raise ValueError("staged tree must be distinct from live source/build trees")
     actual = inventory(staged)
     if set(actual) != set(current["files"]) or any(
         (actual[p]["sha256"], actual[p]["mode"]) !=

@@ -33,7 +33,8 @@ class Policy(unittest.TestCase):
         self.source = self.root/"source"; self.source.mkdir()
         for p in ["server/process.c", "server/process.h", "include/global.h",
                   "tools/makedep.c", "tools/widl/parser.c", "tools/winebuild/main.c",
-                  "configure", "include/config.h.in", "server/Makefile.in"]:
+                  "configure", "include/config.h.in", "server/Makefile.in",
+                  "libs/ffmpeg/config.h", "libs/jpeg/jconfig.h", "libs/vkd3d/config.h"]:
             target = self.source/p; target.parent.mkdir(parents=True, exist_ok=True); target.write_text("old\n")
         self.ctx = context(self.source, self.root/"build")
         self.old = manifest(self.source, self.ctx)
@@ -50,9 +51,34 @@ class Policy(unittest.TestCase):
             self.assertFalse(policy.classify(self.old, changed)["eligible"])
         for key in self.ctx:
             changed = copy.deepcopy(self.old)
-            changed["context"][key] = {"builder": "f"*64} if key == "recipes" else (
+            changed["context"][key] = {"builder": "f"*64, "stager": "d"*64} if key == "recipes" else (
                 "/different/path" if key.endswith("_path") else "f"*64)
             self.assertFalse(policy.classify(self.old, changed)["eligible"], key)
+
+    def test_modes_manifest_types_and_staged_roots(self):
+        changed = copy.deepcopy(self.old)
+        changed["files"]["server/process.c"]["mode"] = 0o755
+        self.assertFalse(policy.classify(self.old, changed)["eligible"])
+        for key in ("context", "files"):
+            malformed = copy.deepcopy(self.old); malformed[key] = None
+            with self.assertRaises(ValueError): policy.validate(malformed)
+        malformed = copy.deepcopy(self.old); malformed["context"]["recipes"] = {"other":"a"*64}
+        with self.assertRaises(ValueError): policy.validate(malformed)
+        malformed = copy.deepcopy(self.old); malformed["context"]["source_path"] += "/../source"
+        with self.assertRaises(ValueError): policy.validate(malformed)
+        staged = self.root/"staged"; shutil.copytree(self.source, staged)
+        current = manifest(staged, self.ctx)
+        barrier = max(r["mtime_ns"] for r in self.old["files"].values())
+        link = self.root/"root-link"; link.symlink_to(staged, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "real directory"):
+            policy.inventory(link)
+        with self.assertRaisesRegex(ValueError, "real directory"):
+            policy.prepare_staged_timestamps(self.old, current, link, barrier, now_ns=barrier+1)
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            policy.prepare_staged_timestamps(self.old, self.old, self.source, barrier, now_ns=barrier+1)
+        (staged/"directory-link").symlink_to(self.source/"server", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "regular"):
+            policy.inventory(staged)
 
     def test_reconcile_exact_bytes_modes_clock_and_membership(self):
         staged = self.root/"staged"; shutil.copytree(self.source, staged)
