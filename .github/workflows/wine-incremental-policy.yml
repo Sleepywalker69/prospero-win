@@ -64,6 +64,16 @@ jobs:
           PW_INCREMENTAL_REPORT: ${{ runner.temp }}/synthetic-incremental.json
           PW_ADMISSION_REPORT: ${{ runner.temp }}/mock-host-admission.json
         run: python3 tests/test_wine_incremental_source.py
+      - name: Repeat DAG under the exact outer sanitizer Make overrides
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PROSPERO_WINE_SOURCE: ${{ github.workspace }}/.deps/policy-wine
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          printf 'all:\n\tpython3 tests/test_wine_incremental_source.py\n' > "$RUNNER_TEMP/incremental-harness.mk"
+          make -f "$RUNNER_TEMP/incremental-harness.mk" BUILD=build/sanitize CC=clang \
+            CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Werror -fno-omit-frame-pointer -fsanitize=address,undefined'
       - name: Retain synthetic counts and mocked early receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

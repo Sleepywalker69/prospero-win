@@ -160,11 +160,17 @@ class RealDag(unittest.TestCase):
                 (source/"configure").write_text("original configure input\n")
                 build = root/"build"; build.mkdir()
                 ctx = context(source, build)
-                flags = "-O2 -fPIC"
+                compiler = os.environ.get("CC", "cc")
+                inherited_flags = os.environ.get("CFLAGS", "")
+                flags = inherited_flags + " -O2 -fPIC"
+                # Nested make must not inherit the outer aggregate's command-line
+                # overrides/jobserver. Compiler/flags are carried explicitly.
+                make_env = {k:v for k,v in os.environ.items()
+                            if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS")}
                 def write_make(directory):
                     names = sorted(p.stem for p in (source/"server").glob("*.c"))
                     objects = " ".join(n+".o" for n in names)
-                    lines = [".DEFAULT_GOAL := all", "CC := cc", "CFLAGS := "+flags,
+                    lines = [".DEFAULT_GOAL := all", "CC := "+compiler, "CFLAGS := "+flags,
                              "SRC := "+str(source/"server"), "OBJECTS := "+objects,
                              ".PHONY: all depend", "all: fixture.so",
                              "fixture.so: $(OBJECTS)", "\t@echo LINK",
@@ -178,8 +184,8 @@ class RealDag(unittest.TestCase):
                     (directory/"Makefile").write_text("\n".join(lines)+"\n")
                 def make(directory):
                     started = time.monotonic()
-                    subprocess.run(["make","-s","depend"], cwd=directory, check=True, capture_output=True)
-                    run = subprocess.run(["make","-s","-j2"], cwd=directory, check=True, text=True, capture_output=True)
+                    subprocess.run(["make","-s","depend"], cwd=directory, env=make_env, check=True, capture_output=True)
+                    run = subprocess.run(["make","-s","-j2"], cwd=directory, env=make_env, check=True, text=True, capture_output=True)
                     return run.stdout.count("COMPILE "), run.stdout.count("LINK"), time.monotonic()-started
                 write_make(build); initial = make(build)
                 self.assertEqual(initial[0], 3)
@@ -192,7 +198,7 @@ class RealDag(unittest.TestCase):
                 elif scenario == "renamed-source": (staged/"server/file.c").rename(staged/"server/renamed_file.c")
                 elif scenario == "configuration": (staged/"configure").write_text("new configure input\n")
                 elif scenario == "toolchain": ctx["toolchain_partition"] = "e"*64
-                elif scenario == "flags": ctx["configuration"] = "e"*64; flags = "-O0 -fPIC"
+                elif scenario == "flags": ctx["configuration"] = "e"*64; flags = inherited_flags + " -O0 -fPIC"
                 elif scenario == "native-only": (root/"native-only.c").write_text("outside Wine source cohort\n")
                 current = manifest(staged, ctx)
                 started = time.monotonic()
@@ -209,12 +215,20 @@ class RealDag(unittest.TestCase):
                 self.assertEqual(actual[1], 0 if scenario in ("unchanged","native-only") else 1)
                 self.assertEqual(set(policy.inventory(source)), set(current["files"]))
                 # Independent clean rebuild from exactly the same current bytes/flags.
-                clean = root/"clean"; clean.mkdir(); write_make(clean); make(clean)
-                self.assertEqual(policy.digest(build/"fixture.so"), policy.digest(clean/"fixture.so"))
+                incremental_hash = policy.digest(build/"fixture.so")
+                # Debug/sanitizer objects bind compilation cwd. Use exactly the
+                # same build/source paths for the independent clean control.
+                shutil.rmtree(build); build.mkdir(); write_make(build)
+                clean_counts = make(build)
+                self.assertEqual(clean_counts[0], len(list((source/"server").glob("*.c"))))
+                self.assertEqual(clean_counts[1], 1)
+                self.assertEqual(incremental_hash, policy.digest(build/"fixture.so"))
                 records.append({"scenario":scenario, "eligible":decision["eligible"], "cold":cold,
                                 "compiled_units":actual[0], "links":actual[1],
                                 "dag_seconds":actual[2], "reconcile_seconds":reconcile_seconds,
-                                "clean_output_equal":True})
+                                "compiler":compiler, "compiler_flags":flags,
+                                "outer_makeflags_present":bool(os.environ.get("MAKEFLAGS")),
+                                "clean_output_equal":True, "output_sha256":incremental_hash})
         report = {"schema":"pw-synthetic-incremental-dag/1", "wine_speedup_claim":False,
                   "checkpoint_transfer_measured":False, "scenarios":records}
         destination = os.environ.get("PW_INCREMENTAL_REPORT")
