@@ -736,8 +736,8 @@ can wait; neither has a new hard deadline. Existing startup and cleanup deadline
 are unchanged. Absence of a record still cannot establish the last child
 instruction, process death, helper settlement, or safe title restart.
 
-The 136-byte wire format, validation rules, and milestone numbering are
-unchanged. Stage 5 remains NET_SOCKET_BEGIN; stage 6 remains NET_SOCKET_READY and
+The frame remains 136 bytes and milestone numbering is unchanged. The matched
+stage-5 observation extension below changes only that diagnostic payload shape. Stage 5 remains NET_SOCKET_BEGIN; stage 6 remains NET_SOCKET_READY and
 is emitted only after a nonnegative socket result. On a negative result, the
 existing FAILURE frame carries the saved raw result and immediate Net errno.
 No observer is inserted between sceNetSocket and sceNetErrnoLoc. Positive socket
@@ -751,3 +751,44 @@ selected title-event retention, unchanged restart hold under simulated log
 failure, and the existing actual data adapter's positive/negative socket paths.
 These controls do not establish console admission, fault location, process
 lifetime, or a successful Windows child result.
+
+### Stage-5 native import observations
+
+A matched rebuilt title/worker now replaces the ordinary stage-5 progress log
+with one `bootstrap_net_targets` record. It reports three opaque unsigned
+64-bit values: `socket_target`, `errno_target`, and `data_prepare_anchor`.
+The worker takes two read-only x86-64 GOT loads for the actual sceNetSocket and
+sceNetErrnoLoc import cells and a RIP-relative local-code anchor. It still sends
+one existing PROGRESS frame; there is no extra packet, early child file or new
+logging channel. The actual Net calls and their error handling are untouched.
+
+Only the codec packs these values: anchor at bytes48–55, Socket low/high words
+at56–59/112–115, and ErrnoLoc at116–123. Version2, identity, sequence1 and stage5
+remain unchanged. Status, native_error and errno_valid bytes remain zero; all
+logical signal/target and FAILURE fields remain zero for this PROGRESS. Other
+kinds and stages reject nonzero logical observation fields. The parent logs
+only after its existing exact-session and increasing-stage checks, with one
+existing immediate flush. Cleanup-drain observations follow the same rule.
+
+These are pre-call snapshots, not proof that an import cell could not change
+before the existing call. Zero is a valid observation, not a reason to skip or
+redirect a call. The anchor
+can locate the child image only against this new artifact's exact
+pw_wine_child_data_prepare symbol; it does not identify libSceNet's load base.
+An address, channel closure, missing record or elapsed deadline never proves
+readiness, helper settlement, native death or safe release.
+
+The service builder and retained-build verifier require static proof from the
+actual linked, converted and SELF-recovered images. The noinline capture helper
+must load the same two relocation cells used by data preparation's indirect
+calls, and its LEA must identify the actual local symbol. Function bytes, GOT
+cell bytes and relocation addresses must survive conversion/reconstruction.
+The manifest retains the symbol/cell/instruction addresses and focused assembly.
+Unrecognized or ambiguous instruction shapes fail closed; old artifact offsets
+are not reused.
+
+Host controls report zero from the platform-capture helper. Separate codec and
+owner tests inject null, sign-boundary and high-bit raw values; these test
+serialization and authority boundaries, not actual target import contents.
+The static artifact proof does not execute the target or explain the console
+crash. This change is diagnostic only and makes no networking-fix claim.

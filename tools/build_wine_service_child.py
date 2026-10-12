@@ -176,6 +176,94 @@ def inspect_code(path, bindir, commands):
             'raw_syscalls': [], 'app_crt_functions': ['_start', '_init', '_fini', 'main']}
 
 
+def check_net_target_observation(linked, converted, recovered, graph, symbols, disassembly):
+    """Prove fixed x86-64 GOT observations against actual decoded instruction boundaries."""
+    check_disassembly(disassembly)
+    names = ('observe_net_targets', 'pw_wine_child_data_prepare')
+    functions = {}
+    for name in names:
+        rows = [line.split() for line in symbols.splitlines() if len(line.split()) >= 8 and line.split()[7] == name]
+        require(rows and all(r[3] == 'FUNC' and r[6] != 'UND' for r in rows),
+                'missing net observation function: ' + name)
+        ranges = {(int(r[1], 16), int(r[2])) for r in rows}
+        require(len(ranges) == 1, 'ambiguous net observation function: ' + name)
+        address, size = ranges.pop()
+        require(address > 0 and size > 0, 'empty net observation function')
+        before = linked.offset(address, size, 1)
+        value = linked.data[before:before + size]
+        for image in (converted, recovered):
+            offset = image.offset(address, size, 1)
+            require(image.data[offset:offset + size] == value, 'net observation text changed through conversion')
+        functions[name] = {'address': address, 'bytes': size, 'sha256': hashlib.sha256(value).hexdigest()}
+    slots = {}
+    for name in ('sceNetSocket', 'sceNetErrnoLoc'):
+        entry = graph.get(name, {})
+        relocations = entry.get('relocations', [])
+        require(entry.get('provider') == 'libSceNet.sprx' and len(relocations) == 1 and
+                relocations[0]['type'] in (6, 7) and relocations[0]['addend'] == 0,
+                'ambiguous net observation import: ' + name)
+        address, symbol = relocations[0]['address'], relocations[0]['symbol']
+        require(0 < symbol < len(linked.symbols) and linked.symbols[symbol]['name'] == name,
+                'net observation graph symbol differs')
+        require([r for r in linked.relocations if r['address'] == address] == relocations,
+                'net observation linked relocation differs')
+        offset = linked.offset(address, 8, 6)
+        value = linked.data[offset:offset + 8]
+        for image in (converted, recovered):
+            offset = image.offset(address, 8, 6)
+            require(image.data[offset:offset + 8] == value, 'net observation GOT cell changed through conversion')
+            require(symbol < len(image.symbols) and image.symbols[symbol]['name'] == entry['nid'] and
+                    [r for r in image.relocations if r['address'] == address] == relocations,
+                    'net observation symbol/relocation differs after conversion')
+        slots[name] = address
+    require(len(set(slots.values())) == 2, 'net observation imports alias one slot')
+    instructions = {}
+    for line in disassembly.splitlines():
+        match = re.match(r'^\s*([0-9a-fA-F]+):\s+(\S.*)$', line)
+        if match:
+            address = int(match[1], 16)
+            require(address not in instructions, 'duplicate net observation instruction address')
+            instructions[address] = match[2]
+    observations = {name: [] for name in slots}
+    calls = {name: [] for name in slots}
+    anchors, focused = [], []
+    for name, function in functions.items():
+        start, size = function['address'], function['bytes']
+        addresses = sorted(a for a in instructions if start <= a < start + size)
+        require(addresses and addresses[0] == start, 'missing net observation disassembly boundary')
+        for index, address in enumerate(addresses):
+            end = addresses[index + 1] if index + 1 < len(addresses) else start + size
+            offset = linked.offset(address, end - address, 1)
+            code = linked.data[offset:offset + end - address]
+            focused.append(hex(address) + ': ' + instructions[address])
+            # Exact instruction bytes, not a printed symbolic comment or guessed slot.
+            if len(code) == 7 and 0x48 <= code[0] <= 0x4f and code[2] & 0xc7 == 5:
+                target = address + 7 + int.from_bytes(code[3:], 'little', signed=True)
+                if name == names[0] and code[1] == 0x8b:
+                    for symbol, slot in slots.items():
+                        if target == slot: observations[symbol].append(address)
+                if name == names[0] and code[1] == 0x8d and target == functions[names[1]]['address']:
+                    anchors.append(address)
+            if name == names[1] and len(code) == 6 and code[:2] == b'\xff\x15':
+                target = address + 6 + int.from_bytes(code[2:], 'little', signed=True)
+                for symbol, slot in slots.items():
+                    if target == slot: calls[symbol].append(address)
+    require(all(len(found) == 1 for found in observations.values()) and len(anchors) == 1,
+            'net observation must load each actual GOT slot and LEA the local anchor once')
+    require(all(calls.values()), 'data preparation no longer calls through the observed GOT slots')
+    return {'schema': 'pw-wine-child-net-target-observation/1', 'stage': 5, 'wire_bytes': 136,
+            'functions': functions, 'got_slots': slots, 'observation_instructions': observations,
+            'anchor_instruction': anchors[0], 'original_call_instructions': calls,
+            'focused_disassembly': focused, 'target_executed': False, 'runtime_validated': False}
+
+
+def inspect_net_target_observation(linked, converted, recovered, graph, bindir, commands):
+    return check_net_target_observation(
+        Elf(linked.read_bytes()), Elf(converted.read_bytes()), Elf(recovered.read_bytes()), graph,
+        commands.run(bindir / 'llvm-readelf', '-sW', linked),
+        commands.run(bindir / 'llvm-objdump', '-d', '--no-show-raw-insn', linked))
+
+
 def inputs(args, commands):
     root, sdk, foundation, runtime, bindir = [Path(p).resolve(strict=True) for p in
         (args.work, args.sdk, args.foundation, args.runtime, args.llvm_bindir)]
@@ -301,6 +389,7 @@ def build(args):
     reconstruction = verify_reconstruction(converted, recovered)
     require(extract_self(final.read_bytes()) == recovered.read_bytes(), 'independent SELF recovery differs')
     after = inspect_service_preload(recovered.read_bytes()); compare_service_preload(preload, after)
+    net_targets = inspect_net_target_observation(linked, converted, recovered, graph, bindir, commands)
     compiled_identity(Elf(recovered.read_bytes()), build_id)
     compiled_identity(Elf(recovered.read_bytes()), helper_digest(bound))
     final.chmod(0o755)
@@ -309,6 +398,7 @@ def build(args):
                 'worker': {**record(final), 'build_id': build_id},
                 'linked': record(linked), 'converted': record(converted), 'reconstructed': record(recovered),
                 'linkage': graph, 'code': code, 'reconstruction': reconstruction, 'framing': framing,
+                'net_target_observation': net_targets,
                 'converter_specialization': specialized, 'converter_sha256': sha(tool),
                 'converter_sources': {p.name: sha(p) for p in sorted(native.iterdir()) if p.is_file()},
                 'zlib_archive': record(archives[0]), 'zlib_headers': tree_files(zroot / 'usr/include'),
@@ -368,6 +458,9 @@ def verify_child(args, commands):
     require(ordinary_graph(Elf((work / 'child.linked.elf').read_bytes()), Elf((work / 'child.elf').read_bytes()), providers)
             == manifest['linkage'], 'child actual import graph differs')
     require(inspect_code(work / 'child.linked.elf', bindir, commands) == manifest['code'], 'child code inspection differs')
+    require(inspect_net_target_observation(work / 'child.linked.elf', work / 'child.elf',
+                work / 'native-wine-child.after.elf', manifest['linkage'], bindir, commands) ==
+            manifest.get('net_target_observation'), 'child net observation proof differs')
     native = title / 'tooling/native'
     verify_converter_copy(native, work, manifest)
     require(manifest['converter_sources'] == {p.name: sha(p) for p in sorted(native.iterdir()) if p.is_file()} and

@@ -204,6 +204,8 @@ static int fake_send(int fd,const PwWineChildFrame*f,int right,PwWineChildWireRe
         assert(f->generation==active_session.generation&&f->child_pid==active_session.child_pid&&f->profile==active_session.profile);
         m.last_progress=f->failure_api;m.progress++;return m.send_rc;
     }
+    assert(!f->net_socket_target&&!f->net_errno_target&&!f->data_prepare_anchor);
+    assert(!active_session.net_socket_target&&!active_session.net_errno_target&&!active_session.data_prepare_anchor);
     m.frames[m.sends++]=decoded;
     if(f->kind==PW_WC_FAILURE||f->kind==PW_WC_BOOTSTRAP_ACK)memcpy(result->bytes,bytes,sizeof(bytes));
     errno=EINTR;return m.send_rc;

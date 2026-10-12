@@ -110,6 +110,61 @@ static void progress_wire_tests(void)
     reset(f);assert(pw_wine_child_wire_try_send(3,&f,9,&r)<0&&!m.sends);
 }
 
+static void net_targets_wire_tests(void)
+{
+    static const uint64_t values[]={0,1,UINT64_C(0x7fffffffffffffff),
+        UINT64_C(0x8000000000000000),UINT64_MAX,UINT64_C(0x0123456789abcdef)};
+    PwWineChildFrame f,decoded;unsigned char bytes[PW_WC_WIRE_BYTES];
+    _Static_assert(PW_WC_WIRE_BYTES==136,"diagnostics keep the original frame size");
+    for(unsigned i=0;i<sizeof(values)/sizeof(values[0]);i++){
+        f=boot();f.kind=PW_WC_PROGRESS;f.failure_api=PW_WCP_NET_SOCKET_BEGIN;
+        f.net_socket_target=values[i];f.net_errno_target=values[(i+1)%6];f.data_prepare_anchor=values[(i+2)%6];
+        assert(!pw_wine_child_wire_encode(bytes,&f)&&!pw_wine_child_wire_decode(&decoded,bytes));
+        assert(decoded.net_socket_target==f.net_socket_target&&decoded.net_errno_target==f.net_errno_target&&
+               decoded.data_prepare_anchor==f.data_prepare_anchor&&pw_wine_child_wire_same_session(&f,&decoded));
+        assert(!decoded.target_tid&&!decoded.signal&&!decoded.status&&!decoded.native_error&&
+               !decoded.failure_raw&&!decoded.returned_length&&!decoded.returned_value&&!decoded.errno_valid);
+        assert(get64(bytes+48)==f.data_prepare_anchor&&get32(bytes+56)==(uint32_t)f.net_socket_target&&
+               get32(bytes+112)==(uint32_t)(f.net_socket_target>>32)&&get64(bytes+116)==f.net_errno_target);
+        for(unsigned j=0;j<3;j++){
+            unsigned offset=j==0?60:j==1?64:124;
+            bytes[offset]=1;assert(pw_wine_child_wire_decode(&decoded,bytes));bytes[offset]=0;
+        }
+    }
+    for(unsigned kind=PW_WC_HELLO;kind<=PW_WC_CANCEL;kind++)for(unsigned field=0;field<3;field++){
+        f=kind==PW_WC_HELLO?hello():boot();f.kind=kind;
+        if(kind==PW_WC_SIGNAL||kind==PW_WC_SIGNAL_ACK){f.sequence=2;f.target_tid=12;f.signal=PW_WC_SIGNAL_QUIT;}
+        if(kind==PW_WC_FAILURE)f.status=-1;
+        if(kind==PW_WC_PROGRESS)f.failure_api=1;
+        assert(!pw_wine_child_wire_encode(bytes,&f));
+        if(field==0)f.net_socket_target=1;
+        if(field==1)f.net_errno_target=1;
+        if(field==2)f.data_prepare_anchor=1;
+        assert(pw_wine_child_wire_encode(bytes,&f));
+    }
+    for(unsigned stage=1;stage<=PW_WC_PROGRESS_LAST;stage++)if(stage!=PW_WCP_NET_SOCKET_BEGIN){
+        f=boot();f.kind=PW_WC_PROGRESS;f.failure_api=stage;f.net_socket_target=UINT64_MAX;
+        assert(pw_wine_child_wire_encode(bytes,&f));
+    }
+    for(unsigned field=0;field<8;field++){
+        f=boot();f.kind=PW_WC_PROGRESS;f.failure_api=PW_WCP_NET_SOCKET_BEGIN;
+        if(field==0)f.target_tid=1;
+        if(field==1)f.signal=1;
+        if(field==2)f.status=-1;
+        if(field==3)f.native_error=1;
+        if(field==4)f.failure_raw=1;
+        if(field==5)f.returned_length=1;
+        if(field==6)f.returned_value=1;
+        if(field==7)f.errno_valid=1;
+        assert(pw_wine_child_wire_encode(bytes,&f));
+    }
+    f=boot();f.kind=PW_WC_PROGRESS;f.failure_api=PW_WCP_NET_SOCKET_BEGIN;
+    f.net_socket_target=UINT64_MAX;f.net_errno_target=UINT64_C(0x8000000000000000);
+    reset(f);int descriptor=9,fd=-1;rights(&descriptor,1);
+    assert(receive(PW_WC_PROGRESS,&fd)==PW_WC_ERROR&&fd==-1&&m.closes==1&&m.closed[0]==9);
+    reset(f);assert(receive(PW_WC_PROGRESS,&fd)==PW_WC_RECORD&&fd==-1&&!m.closes);
+}
+
 static void cancel_wire_tests(void)
 {
     PwWineChildFrame f=boot(),decoded;unsigned char bytes[PW_WC_WIRE_BYTES];int fd=-1;
@@ -142,6 +197,7 @@ static void cancel_wire_tests(void)
 
 int main(void)
 {
+    net_targets_wire_tests();
     cancel_wire_tests();
     progress_wire_tests();
     PwWineChildFrame f=boot(),decoded;unsigned char bytes[PW_WC_WIRE_BYTES];

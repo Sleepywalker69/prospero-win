@@ -84,12 +84,32 @@ static int send_record(const PwWineChildFrame *f)
     if(!rc&&within_budget()){wire_result.delivery_uncertain=1;return -1;}
     return rc;
 }
+/* Read the actual imported call slots, not a C function address/PLT thunk.
+ * Observation only: never call through these snapshots or infer readiness.
+ * Hosted controls have no Prospero GOT and report zero instead. */
+static __attribute__((noinline)) void observe_net_targets(PwWineChildFrame *frame)
+{
+#ifdef __PROSPERO__
+    uint64_t socket_target,errno_target,anchor;
+    _Static_assert(sizeof(uintptr_t)==8,"native diagnostic address width");
+    __asm__ volatile(
+        "movq sceNetSocket@GOTPCREL(%%rip), %0\n\t"
+        "movq sceNetErrnoLoc@GOTPCREL(%%rip), %1\n\t"
+        "leaq pw_wine_child_data_prepare(%%rip), %2"
+        : "=r"(socket_target),"=r"(errno_target),"=r"(anchor) : : "memory");
+    frame->net_socket_target=socket_target;frame->net_errno_target=errno_target;
+    frame->data_prepare_anchor=anchor;
+#else
+    frame->net_socket_target=frame->net_errno_target=frame->data_prepare_anchor=0;
+#endif
+}
 static int send_progress(void *context,unsigned stage)
 {
     const PwWineChildFrame *session=context;
     if(!session||bootstrap.started||stage<1||stage>PW_WC_PROGRESS_LAST)return -1;
     PwWineChildFrame frame=*session;
     frame.kind=PW_WC_PROGRESS;frame.failure_api=stage;
+    if(stage==PW_WCP_NET_SOCKET_BEGIN)observe_net_targets(&frame);
     return send_record(&frame);
 }
 /* Observe one explicit parent cancellation without treating it as corrupt

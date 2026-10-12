@@ -49,6 +49,43 @@ def fixture():
     return linked, converted, providers
 
 
+def net_observation_fixture():
+    class Image:
+        def __init__(self):
+            self.data = bytearray(0x1010)
+            self.relocations = [{'address': a, 'type': 6, 'addend': 0, 'symbol': i + 1} for i, a in enumerate((0x2000, 0x2008))]
+            self.symbols = [{'name': ''}, {'name': 'sceNetSocket'}, {'name': 'sceNetErrnoLoc'}]
+        def offset(self, address, size, flags):
+            valid = (flags == 1 and 0x1000 <= address and address + size <= 0x1200) or (
+                flags == 6 and 0x2000 <= address and address + size <= 0x2010)
+            if not valid: raise ValueError('unmapped diagnostic fixture bytes')
+            return address - 0x1000
+    image = Image()
+    def emit(address, opcode, target):
+        size = len(opcode) + 4
+        value = opcode + (target - address - size).to_bytes(4, 'little', signed=True)
+        image.data[address - 0x1000:address - 0x1000 + size] = value
+    emit(0x1000, b'\x48\x8b\x05', 0x2000)
+    emit(0x1007, b'\x48\x8b\x0d', 0x2008)
+    emit(0x100e, b'\x48\x8d\x15', 0x1100)
+    image.data[0x15] = 0xc3
+    emit(0x1100, b'\xff\x15', 0x2000)
+    emit(0x1106, b'\xff\x15', 0x2008)
+    image.data[0x10c] = 0xc3
+    symbols = ('1: 0000000000001000 22 FUNC LOCAL DEFAULT 1 observe_net_targets\n'
+               '2: 0000000000001100 13 FUNC GLOBAL DEFAULT 1 pw_wine_child_data_prepare\n')
+    disassembly = '\n'.join(f'{a:x}: {op}' for a, op in (
+        (0x1000, 'movq opaque(%rip), %rax'), (0x1007, 'movq opaque(%rip), %rcx'),
+        (0x100e, 'leaq opaque(%rip), %rdx'), (0x1015, 'retq'),
+        (0x1100, 'callq *opaque(%rip)'), (0x1106, 'callq *opaque(%rip)'), (0x110c, 'retq')))
+    graph = {name: {'provider': 'libSceNet.sprx', 'nid': name + '#test', 'relocations': [dict(image.relocations[i])]}
+             for i, name in enumerate(('sceNetSocket', 'sceNetErrnoLoc'))}
+    converted, recovered = copy.deepcopy(image), copy.deepcopy(image)
+    for output in (converted, recovered):
+        for symbol in output.symbols[1:]: symbol['name'] += '#test'
+    return image, converted, recovered, graph, symbols, disassembly
+
+
 class WineServiceChildBuild(unittest.TestCase):
     def test_shared_client_header_is_part_of_service_identity(self):
         self.assertIn('native/pw_lapy_client.h', build.HEADERS)
@@ -376,6 +413,59 @@ class WineServiceChildBuild(unittest.TestCase):
         self.assertEqual(build.TITLE_FOUNDATION, '9c0b994a048521af6fb84c73ded364504fe250e9')
         self.assertNotEqual(build.FOUNDATION, build.TITLE_FOUNDATION)
         self.assertEqual(build.CRT_SHA, 'a99fe406e36d8ce82e68e0245898ba064e28a56a9853f746e9cf13d23cc17a00')
+
+    def test_net_target_proof_uses_actual_instruction_bytes_and_preserved_cells(self):
+        inputs = net_observation_fixture()
+        result = build.check_net_target_observation(*inputs)
+        self.assertEqual(result['got_slots'], {'sceNetSocket': 0x2000, 'sceNetErrnoLoc': 0x2008})
+        self.assertEqual(result['observation_instructions'], {'sceNetSocket': [0x1000], 'sceNetErrnoLoc': [0x1007]})
+        self.assertEqual(result['original_call_instructions'], {'sceNetSocket': [0x1100], 'sceNetErrnoLoc': [0x1106]})
+        self.assertEqual(result['anchor_instruction'], 0x100e)
+        self.assertEqual(result['functions']['pw_wine_child_data_prepare']['address'], 0x1100)
+        self.assertEqual(result['wire_bytes'], 136)
+        self.assertFalse(result['target_executed']); self.assertFalse(result['runtime_validated'])
+        # Printed comments/names are not the source of the displacement proof.
+        misleading = list(inputs); misleading[-1] = misleading[-1].replace('opaque', '0xdeadbeef <wrong>')
+        self.assertEqual(build.check_net_target_observation(*misleading)['got_slots'], result['got_slots'])
+
+    def test_net_target_proof_rejects_ambiguous_missing_or_changed_boundaries(self):
+        for mutation in range(19):
+            values = list(net_observation_fixture())
+            linked, converted, recovered, graph, symbols, disassembly = values
+            if mutation == 0: values[4] = symbols.replace('observe_net_targets', 'missing')
+            if mutation == 1: values[4] += '3: 0000000000001001 22 FUNC LOCAL DEFAULT 1 observe_net_targets\n'
+            if mutation == 2: values[5] = disassembly.replace('1000: movq opaque(%rip), %rax\n', '')
+            if mutation == 3: values[5] += '\n1000: retq'
+            if mutation == 4: graph['sceNetSocket']['relocations'].append(dict(graph['sceNetSocket']['relocations'][0]))
+            if mutation == 5: graph['sceNetSocket']['provider'] = 'libkernel.sprx'
+            if mutation == 6: graph['sceNetSocket']['relocations'][0]['address'] = 0x2008
+            if mutation == 7: converted.data[0] ^= 1
+            if mutation == 8: recovered.data[0x1000] = 1
+            if mutation == 9: recovered.relocations.pop()
+            if mutation == 15: recovered.relocations[0]['symbol'] = 2
+            if mutation == 16: recovered.symbols[1]['name'] = 'wrong#test'
+            if mutation == 17: recovered.data[0] ^= 1
+            if mutation == 18: converted.data[0x1000] = 1
+            if mutation in (10, 11, 12, 13, 14):
+                for image in (linked, converted, recovered):
+                    if mutation == 10: image.data[1] = 0x8d  # LEA slot address is not a target load.
+                    if mutation == 11: image.data[0] = 0x40  # A 32-bit load is not a uint64 observation.
+                    if mutation == 12: image.data[0x11] ^= 1  # Wrong local anchor displacement.
+                    if mutation == 13: image.data[0x102] ^= 1  # Original call now uses another slot.
+                    if mutation == 14: image.data[0x107] = 0x25  # Jump is not the ErrnoLoc call.
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                build.check_net_target_observation(*values)
+
+    def test_net_target_proof_is_mandatory_on_build_and_retained_replay(self):
+        tree = ast.parse(Path(build.__file__).read_text())
+        for name in ('build', 'verify_child'):
+            function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            calls = [n for n in ast.walk(function) if isinstance(n, ast.Call) and
+                     isinstance(n.func, ast.Name) and n.func.id == 'inspect_net_target_observation']
+            self.assertEqual(len(calls), 1, name)
+        self.assertIn("'net_target_observation': net_targets", Path(build.__file__).read_text())
+        self.assertIn("manifest.get('net_target_observation')", Path(build.__file__).read_text())
+
 
     def test_disassembly_refuses_raw_traps_and_bad_decode(self):
         build.check_disassembly('100000000 <_start>:\n 100000000: retq\n')

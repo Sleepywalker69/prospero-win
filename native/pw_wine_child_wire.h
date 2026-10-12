@@ -62,6 +62,11 @@ typedef struct PwWineChildFrame {
     char build_id[PW_WC_BUILD_CHARS + 1];
     uint32_t failure_api, returned_length, errno_valid;
     int32_t failure_raw, returned_value; /* FAILURE only; otherwise all zero */
+    /* Opaque observations only on PROGRESS/NET_SOCKET_BEGIN. They do not
+     * certify import validity, readiness or helper settlement. The codec alone
+     * maps these values to the existing 24 payload bytes; all logical control
+     * and FAILURE fields remain zero for this stage. A matched rebuild is required. */
+    uint64_t net_socket_target, net_errno_target, data_prepare_anchor;
 } PwWineChildFrame;
 
 typedef struct PwWineChildWireResult {

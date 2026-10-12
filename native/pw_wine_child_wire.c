@@ -25,6 +25,8 @@ static int valid(const PwWineChildFrame *f)
     for(unsigned i=0;i<40;i++) if (!((f->build_id[i]>='0'&&f->build_id[i]<='9')||
                                     (f->build_id[i]>='a'&&f->build_id[i]<='f'))) return 0;
     if(f->errno_valid>1)return 0;
+    if((f->kind!=PW_WC_PROGRESS||f->failure_api!=PW_WCP_NET_SOCKET_BEGIN)&&
+       (f->net_socket_target||f->net_errno_target||f->data_prepare_anchor))return 0;
     if(f->kind!=PW_WC_FAILURE&&f->kind!=PW_WC_PROGRESS&&(f->failure_api||f->failure_raw||f->returned_length||f->returned_value||f->errno_valid))return 0;
     if(f->kind==PW_WC_HELLO)
         return !f->generation&&!f->sequence&&!f->parent_pid&&!f->wine_pid&&!f->wine_tid&&
@@ -58,7 +60,13 @@ int pw_wine_child_wire_encode(unsigned char out[PW_WC_WIRE_BYTES], const PwWineC
     put32(out+64,(uint32_t)f->native_error); memcpy(out+68,f->build_id,40);
     put32(out+108,f->failure_api);put32(out+112,(uint32_t)f->failure_raw);
     put32(out+116,f->returned_length);put32(out+120,(uint32_t)f->returned_value);
-    put32(out+124,f->errno_valid);put32(out+128,f->profile);put32(out+132,f->machine);return 0;
+    put32(out+124,f->errno_valid);put32(out+128,f->profile);put32(out+132,f->machine);
+    if(f->kind==PW_WC_PROGRESS&&f->failure_api==PW_WCP_NET_SOCKET_BEGIN){
+        put64(out+48,f->data_prepare_anchor);
+        put32(out+56,(uint32_t)f->net_socket_target);put32(out+112,(uint32_t)(f->net_socket_target>>32));
+        put64(out+116,f->net_errno_target);
+    }
+    return 0;
 }
 int pw_wine_child_wire_decode(PwWineChildFrame *f, const unsigned char in[PW_WC_WIRE_BYTES])
 {
@@ -70,6 +78,12 @@ int pw_wine_child_wire_decode(PwWineChildFrame *f, const unsigned char in[PW_WC_
     v.signal=(int32_t)get32(in+56); v.status=(int32_t)get32(in+60); v.native_error=(int32_t)get32(in+64);
     memcpy(v.build_id,in+68,40);v.failure_api=get32(in+108);v.failure_raw=(int32_t)get32(in+112);
     v.returned_length=get32(in+116);v.returned_value=(int32_t)get32(in+120);v.errno_valid=get32(in+124);v.profile=get32(in+128);v.machine=get32(in+132);
+    if(v.kind==PW_WC_PROGRESS&&v.failure_api==PW_WCP_NET_SOCKET_BEGIN){
+        v.data_prepare_anchor=get64(in+48);
+        v.net_socket_target=(uint64_t)get32(in+56)|((uint64_t)get32(in+112)<<32);
+        v.net_errno_target=get64(in+116);
+        v.target_tid=0;v.signal=0;v.failure_raw=0;v.returned_length=0;v.returned_value=0;
+    }
     if(!valid(&v)) return -1;
     *f=v; return 0;
 }
