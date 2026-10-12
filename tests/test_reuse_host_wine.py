@@ -4,6 +4,7 @@
 from __future__ import annotations
 import copy
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -12,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 import zipfile
 
@@ -190,6 +192,28 @@ class HostReuse(unittest.TestCase):
             self.assertFalse(value['reused'])
             self.assertEqual(value['fallback'], 'unchanged full host build')
 
+
+    def test_late_failure_removes_only_the_install_created_by_reuse(self):
+        report, output = self.root / 'late-report.json', self.root / 'late-output'
+        host = self.root / 'late-host'; host.mkdir()
+        argv = ['reuse', '--repo', str(self.root), '--host-work', str(host),
+                '--cohort', str(self.root / 'cohort'), '--cache-state', str(self.root / 'cache'),
+                '--report', str(report), '--run', '123']
+        def late_failure(args):
+            (host / 'install').mkdir()
+            (host / 'install/partial').write_bytes(b'unaccepted')
+            raise ValueError('late proof failure')
+        with mock.patch.object(sys, 'argv', argv), mock.patch.object(reuse, 'restore', side_effect=late_failure), \
+             mock.patch.dict(os.environ, {'GITHUB_OUTPUT': str(output)}):
+            reuse.main()
+        self.assertFalse((host / 'install').exists())
+        (host / 'install').mkdir()
+        (host / 'install/preexisting').write_bytes(b'preserved')
+        with mock.patch.object(sys, 'argv', argv), mock.patch.object(reuse, 'restore', side_effect=ValueError('preexisting')), \
+             mock.patch.dict(os.environ, {'GITHUB_OUTPUT': str(output)}):
+            reuse.main()
+        self.assertEqual((host / 'install/preexisting').read_bytes(), b'preserved')
+
     def test_runner_image_identity_is_bound_to_successful_attempt(self):
         logs = ('2026-10-12T09:00:00.000Z ##[group]Runner Image\n'
                 '2026-10-12T09:00:00.000Z Image: ubuntu-24.04\n'
@@ -226,6 +250,70 @@ class HostReuse(unittest.TestCase):
                               {'total_count': 1, 'jobs': [{'name': 'matched-runtime', 'id': 456, 'conclusion': 'failure'}]}):
                 with mock.patch.object(reuse, 'api', return_value=malformed), self.assertRaises(ValueError):
                     reuse.runner_identity(self.run)
+
+
+    def test_successful_restore_calls_runner_gate_and_preserves_donor_receipts(self):
+        project = {'commit': 'a' * 40, 'tree': 'b' * 40}
+        consumer = {'commit': 'c' * 40, 'tree': 'd' * 40}
+        run = {**self.run, 'head_sha': project['commit']}
+        accepted = {'project': project, 'run_url': 'https://github.com/' + reuse.REPOSITORY + '/actions/runs/123',
+                    'run_attempt': '1'}
+        repo = self.root / 'repo'; repo.mkdir()
+        host = self.root / 'host'; host.mkdir()
+        evidence = self.root / 'evidence'; evidence.mkdir()
+        state_dir = evidence / 'ccache-host'; state_dir.mkdir()
+        cohort = {'schema': 'pw-windows-child-source-cohort/1', 'project': consumer,
+                  'wine_commit': 'wine', 'patches': {}, 'host_source': {}, 'ps5_source': {}}
+        cohort_path = self.root / 'cohort.json'; cohort_path.write_text(json.dumps(cohort))
+        (state_dir / 'state.json').write_text(json.dumps({'project': consumer}))
+        data = b'exact source recipe'
+        recipe_hash = hashlib.sha256(data).hexdigest()
+        compatibility = {'schema': reuse.cache.SCHEMA, 'phase': 'host',
+                         'recipe': {n: recipe_hash for n in reuse.RECIPES}}
+        state = {'project': project, 'key': 'key', 'partition_key': 'partition',
+                 'partition_sha256': 'partition-hash', 'compatibility_sha256': 'compatibility-hash'}
+        receipt = {**state, 'stage': 'host-runtime', 'exit': 0,
+                   'argv': ['timeout', '180m', 'sh', 'tools/build_host_wine.sh',
+                            '--source', str(self.root / 'wine-source'), '--work', str(host), '--jobs', '4']}
+        donor_tar = io.BytesIO()
+        with tarfile.open(fileobj=donor_tar, mode='w:gz') as archive:
+            for name in reuse.RECIPES:
+                item = tarfile.TarInfo(name); item.size = len(data)
+                archive.addfile(item, io.BytesIO(data))
+        def selected_members(path, wanted, destination):
+            values = {'state.json': json.dumps(state).encode(), 'host-runtime.json': json.dumps(receipt).encode()}
+            for name in wanted:
+                (destination / Path(name).name).write_bytes(values.get(Path(name).name, b'{}'))
+        def checkpoint(path, out):
+            (out / 'source-cohort.json').write_text(json.dumps({**cohort, 'project': project}))
+            (out / 'sources').mkdir(); (out / 'sources/prospero-win.tar.gz').write_bytes(donor_tar.getvalue())
+            (out / 'host-wine/bin').mkdir(parents=True)
+            (out / 'host-wine/bin/wine').write_bytes(b'host installation')
+        runner = mock.Mock(return_value={'image': 'verified'})
+        args = SimpleNamespace(repo=repo, host_work=host, cohort=cohort_path,
+                               cache_state=state_dir, report=evidence / 'host-reuse.json', run='123')
+        with mock.patch.dict(os.environ, {'GITHUB_REPOSITORY': reuse.REPOSITORY, 'RUNNER_TEMP': str(self.root)}), \
+             mock.patch.object(reuse, 'api', side_effect=[run, {'total_count': 3, 'artifacts': self.artifacts},
+                                                       {'tree': {'sha': project['tree']}, 'parents': []}]), \
+             mock.patch.object(reuse, 'runner_identity', runner), \
+             mock.patch.object(reuse, 'download'), mock.patch.object(reuse, 'zip_members', side_effect=selected_members), \
+             mock.patch.object(reuse.package, 'verify_archive', return_value=accepted), \
+             mock.patch.object(reuse.cache, 'checked_identity', return_value=compatibility), \
+             mock.patch.object(reuse, 'extract_checkpoint', side_effect=checkpoint), \
+             mock.patch.object(reuse, 'tar_bytes', return_value=donor_tar.getvalue()), \
+             mock.patch.object(reuse, 'gzip_digest', return_value='same'), \
+             mock.patch.object(reuse, 'configure_contract'), \
+             mock.patch('prepare_windows_child_prefix.host_identity', return_value=({'files': {'installed': 'exact'}}, host)), \
+             mock.patch.object(reuse.subprocess, 'run'):
+            result = reuse.restore(args)
+        runner.assert_called_once_with(run)
+        self.assertTrue(result['reused'])
+        self.assertEqual(result['runner'], {'image': 'verified'})
+        self.assertEqual(result['donor_project'], project)
+        self.assertEqual(result['consumer_project'], consumer)
+        self.assertEqual(json.loads((evidence / 'host-reuse-inputs/host-runtime.json').read_text()), receipt)
+        self.assertEqual((host / 'install/usr/bin/wine').read_bytes(), b'host installation')
+        self.assertIn('loader/wine', result['support_targets_required'])
 
     def test_configure_output_environment_and_workflow_are_exact(self):
         workflow = (ROOT / reuse.WORKFLOW).read_bytes()

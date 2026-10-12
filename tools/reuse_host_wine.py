@@ -276,6 +276,7 @@ def restore(args):
     artifacts = api('repos/' + REPOSITORY + '/actions/runs/' + args.run + '/artifacts?per_page=100')
     require(artifacts['total_count'] <= 100, 'artifact pagination must be explicit')
     selected = choose_artifacts(run, artifacts['artifacts'])
+    runner = runner_identity(run)
     project = selected['package']['compiled_commit']
     current_state = json.loads((args.cache_state / 'state.json').read_text())
     current_identity = cache.checked_identity(args.cache_state, current_state)
@@ -358,11 +359,15 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--run', required=True)
     args = parser.parse_args()
+    install = args.host_work / 'install'
+    had_install = install.exists() or install.is_symlink()
     try:
         result = restore(args)
     except Exception as error:
         # Reuse is optional. Malformed or unavailable evidence never weakens the
         # required build; the ordinary full host path remains the only fallback.
+        if not had_install and install.exists() and not install.is_symlink():
+            shutil.rmtree(install)
         result = {'schema': 'pw-verified-host-reuse/1', 'reused': False,
                   'reason': type(error).__name__ + ': ' + str(error), 'fallback': 'unchanged full host build'}
     args.report.write_bytes(cache.canonical(result))
