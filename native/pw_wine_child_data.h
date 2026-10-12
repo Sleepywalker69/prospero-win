@@ -15,16 +15,17 @@ enum { PW_WCD_ARGUMENT=0x200, PW_WCD_BUDGET, PW_WCD_CONTROL, PW_WCD_DATA_STAT,
        PW_WCD_SOCKET, PW_WCD_OPTION, PW_WCD_CONNECT, PW_WCD_UPLOAD,
        PW_WCD_REQUEST, PW_WCD_PREPARE, PW_WCD_LOCAL_PREPARE, PW_WCD_PREPARED,
        PW_WCD_RESULT, PW_WCD_SETTLE, PW_WCD_NET_CLOSE,
-       PW_WCD_DATA_LSTAT, PW_WCD_DATA_LSTAT_TYPE, PW_WCD_PROGRESS, PW_WCD_CANCEL };
+       PW_WCD_DATA_LSTAT, PW_WCD_DATA_LSTAT_TYPE, PW_WCD_PROGRESS, PW_WCD_CANCEL,
+       PW_WCD_NET_LOADER_SLOT, PW_WCD_NET_IMPORT_SLOT };
 enum { PW_WINE_CHILD_CLEANUP_MS=30000 };
 typedef struct PwWineChildDataConfig {
     uint64_t transaction_id;
     int (*cancel_probe)(void *); /* 0 idle, 1 authenticated cancel, -1 unsafe control */
     void *cancel_context;
 } PwWineChildDataConfig;
-/* MODULE_LOAD/START, RESOLVE, NET_LOAD/HANDLE/INIT and all resolution indices
- * remain reserved for historical diagnostics. Net transport now uses the
- * native root helper's seven static imports, without an explicit NetInit. */
+/* NET_LOAD and MODULE_START carry the fixed-path diagnostic's immediate
+ * loader handle and module-start result. Other historical resolution indices
+ * remain reserved; there is no dlsym or explicit NetInit. */
 /* Every bootstrap FAILURE reserves returned_length bits16..23 for the state
  * mask below; low16 bits preserve the operation auxiliary. For data APIs it
  * is zero. returned_value is
@@ -48,6 +49,8 @@ typedef struct PwWineChildData {
     unsigned before_observations, after_observations; /* values1 stat;2 lstat */
     int32_t stat_before_raw, stat_before_error, lstat_before_raw, lstat_before_error;
     int32_t stat_after_raw, stat_after_error, lstat_after_raw, lstat_after_error;
+    unsigned net_load_attempted, net_missing_mask;
+    int32_t net_load_result, net_start_result;
     unsigned api, errno_valid;
     int32_t raw, native_error;
     uint32_t helper_status, control_revents, resolution_index;

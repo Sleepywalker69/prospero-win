@@ -101,9 +101,10 @@ static void record(void *context, const char *event, uint64_t generation,
 {
     const Title *t = context;
     int saved_errno = errno;
-    if (!strcmp(event, "bootstrap_net_targets"))
-        pw_diagnostics_log_local("PW_WINE_CHILD_OWNER profile=%u session=%llu event=%s generation=%llu stage=5 socket_target=0x%016llx errno_target=0x%016llx data_prepare_anchor=0x%016llx",
+    if (!strcmp(event, "bootstrap_net_targets") || !strcmp(event, "bootstrap_net_before"))
+        pw_diagnostics_log_local("PW_WINE_CHILD_OWNER profile=%u session=%llu event=%s generation=%llu stage=%u socket_target=0x%016llx errno_target=0x%016llx data_prepare_anchor=0x%016llx",
             t->profile, (unsigned long long)t->session, event, (unsigned long long)generation,
+            !strcmp(event,"bootstrap_net_before")?4u:5u,
             (unsigned long long)(uint64_t)first, (unsigned long long)(uint64_t)second,
             (unsigned long long)(uint64_t)third);
     else

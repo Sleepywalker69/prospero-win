@@ -97,7 +97,7 @@ static struct {
     int send_error, short_send, socket_raw, certificate_error, net_error;
     unsigned bootstrap_received, cancel_delivered, closed[128], reads;
     unsigned socket_calls, socket_closes, errno_calls, errno_pending, options;
-    unsigned connects, uploads, net_receives, threads, modules, logs, envs, sleeps;
+    unsigned connects, uploads, net_receives, threads, modules, net_loads, logs, envs, sleeps;
     unsigned attempts, accepted, failure_attempts, failure_accepted, hello, ack;
     unsigned queue_head, queue_count, observed_count, channel_closed, saw_eof;
     unsigned char queue[QUEUE_MAX][PW_WC_WIRE_BYTES];
@@ -243,6 +243,7 @@ static ssize_t mock_sendmsg(int fd, const struct msghdr *msg, int flags)
                !f.failure_raw && !f.returned_length && !f.returned_value && !f.errno_valid);
         if (f.failure_api == PW_WCP_NET_SOCKET_BEGIN) {
             assert(!m.socket_calls && !m.errno_calls);
+            assert(f.net_load_attempted==1&&f.net_load_result==33&&!f.net_start_result&&!f.net_missing_mask&&m.net_loads==1);
             /* Host controls have no Prospero import slots; raw nonzero values
              * are covered by the codec/owner tests, not claimed as GOT proof. */
             assert(!f.net_socket_target && !f.net_errno_target && !f.data_prepare_anchor);
@@ -293,7 +294,8 @@ static int mock_setenv(const char *name, const char *value, int replace)
 static int mock_thread(pthread_t *t, const pthread_attr_t *a, void *(*entry)(void *), void *arg)
 { (void)t; (void)a; (void)entry; (void)arg; m.threads++; assert(0); return -1; }
 static int32_t mock_load(const char *path, size_t n, const void *a, uint32_t f, const void *b, int *r)
-{ (void)path; (void)n; (void)a; (void)f; (void)b; (void)r; m.modules++; assert(0); return -1; }
+{ assert(!strcmp(path,"/system/common/lib/libSceNet.sprx")&&!n&&!a&&!f&&!b&&r);
+  assert(m.accepted==4&&!m.net_loads++);*r=0;return 33; }
 static int mock_info(int32_t handle, void *out) { (void)handle; (void)out; assert(0); return -1; }
 static int mock_register(long id, pthread_t t) { (void)id; (void)t; assert(0); return -1; }
 static void mock_unregister(long id) { (void)id; assert(0); }

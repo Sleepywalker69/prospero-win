@@ -59,7 +59,9 @@ int net_handle(uint32_t,int32_t*);
 #define sceNetRecv net_receive
 #define sceNetSocketClose net_close
 #define sceNetErrnoLoc net_errno
+#define PW_CHILD_NET_IMPORTS_TEST 1
 #include "../native/pw_wine_child_data.c"
+#undef PW_CHILD_NET_IMPORTS_TEST
 #undef sceNetInit
 #undef sceNetSocket
 #undef sceNetConnect
@@ -88,6 +90,7 @@ int net_handle(uint32_t,int32_t*);
 enum { F_STAT=1,F_OPEN,F_FSTAT,F_READ,F_CLOSE,F_MODULE,F_SYMBOL,F_NET_LOAD,F_NET_HANDLE,F_NET_INIT,F_SOCKET,F_OPTION,F_CONNECT,F_SEND,F_RECEIVE,F_SETUID,F_SLEEP,F_NET_CLOSE,F_LSTAT };
 static struct {
  uint64_t now;int cancel,clock_fail,data_before,lstat_error,lstat_error_always,lstat_retry_count,lstat_success,lstat_type,stat_type,stat_error,missing_pair_count,missing_pair_always,no_data,poll_error,poll_flags,poll_at,hup_after_socket,hup_after_request,fail_at,fail_result,expired_at,cancelled_at;
+ unsigned net_probe_loads,slot_reads,zero_before,zero_after,zero_final;
  unsigned calls,after_stop,stopped,stats,lstats,opens,fstats,reads,closes,modules,symbols,loads,handles,inits,sockets,options,connects,sends,receives,net_closes,clones,sleeps;
  unsigned request_frames,prepared_frames,cancel_frames,cancel_response_mode;
  unsigned partial,file_at,rx_at,rx_size,tx_size,phase,bad_hash,extra_byte,changed,mutate_after_close,header_bad;
@@ -95,6 +98,11 @@ static struct {
  int socket_errno_pending,clobber_net_errno;
  unsigned char helper[8],upload[256],incoming[128];int ops[1024];unsigned tx_before[1024],rx_before[1024];
 }m;
+void pw_child_net_imports_test(uint64_t slots[8])
+{
+ unsigned mask=m.slot_reads==0?m.zero_before:m.slot_reads==1?m.zero_after:m.zero_final;
+ m.slot_reads++;for(unsigned i=0;i<8;i++)slots[i]=(mask&(1u<<i))?0:UINT64_C(0x100000000)+i;
+}
 static uint64_t *shared_clock;
 static PwWineChildData result;
 static PwNativeChildIo io;
@@ -172,7 +180,7 @@ int net_receive(int fd,void *bytes,size_t n,int flags)
 int net_close(int fd){CHECK(fd==m.socket_value&&!m.net_closes);m.net_closes++;int fail=boundary(F_NET_CLOSE);m.net_errno=EBADF;return fail?m.fail_result:m.net_close_error;}
 int *net_errno(void){m.net_errno_calls++;m.socket_errno_pending=0;return m.null_errno?NULL:&m.net_errno;}
 int32_t test_module(const char *path,size_t n,const void*a,uint32_t flags,const void*b,int *started)
-{CHECK(!strcmp(path,"/system/common/lib/libSceSysmodule.sprx")&&!n&&!a&&!flags&&!b&&started);m.modules++;int fail=boundary(F_MODULE);*started=m.module_started;return fail?m.fail_result:m.module_value;}
+{CHECK(!strcmp(path,"/system/common/lib/libSceNet.sprx")&&!n&&!a&&!flags&&!b&&started);m.net_probe_loads++;int fail=boundary(F_MODULE);*started=m.module_started;return fail?m.fail_result:m.module_value;}
 /* Historical lookup boundary: the observed PR80 failure remains injectable.
  * The direct-import production route must never reach any of these lookups. */
 int test_symbol(int32_t module,const char *symbol,void **address)
@@ -182,7 +190,7 @@ int test_symbol(int32_t module,const char *symbol,void **address)
 static void message(unsigned kind,unsigned status)
 {struct lapy_elevation_message f={LAPY_ELEVATION_MAGIC,LAPY_ELEVATION_VERSION,sizeof(f),kind,LAPY_ELEVATION_FILESYSTEM,600,status,TEST_TRANSACTION};CHECK(m.rx_size+sizeof(f)<=sizeof(m.incoming));memcpy(m.incoming+m.rx_size,&f,sizeof(f));m.rx_size+=sizeof(f);}
 static void reset(void)
-{shared_clock=NULL;memset(&m,0,sizeof(m));memset(&result,0,sizeof(result));m.now=1000;m.module_value=(int32_t)UINT32_C(0x80020002);m.net_module_value=33;m.socket_value=42;m.native_errno=EACCES;m.net_errno=EIO;m.fail_result=-1;memcpy(m.helper,original_helper,8);
+{shared_clock=NULL;memset(&m,0,sizeof(m));memset(&result,0,sizeof(result));m.now=1000;m.module_value=33;m.net_module_value=33;m.socket_value=42;m.native_errno=EACCES;m.net_errno=EIO;m.fail_result=-1;memcpy(m.helper,original_helper,8);
  io=(PwNativeChildIo){.clock_ms=now,.cancelled=stop,.ready=1,.last_clock=1000,.stage_end=31000,.total_end=61000};
  PwWineChildHash h;pw_wine_child_hash_init(&h);CHECK(!pw_wine_child_hash_update(&h,m.helper,8));pw_wine_child_hash_final(&h,helper_hash);}
 static void success_responses(void){message(LAPY_ELEVATION_PREPARE,0);message(LAPY_ELEVATION_RESPONSE,0);}
@@ -294,6 +302,24 @@ int main(void)
  printf("stat visible/lstat EPERM: rc=%d ready=%u lstats=%u helper_opens=%u local_preparations=%u\n",red,result.ready,m.lstats,m.opens,m.clones);fflush(stdout);
  CHECK(m.lstats>=1&&m.opens==1&&m.clones==1);return 0;
 #endif
+ /* Fixed Net load is a diagnostic, never an implicit binding success. */
+ reset();m.data_before=1;CHECK(!run()&&!m.net_probe_loads&&!m.slot_reads);
+ reset();m.zero_before=0x80;CHECK(run()&&result.api==PW_WCD_NET_LOADER_SLOT&&
+  !m.net_probe_loads&&!m.sockets&&result.no_dispatch&&result.net_missing_mask==0x80);
+ for(unsigned i=0;i<7;i++){
+  reset();m.zero_after=m.zero_final=1u<<i;CHECK(run()&&result.api==PW_WCD_NET_IMPORT_SLOT&&
+   m.net_probe_loads==1&&m.slot_reads==3&&!m.sockets&&!m.sends&&result.no_dispatch&&!result.possible_apply);
+  CHECK(result.net_load_attempted&&result.net_load_result==33&&!result.net_start_result&&result.net_missing_mask==(1u<<i));
+  reset();m.zero_final=1u<<i;CHECK(run()&&result.api==PW_WCD_NET_IMPORT_SLOT&&!m.sockets&&m.slot_reads==3);
+ }
+ for(unsigned i=0;i<3;i++){
+  reset();m.module_value=i==0?0:i==1?-1:(int32_t)UINT32_C(0x80020002);
+  CHECK(run()&&result.api==PW_WCD_NET_LOAD&&result.raw==m.module_value&&
+   !result.errno_valid&&m.net_probe_loads==1&&!m.sockets&&result.no_dispatch);
+ }
+ reset();m.module_started=-7;CHECK(run()&&result.api==PW_WCD_MODULE_START&&result.raw==-7&&
+  !result.errno_valid&&!m.sockets&&result.net_load_result==33);
+ reset();m.zero_before=0x7f;success_responses();CHECK(!run()&&result.ready&&m.net_probe_loads==1&&m.slot_reads==3);
  reset();m.data_before=1;CHECK(!run()&&result.ready&&result.data_before&&result.data_after&&!result.possible_apply&&!m.opens&&!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.clones&&!m.sleeps);
  reset();success_responses();CHECK(!run());CHECK(result.ready&&result.possible_apply&&result.terminal&&result.data_after&&result.settled_ms>=1000&&m.clones==1&&m.closes==1&&m.net_closes==1);
  CHECK(!m.modules&&!m.loads&&!m.handles&&!m.symbols&&!m.inits);
