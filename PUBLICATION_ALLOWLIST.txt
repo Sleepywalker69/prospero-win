@@ -1139,6 +1139,7 @@ tests/test_wine_ipc_preview_composition.py
 # Optional compile-only focus cohort; not part of default Wine patch series
 docs/focus-neutral-build.md
 tools/wine_focus_neutral.py
+tools/check_focus_makedep.py
 wine/ps5/pw_wine_focus_neutral.h
 tests/test_pw_wine_focus_neutral_sink.c
 tests/test_wine_focus_neutral.py
