@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #ifndef PW_WINE_CHILD_TITLE_H
 #define PW_WINE_CHILD_TITLE_H
+#include "pw_wine_child_ui_config.h"
+#if PW_WINE_CHILD_UI_ENABLED
+#include "pw_wine_child_ui_preview.h"
+#endif
 #ifndef PW_WINE_USER_PROFILE_ENABLED
 #define PW_WINE_USER_PROFILE_ENABLED 0
 #endif
@@ -29,6 +33,10 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_child_sha2
  * The descriptor and every installed callback remain pinned until title exit. */
 int pw_wine_child_title_install(const PwPrxDescriptor *descriptor);
 void pw_wine_child_title_cancel(void);
+#if PW_WINE_CHILD_UI_ENABLED
+/* A passive preview only. No child input or display-plane handoff. */
+int pw_wine_child_title_preview(PwWineChildUiPreview *);
+#endif
 /* Safe for an ordinary title before activation. Once the supervisor starts,
  * only the owner's actual safe-release publication can permit replacement. */
 int pw_wine_child_title_restart_ready(void);

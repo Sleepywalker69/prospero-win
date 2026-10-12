@@ -49,6 +49,11 @@ poison the receiver. EOF retires it, distinguishing a record boundary from a
 truncated record. No partial frame is presented. Previously delivered complete
 records are not rolled back. EOF is not a child-exit/helper-settlement proof.
 
+A subsequent [dedicated handoff and bounded queue increment](CHILD_UI_HANDOFF.md)
+implements host-testable bootstrap-only descriptor transfer and a nonblocking
+transmit queue. It remains opt-in test code, with production and target gates
+spelled out there.
+
 ## Integration gates still required
 
 1. Admit a separate UI stream descriptor through the matched owned-child

@@ -4,6 +4,9 @@
 #include "pw_wine_child_bootstrap.h"
 #include "pw_wine_child_wire.h"
 #include "pw_wine_child_data.h"
+#if PW_WINE_CHILD_UI_ENABLED
+#include "pw_wine_child_ui_runtime.h"
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -36,7 +39,7 @@ typedef struct Generation {
     atomic_flag send_claim;
     atomic_uint origin_dead,remote_lease,abandoned,request_status;
     PwWineCreationRequest creation;
-    unsigned depth,start_phase,progress_stage,helper_cancel_attempted;
+    unsigned depth,start_phase,progress_stage,helper_cancel_attempted,startup_stop_reported;
     uint64_t generation,started,startup_end,end,last_clock,next_list,helper_recovery_end;
     uint32_t caller_pid,caller_tid,wine_pid,wine_tid,machine;
     int stream_fd,control_fd,passed_fd,service_id,baseline[PW_WFO_LIST_CAP];
@@ -49,6 +52,10 @@ typedef struct Generation {
     PwWineChildWireResult wire,helper_drain_wire;
     ServiceOptions options;
     const char *arguments[2];
+#if PW_WINE_CHILD_UI_ENABLED
+    PwWineChildUiOwner ui;
+    unsigned ui_retirement_reported;
+#endif
 } Generation;
 struct PwWineFixtureOwner {
     PwWineFixtureOwnerConfig config;
@@ -62,6 +69,9 @@ struct PwWineFixtureOwner {
     uint32_t root_pid,root_tid;
     unsigned creation_enabled;
 };
+#if PW_WINE_CHILD_UI_ENABLED
+static void retire_ui(PwWineFixtureOwner *,Generation *);
+#endif
 static void failure(PwWineFixtureOwner *o,unsigned api,int64_t raw,int error,int uncertain)
 {
     unsigned expected=0;
@@ -568,6 +578,9 @@ int pw_wine_fixture_owner_init(void *storage,unsigned bytes,const PwWineFixtureO
     if(c->profile==3||c->profile==4)for(unsigned i=0;i<64;i++)
         if(!((c->child_sha256[i]>='0'&&c->child_sha256[i]<='9')||
              (c->child_sha256[i]>='a'&&c->child_sha256[i]<='f')))return -1;
+#if PW_WINE_CHILD_UI_ENABLED
+    if(!c->ui_frame||!c->ui_retired)return -1;
+#endif
     PwWineFixtureOwner *o=storage;memset(o,0,sizeof(*o));o->config=*c;o->helper_index=-1;
     for(unsigned i=0;i<PW_WFO_MAX_GENERATIONS;i++){
         o->generations[i].stream_fd=o->generations[i].control_fd=o->generations[i].passed_fd=-1;
@@ -596,9 +609,31 @@ static void record_failure(PwWineFixtureOwner *o)
         record(o,"first_failure",NULL,o->failure_api,o->failure_raw,o->failure_errno);
     }
 }
+#if PW_WINE_CHILD_UI_ENABLED
+static int ui_frame(void *context,const void *pixels,uint32_t width,uint32_t height,uint32_t stride)
+{
+    Generation *g=context;
+    return g->owner->config.ui_frame(g->owner->config.context,g->ui.rx.identity,pixels,width,height,stride);
+}
+static void retire_ui(PwWineFixtureOwner *o,Generation *g)
+{
+    if(!g->ui.initialized)return;
+    (void)pw_wine_child_ui_owner_retire(&g->ui);
+    if(!g->ui_retirement_reported){
+        g->ui_retirement_reported=1;o->config.ui_retired(o->config.context,g->ui.rx.identity);
+        record(o,"ui_retired",g,g->ui.close_uncertain,0,0);
+    }
+    /* Close ambiguity prevents owner reuse, but does not request helper Kill
+     * or mark the Wine/control channel failed. UI has an independent lifetime. */
+    if(g->ui.close_uncertain)atomic_store(&o->uncertain,1);
+}
+#endif
 static void uncertain(PwWineFixtureOwner *o,Generation *g,unsigned api,int64_t raw,int error)
 {
     failure(o,api,raw,error,1);
+#if PW_WINE_CHILD_UI_ENABLED
+    retire_ui(o,g);
+#endif
     atomic_store_explicit(&g->state,G_UNCERTAIN,memory_order_release);
 }
 /* Only the supervisor closes this slot. A server callback may own the send
@@ -612,6 +647,9 @@ static int close_control(PwWineFixtureOwner *o,Generation *g)
 }
 static void helper_hold(PwWineFixtureOwner *o,Generation *g)
 {
+#if PW_WINE_CHILD_UI_ENABLED
+    retire_ui(o,g);
+#endif
     atomic_store(&o->blocked,1);atomic_store(&o->uncertain,1);
     unsigned previous=atomic_exchange_explicit(&g->state,G_UNCERTAIN,memory_order_acq_rel);
     if(previous!=G_UNCERTAIN)
@@ -619,6 +657,9 @@ static void helper_hold(PwWineFixtureOwner *o,Generation *g)
 }
 static void retire(PwWineFixtureOwner *o,Generation *g)
 {
+#if PW_WINE_CHILD_UI_ENABLED
+    retire_ui(o,g);
+#endif
     /* Absence, channel closure and Stop are not helper-settlement evidence. */
     if(g->helper_possible){helper_hold(o,g);return;}
     atomic_store_explicit(&g->state,G_SETTLING,memory_order_release);
@@ -681,7 +722,11 @@ static int service_list(PwWineFixtureOwner *o,Generation *g,int baseline)
     if(g->list_calls>=4096||clock_now(o,o->end,&now,!baseline))return -1;
     int rc=sceSystemServiceGetLocalProcessStatusList(data.entries,PW_WFO_LIST_CAP,&count);
     g->list_calls++;
-    if(rc||data.before!=CANARY||data.after!=CANARY||count>=PW_WFO_LIST_CAP){
+    /* Reserve one observable entry before dispatch. A full post-launch list
+     * is ambiguous; do not create that state from an already saturated
+     * baseline. Concurrent external additions still fail closed below. */
+    if(rc||data.before!=CANARY||data.after!=CANARY||count>=PW_WFO_LIST_CAP||
+       (baseline&&count>=PW_WFO_LIST_CAP-1)){
         failure(o,API_LIST,rc?rc:(int64_t)count,0,!baseline);return -1;
     }
     int present=0;
@@ -813,6 +858,12 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
     if(rc!=PW_WC_RECORD||received>=0){close_slot(o,&received);wire_failure(o,g);return;}
     if(hello.generation||hello.sequence||!hello.child_pid||!hello.child_ppid||
        hello.child_pid==(uint32_t)getpid()||strcmp(hello.build_id,o->config.build_id)){
+        /* Emit only fixed mismatch bits, never an untrusted payload/build ID. */
+        unsigned mismatch=(hello.generation?1u:0u)|(hello.sequence?2u:0u)|
+            (!hello.child_pid?4u:0u)|(!hello.child_ppid?8u:0u)|
+            (hello.child_pid==(uint32_t)getpid()?16u:0u)|
+            (strcmp(hello.build_id,o->config.build_id)?32u:0u);
+        record(o,"hello_refused",g,mismatch,0,0);
         failure(o,API_HANDOFF,hello.child_pid,0,0);atomic_store(&g->cleanup_requested,1);return;
     }
     g->session=hello;g->session.kind=PW_WC_BOOTSTRAP;g->session.sequence=1;
@@ -821,6 +872,14 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
     g->session.profile=o->config.profile;g->session.machine=g->machine;
     g->hello=1;atomic_store_explicit(&g->identity_ready,1,memory_order_release);
     record(o,"hello",g,hello.child_pid,hello.child_ppid,g->service_id);
+#if PW_WINE_CHILD_UI_ENABLED
+    PwWineChildUiIdentity id={o->config.session,g->generation,g->session.child_pid};
+    if(pw_wine_child_ui_owner_init(&g->ui,id,ui_frame,g)){
+        retire_ui(o,g);failure(o,API_PAIR,-1,0,g->ui.close_uncertain);
+        atomic_store(&g->cleanup_requested,1);return;
+    }
+    record(o,"ui_pair_owned",g,g->session.child_pid,PW_WCU_MAX_BYTES,0);
+#endif
     g->start_phase=2;
     if(async)return;
     }
@@ -832,14 +891,24 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
         g->helper_possible=1;
         record(o,"helper_possible",g,g->session.child_pid,g->service_id,0);
     }
+#if PW_WINE_CHILD_UI_ENABLED
+    rc=pw_wine_child_ui_owner_send(&g->ui,&g->io,g->control_fd,&g->session,o->config.session,g->stream_fd);
+    if(rc==PW_WC_IDLE)return;
+    g->wire=g->ui.handoff.result;
+    if(g->ui.close_uncertain){g->wire.cleanup_failed=g->wire.ownership_uncertain=1;
+        g->wire.status=PW_WC_OS;g->wire.api=PW_WC_API_CLOSE;g->wire.raw_result=-1;}
+    rc=rc==PW_WC_RECORD?0:-1;
+#else
     if(async){
         rc=pw_wine_child_wire_send_step(&g->io,g->control_fd,&g->session,g->stream_fd,&g->wire);
         if(rc==PW_WC_IDLE)return;
         rc=rc==PW_WC_RECORD?0:-1;
     }else rc=pw_wine_child_wire_send(&g->io,g->control_fd,&g->session,g->stream_fd,&g->wire);
+#endif
     close_slot(o,&g->stream_fd);
     if(rc){wire_failure(o,g);return;}
     g->start_phase=3;
+    record(o,"bootstrap_sent",g,g->session.profile,g->session.machine,0);
     if(async)return;
     }
     /* Bounded diagnostics share the original startup budget and transport.
@@ -897,6 +966,15 @@ static void start_generation_attempt(PwWineFixtureOwner *o,Generation *g)
 static void start_generation(PwWineFixtureOwner *o,Generation *g)
 {
     start_generation_attempt(o,g);
+    /* One bounded observation of interrupted startup, before cleanup policy.
+     * This is neither a child exit reason nor helper settlement evidence. */
+    if(!g->ack&&!g->startup_stop_reported&&
+       (g->wire.status||atomic_load(&g->cleanup_requested)||atomic_load(&o->blocked)||
+        atomic_load(&o->cancelled)||atomic_load(&g->state)==G_UNCERTAIN)){
+        g->startup_stop_reported=1;
+        record(o,"bootstrap_stopped",g,g->start_phase,g->progress_stage,g->helper_possible);
+        record(o,"bootstrap_stop_control",g,g->wire.status,g->wire.api,g->wire.raw_result);
+    }
     if(g->helper_possible&&(g->wire.status||atomic_load(&g->cleanup_requested)||atomic_load(&o->blocked)||
                            atomic_load(&o->cancelled)||atomic_load(&g->state)==G_UNCERTAIN)){
         /* A cancellation or pure budget refusal leaves transport usable for
@@ -1013,6 +1091,9 @@ static void supervise(PwWineFixtureOwner *o,Generation *g)
         drain_helper(o,g);state=atomic_load_explicit(&g->state,memory_order_acquire);
         if(state==G_HELPER_DRAIN||state==G_UNCERTAIN)return;
     }
+#if PW_WINE_CHILD_UI_ENABLED
+    if(state==G_UNCERTAIN)retire_ui(o,g);
+#endif
     if(state==G_UNCERTAIN){close_slot(o,&g->stream_fd);close_slot(o,&g->passed_fd);close_control(o,g);return;}
     if(state==G_SETTLING||g->absent){retire(o,g);return;}
     if(g->close_pending)close_control(o,g);
@@ -1072,6 +1153,12 @@ static void supervise(PwWineFixtureOwner *o,Generation *g)
         if(atomic_load(&g->cleanup_requested)||atomic_load(&o->cancelled)||atomic_load(&o->blocked))helper_hold(o,g);
         return;
     }
+#if PW_WINE_CHILD_UI_ENABLED
+    if(state==G_RUNNING&&!atomic_load(&g->cleanup_requested)&&!g->ui.retired){
+        if(pw_wine_child_ui_owner_pump(&g->ui)<0)retire_ui(o,g);
+    }
+    if(atomic_load(&g->cleanup_requested))retire_ui(o,g);
+#endif
     if(state==G_RUNNING&&!atomic_load(&g->cleanup_requested))observe_control(o,g);
     if(now<g->next_list)return;
     g->next_list=now>UINT64_MAX-100?UINT64_MAX:now+100;

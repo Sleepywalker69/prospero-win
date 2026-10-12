@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+"""Opt-in recipe mutations and static collector controls; no target code runs."""
+import argparse
+import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+import yaml
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
+import collect_child_ui_preview_validation as collector
+
+WORKFLOW = ROOT / '.github/workflows/windows-child-fixture.yml'
+GATE = "${{ github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true }}"
+BUILD = 'Build the opt-in enabled preview in fresh isolated outputs'
+COLLECT = 'Recheck both modes and collect static-only preview evidence with exact sources'
+UPLOAD = 'Upload the isolated preview static-validation artifact'
+EVIDENCE = 'Keep bounded preview logs even when its validation fails'
+
+
+def workflow():
+    return yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+
+
+def steps(flow):
+    return {s.get('name', str(i)): s for i, s in enumerate(flow['jobs']['matched-runtime']['steps'])}
+
+
+def recipe_contract(flow, native):
+    require = collector.require
+    option = flow['on']['workflow_dispatch']['inputs']['child_ui_preview']
+    require(option['type'] == 'boolean' and option['default'] == 'false' and option['required'] == 'false',
+            'preview dispatch must be explicit default-false boolean')
+    job = flow['jobs']['matched-runtime']
+    require('strategy' not in job and 'PW_WINE_CHILD_UI_ENABLED' not in flow['env'] and
+            'PW_WINE_CHILD_UI_ENABLED' not in job['env'], 'preview cannot replace shared/default control')
+    selected = steps(flow)
+    build, collect, upload = (selected[name] for name in (BUILD, COLLECT, UPLOAD))
+    require(all(s.get('if') == GATE and 'continue-on-error' not in s for s in (build, collect, upload)),
+            'preview success stages must retain opt-in and failure gates')
+    require(build['env']['PW_WINE_CHILD_UI_ENABLED'] == '1' and
+            build['env']['PW_WINE_CHILD_FIXTURE_MODE'] == '1' and
+            build['env']['PW_OUTPUT_SUFFIX'] == '-windows-child-fixture' and
+            build['env']['PW_WINE_CHILD_RUNTIME'] == '${{ runner.temp }}/wine-ps5', 'preview build flags differ')
+    for text in ('git worktree add --detach "$RUNNER_TEMP/preview-source" HEAD',
+                 '[[ ! -e "$RUNNER_TEMP/preview-source" && ! -L "$RUNNER_TEMP/preview-source" ]]',
+                 'rev-parse HEAD', "rev-parse 'HEAD^{tree}'",
+                 'timeout 30m bash "$RUNNER_TEMP/preview-source/tools/build_native.sh"',
+                 '--check-title --child-ui --work "$RUNNER_TEMP/preview-source"',
+                 '--build "$RUNNER_TEMP/preview-source/build/native-windows-child-fixture"',
+                 '--app "$RUNNER_TEMP/preview-source/dist/PPSA99995-windows-child-fixture"',
+                 '--run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"'):
+        require(text in build['run'], 'preview source/build recipe omission: ' + text)
+    for text in ('child_ui_args+=(--child-ui)',
+                 '--out "$build/wine-child" --llvm-bindir "$llvm_bindir" "${child_ui_args[@]}"',
+                 '--out "$build-wine-child-title-inspection" "${child_ui_args[@]}"'):
+        require(text in native, 'worker/internal title flag route omission')
+    for text in ("source['paths']['repo'] = str(temp / 'preview-source')",
+                 "source['paths']['title_build'] = str(temp / 'preview-source/build/native-windows-child-fixture')",
+                 'package_windows_child_fixture.py retain-sources',
+                 'collect_child_ui_preview_validation.py --inputs "$RUNNER_TEMP/package-inputs.json"',
+                 '--repo "$RUNNER_TEMP/preview-source"',
+                 '--sources "$RUNNER_TEMP/preview-retained-sources"',
+                 '--report "$RUNNER_TEMP/preview-title-inspection/native-wine-child-title.json"',
+                 '--out "$RUNNER_TEMP/child-ui-preview-static-validation"'):
+        require(text in collect['run'], 'preview collection recipe omission: ' + text)
+    require('package_windows_child_fixture.py assemble' not in collect['run'], 'preview deployment admission expanded')
+    require(upload['with'] == {'name': 'child-ui-preview-static-validation-${{ github.sha }}-${{ github.run_attempt }}',
+                              'path': '${{ runner.temp }}/child-ui-preview-static-validation/',
+                              'retention-days': '7', 'if-no-files-found': 'error'}, 'preview artifact identity differs')
+    ordered = job['steps']
+    control = next(s for s in ordered if s.get('name') == 'Build the full-CRT child once and the matched title')
+    require('PW_WINE_CHILD_UI_ENABLED' not in control['env'] and '--child-ui' not in control['run'] and
+            'if' not in control, 'default-off title control changed')
+    normal_upload = next(s for s in ordered if s.get('name') == 'Upload the complete checked original-fixture archive')
+    require(ordered.index(normal_upload) < ordered.index(build) < ordered.index(collect) < ordered.index(upload),
+            'preview must follow successful default-off package')
+    names = [s['with']['name'] for j in flow['jobs'].values() for s in j['steps']
+             if s.get('uses', '').startswith('actions/upload-artifact@')]
+    require(len(names) == len(set(names)), 'workflow artifact collision')
+    require(len([s for s in ordered if '--stage target-runtime --' in s.get('run', '')]) == 1,
+            'target runtime must build once')
+    require(all('actions/cache' not in s.get('uses', '') for s in (build, collect, upload)),
+            'preview title/worker reuse forbidden')
+
+
+class WorkflowRecipe(unittest.TestCase):
+    def setUp(self):
+        self.flow = workflow()
+        self.native = (ROOT / 'tools/build_native.sh').read_text()
+
+    def test_actual_workflow_contract_and_shell_syntax(self):
+        recipe_contract(self.flow, self.native)
+        for step in self.flow['jobs']['matched-runtime']['steps']:
+            if 'run' in step:
+                result = subprocess.run(['bash', '-n'], input=step['run'], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_omitted_recipe_controls_are_rejected(self):
+        for name, text in ((BUILD, '--check-title --child-ui'), (BUILD, 'git worktree add --detach'),
+                           (BUILD, "rev-parse 'HEAD^{tree}'"),
+                           (COLLECT, 'package_windows_child_fixture.py retain-sources'),
+                           (COLLECT, 'collect_child_ui_preview_validation.py'),
+                           (COLLECT, '--sources "$RUNNER_TEMP/preview-retained-sources"')):
+            with self.subTest(name=name, omission=text):
+                mutant = copy.deepcopy(self.flow)
+                steps(mutant)[name]['run'] = steps(mutant)[name]['run'].replace(text, 'omitted')
+                with self.assertRaises(ValueError): recipe_contract(mutant, self.native)
+
+    def test_flags_default_and_artifact_collision_mutations_rejected(self):
+        mutations = [lambda f: f['on']['workflow_dispatch']['inputs']['child_ui_preview'].update(default='true'),
+                     lambda f: steps(f)[BUILD]['env'].update(PW_WINE_CHILD_UI_ENABLED='0'),
+                     lambda f: steps(f)[BUILD]['env'].update(PW_OUTPUT_SUFFIX='-unadmitted'),
+                     lambda f: steps(f)[BUILD]['env'].update(PW_WINE_CHILD_RUNTIME='other-runtime'),
+                     lambda f: steps(f)[BUILD].pop('if'),
+                     lambda f: steps(f)[UPLOAD].update(**{'if': '${{ always() }}'}),
+                     lambda f: steps(f)[COLLECT].update(**{'continue-on-error': 'true'}),
+                     lambda f: steps(f)[UPLOAD]['with'].update(name='windows-child-fixture-${{ github.sha }}-${{ github.run_attempt }}'),
+                     lambda f: f['jobs']['matched-runtime']['env'].update(PW_WINE_CHILD_UI_ENABLED='1')]
+        for index, change in enumerate(mutations):
+            with self.subTest(index=index):
+                mutant = copy.deepcopy(self.flow); change(mutant)
+                with self.assertRaises(ValueError): recipe_contract(mutant, self.native)
+
+    def test_both_worker_and_internal_title_routes_required(self):
+        for text in ('child_ui_args+=(--child-ui)',
+                     '--out "$build/wine-child" --llvm-bindir "$llvm_bindir" "${child_ui_args[@]}"',
+                     '--out "$build-wine-child-title-inspection" "${child_ui_args[@]}"'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                recipe_contract(self.flow, self.native.replace(text, 'omitted'))
+
+    def run_build(self, root, script=None, enabled='1'):
+        selected = steps(self.flow)[BUILD]
+        env = dict(os.environ, RUNNER_TEMP=str(root / 'temp'), GITHUB_WORKSPACE=str(root / 'repo'),
+                   GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='2', PS5_PAYLOAD_SDK='/inert/sdk',
+                   FOUNDATION='/inert/foundation', WINE_WORK='/inert/runtime', LLVM_CONFIG=str(root / 'llvm-config'))
+        env.update({k: v.replace('${{ runner.temp }}', str(root / 'temp')) for k, v in selected['env'].items()})
+        env['PW_WINE_CHILD_UI_ENABLED'] = enabled
+        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script or selected['run']],
+                              cwd=root / 'repo', env=env, capture_output=True, text=True, timeout=20)
+
+    def fixture(self, root):
+        (root / 'temp').mkdir(); (root / 'repo/tools').mkdir(parents=True)
+        (root / 'repo/control-sentinel').write_text('unchanged default-off control')
+        (root / 'llvm-config').write_text('#!/bin/sh\necho /inert/llvm\n'); (root / 'llvm-config').chmod(0o755)
+        (root / 'repo/tools/build_native.sh').write_text('''#!/bin/bash
+set -eu
+[[ $PW_WINE_CHILD_UI_ENABLED == 1 && $PW_WINE_CHILD_FIXTURE_MODE == 1 ]]
+[[ $PW_OUTPUT_SUFFIX == -windows-child-fixture && $PW_WINE64_SCRIPT == 0 ]]
+[[ $PW_WINE_CHILD_RUNTIME == "$RUNNER_TEMP/wine-ps5" ]]
+root=$(cd "$(dirname "$0")/.." && pwd)
+[[ $root == "$RUNNER_TEMP/preview-source" ]]
+mkdir -p "$root/build/native-windows-child-fixture/wine-child" "$root/dist/PPSA99995-windows-child-fixture"
+echo INERT_ENABLED_BUILD
+''')
+        (root / 'repo/tools/build_wine_service_child.py').write_text('''import os, pathlib, sys
+a=sys.argv[1:]
+assert '--check-title' in a and '--child-ui' in a
+assert a[a.index('--work')+1] == os.environ['RUNNER_TEMP']+'/preview-source'
+assert a[a.index('--run-id')+1]=='123' and a[a.index('--run-attempt')+1]=='2'
+assert a[a.index('--runtime')+1]=='/inert/runtime'
+p=pathlib.Path(a[a.index('--out')+1]); p.mkdir(); (p/'inert.json').write_text('{}')
+print('INERT_ENABLED_CHECK')
+''')
+        subprocess.run(['git', 'init', '-q', str(root / 'repo')], check=True)
+        subprocess.run(['git', '-C', str(root / 'repo'), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(root / 'repo'), '-c', 'user.name=Test', '-c',
+                        'user.email=test@example.invalid', 'commit', '-qm', 'Inert recipe inputs'], check=True)
+
+    def test_real_opt_in_shell_builds_fresh_same_source_and_refuses_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); self.fixture(root)
+            result = self.run_build(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('INERT_ENABLED_CHECK', result.stdout)
+            self.assertEqual((root / 'repo/control-sentinel').read_text(), 'unchanged default-off control')
+            self.assertNotEqual(self.run_build(root).returncode, 0)
+
+    def test_real_opt_in_shell_refuses_flag_mismatches(self):
+        for enabled, omit in [('0', False), ('1', True)]:
+            with self.subTest(enabled=enabled, omit=omit), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); self.fixture(root)
+                script = steps(self.flow)[BUILD]['run']
+                if omit: script = script.replace('--check-title --child-ui', '--check-title')
+                result = self.run_build(root, script, enabled)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((root / 'temp/preview-title-inspection/inert.json').exists())
+
+
+class CollectorControls(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = {'commit': 'a' * 40, 'tree': 'b' * 40}
+        self.paths = {}
+        for name in ('repo', 'sdk', 'foundation', 'wine_work', 'llvm_bindir', 'service_work', 'title',
+                     'title_build', 'fixture', 'user_fixture', 'network_fixture'):
+            p = self.root / ('control-' + name); p.mkdir(); self.paths[name] = str(p)
+        for name in ('title_report', 'sdk_source_archive', 'wine_archive'):
+            p = self.root / ('control-' + name); p.write_text('{}'); self.paths[name] = str(p)
+        self.args = argparse.Namespace(**{name: self.root / name for name in
+            ('repo', 'build', 'app', 'report', 'sources', 'sources_report', 'out')})
+        for name in ('repo', 'build', 'app', 'sources'): getattr(self.args, name).mkdir()
+        (self.args.build / 'wine-child').mkdir()
+        (self.args.build / 'wine-child-title-compile.json').write_text('{}')
+        (Path(self.paths['title_build']) / 'wine-child-title-compile.json').write_text('{}')
+        (self.args.sources / 'source.txt').write_text('inert complete-source validator fixture')
+        self.args.sources_report.write_text('{}')
+        self.control, self.control_title = self.records(False)
+        self.preview, self.preview_title = self.records(True)
+        self.config = {'schema': 'pw-windows-child-package-inputs/1', 'paths': self.paths,
+                       'run_url': 'https://github.com/Sleepywalker69/prospero-win/actions/runs/123', 'run_attempt': '2'}
+        self.sync()
+
+    def records(self, enabled):
+        contract = collector.child.child_ui_contract(enabled)
+        data = b'preview image' if enabled else b'control image'
+        app = self.args.app if enabled else Path(self.paths['title'])
+        (app / 'eboot.bin').write_bytes(data)
+        files = {'eboot.bin': {**collector.package.record(app / 'eboot.bin'), 'mode': 0o644}}
+        runtime = {'report_sha256': 'r' * 64, 'ntdll_sha256': 'n' * 64}
+        worker = {'schema': 'pw-wine-service-child/2', 'project': self.project, 'child_ui': contract,
+                  'runtime': runtime, 'sources': {'reviewed.c': 's' * 64}, 'console_execution_verified': False,
+                  'worker': {'build_id': ('c' if enabled else 'd') * 40,
+                             'sha256': ('e' if enabled else 'f') * 64}}
+        title = {'schema': 'pw-windows-child-title/2', 'project': self.project, 'runtime': runtime,
+                 'console_execution_verified': False, 'build_inputs': {'child_ui': contract},
+                 'title_compile_inputs': {'child_ui': contract}, 'files': files}
+        return worker, title
+
+    def sync(self):
+        for path, value in ((Path(self.paths['service_work']) / 'native-wine-child-build.json', self.control),
+                            (self.args.build / 'wine-child/native-wine-child-build.json', self.preview),
+                            (Path(self.paths['title_report']), self.control_title), (self.args.report, self.preview_title)):
+            path.write_text(json.dumps(value))
+
+    def collect(self, *, mutate_replay=None, retained_error=False):
+        self.sync(); calls = []
+        def replay(args):
+            calls.append(getattr(args, 'child_ui', False))
+            args.out.mkdir()
+            value = copy.deepcopy(self.preview_title if getattr(args, 'child_ui', False) else self.control_title)
+            if mutate_replay: mutate_replay(value, bool(getattr(args, 'child_ui', False)))
+            (args.out / 'native-wine-child-title.json').write_text(json.dumps(value))
+            self.assertEqual(args.run_id, '123'); self.assertEqual(args.run_attempt, '2')
+            self.assertEqual(args.work, self.args.repo if getattr(args, 'child_ui', False) else Path(self.paths['repo']))
+            return value
+        def sources(*args):
+            self.assertEqual(args[0], self.args.repo)
+            self.assertEqual(args[5], self.preview)
+            if retained_error: raise ValueError('source drift')
+            return {'inventory': collector.prefix.inventory(self.args.sources)}
+        with mock.patch.object(collector.prefix, 'project', return_value=self.project), \
+             mock.patch.object(collector.child, 'check_title', side_effect=replay), \
+             mock.patch.object(collector.prefix, 'load_tool', return_value=collector.child), \
+             mock.patch.object(collector.package, 'retained_sources', side_effect=sources):
+            result = collector.collect(self.config, self.args)
+        self.assertEqual(calls, [False, True])
+        return result
+
+    def test_collect_replays_off_and_explicit_on_without_deployment_admission(self):
+        result = self.collect()
+        self.assertIs(result['deployment_package'], False)
+        self.assertIs(result['runtime_validated'], False)
+        self.assertIs(result['child_input_enabled'], False)
+        self.assertEqual(result['same_runtime'], self.preview['runtime'])
+        self.assertTrue((self.args.out / 'STATIC-VALIDATION.json').is_file())
+        self.assertTrue((self.args.out / 'SHA256SUMS').is_file())
+        self.assertFalse((self.args.out / 'console').exists())
+        self.assertFalse((self.args.out / 'PPSA99995').exists())
+        self.assertEqual((self.args.out / 'target-images/eboot.bin').read_bytes(), b'preview image')
+
+    def test_contract_field_type_and_omission_mutations_rejected(self):
+        expected = collector.child.child_ui_contract(True)
+        mutants = [{k: v for k, v in expected.items() if k != field} for field in expected]
+        mutants += [{**expected, field: value} for field, value in
+                    [('enabled', 1), ('enabled', False), ('bootstrap_version', 2), ('bootstrap_version', 3.0),
+                     ('bootstrap_rights', 1), ('input_enabled', True), ('runtime_validated', True),
+                     ('preview_only', False), ('socket_identity', None)]]
+        for value in mutants:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                collector.exact_contract(value, True)
+
+    def test_all_manifest_and_title_mode_paths_reject_crossed_modes(self):
+        values = [self.control, self.preview, self.control_title['build_inputs'],
+                  self.preview_title['build_inputs'], self.control_title['title_compile_inputs'],
+                  self.preview_title['title_compile_inputs']]
+        for value in values:
+            old = value['child_ui']; value['child_ui'] = collector.child.child_ui_contract(not old['enabled'])
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                collector.paired_contract(self.control, self.preview, self.control_title, self.preview_title, self.project)
+            value['child_ui'] = old
+
+    def test_source_runtime_project_and_artifact_drift_rejected(self):
+        mutations = [('sources', {'reviewed.c': 'changed'}), ('runtime', {'report_sha256': 'changed'}),
+                     ('project', {'commit': 'changed'}), ('worker', copy.deepcopy(self.control['worker']))]
+        for name, value in mutations:
+            saved = self.preview[name]; self.preview[name] = value
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                collector.paired_contract(self.control, self.preview, self.control_title, self.preview_title, self.project)
+            self.preview[name] = saved
+        self.preview_title['files'] = self.control_title['files']
+        with self.assertRaises(ValueError):
+            collector.paired_contract(self.control, self.preview, self.control_title, self.preview_title, self.project)
+
+    def test_replayed_receipt_drift_never_creates_bundle(self):
+        with self.assertRaisesRegex(ValueError, 'replayed preview title receipt'):
+            self.collect(mutate_replay=lambda value, enabled: value.update(changed=True) if enabled else None)
+        self.assertFalse(self.args.out.exists())
+
+    def test_crossed_mode_refusal_never_creates_bundle(self):
+        self.preview['child_ui'] = collector.child.child_ui_contract(False)
+        with self.assertRaisesRegex(ValueError, 'mode contract differs'): self.collect()
+        self.assertFalse(self.args.out.exists())
+
+    def test_separate_checkout_source_drift_refused_before_replay(self):
+        with mock.patch.object(collector.prefix, 'project', side_effect=[self.project, {'commit': 'changed'}]), \
+             mock.patch.object(collector.child, 'check_title') as inspect:
+            with self.assertRaisesRegex(ValueError, 'same-source HEAD'):
+                collector.collect(self.config, self.args)
+        inspect.assert_not_called()
+        self.assertFalse(self.args.out.exists())
+
+    def test_input_receipt_mutation_during_replay_never_creates_bundle(self):
+        def mutate(value, enabled):
+            if enabled: self.args.report.write_text('{"changed_during_replay": true}')
+        with self.assertRaisesRegex(ValueError, 'receipt changed during replay'):
+            self.collect(mutate_replay=mutate)
+        self.assertFalse(self.args.out.exists())
+
+    def test_compile_receipt_mutation_during_replay_never_creates_bundle(self):
+        def mutate(value, enabled):
+            if enabled: (self.args.build / 'wine-child-title-compile.json').write_text('{"changed": true}')
+        with self.assertRaisesRegex(ValueError, 'receipt changed during replay'):
+            self.collect(mutate_replay=mutate)
+        self.assertFalse(self.args.out.exists())
+
+    def test_retained_source_refusal_never_creates_bundle(self):
+        with self.assertRaisesRegex(ValueError, 'source drift'): self.collect(retained_error=True)
+        self.assertFalse(self.args.out.exists())
+
+    def test_post_inspection_image_drift_never_creates_bundle(self):
+        (self.args.app / 'eboot.bin').write_bytes(b'changed after synthetic inspection')
+        with self.assertRaisesRegex(ValueError, 'title changed after replay'): self.collect()
+        self.assertFalse(self.args.out.exists())
+
+    def test_output_collision_and_input_symlink_refused(self):
+        self.args.out.mkdir(); (self.args.out / 'sentinel').write_text('preserve')
+        with self.assertRaisesRegex(ValueError, 'output already exists'): self.collect()
+        self.assertEqual((self.args.out / 'sentinel').read_text(), 'preserve')
+        self.args.out = self.root / 'new-output'
+        linked = self.root / 'linked-app'; linked.symlink_to(self.args.app, target_is_directory=True)
+        self.args.app = linked
+        with self.assertRaisesRegex(ValueError, 'symlink'): self.collect()
+        self.assertFalse(self.args.out.exists())
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

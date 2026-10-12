@@ -2,6 +2,10 @@
 #ifndef PW_WINE_CHILD_BOOTSTRAP_H
 #define PW_WINE_CHILD_BOOTSTRAP_H
 #include "pw_wine_child_wire.h"
+#include "pw_wine_child_ui_config.h"
+#if PW_WINE_CHILD_UI_ENABLED
+#include "pw_wine_child_ui_channel.h"
+#endif
 #include "../src/pw_wine_start.h"
 #include "../wine/ps5/pw_wine_fixture_socket.h"
 #include "../wine/ps5/pw_wine_creation.h"
@@ -36,6 +40,9 @@ typedef struct PwWineChildBootstrapOps {
     PwWineFixtureSocketSink socket_sink;
     void (*record)(void *, unsigned stage, int status); /* optional bounded observer */
     PwWineCreationChild child; /* exact validated BOOTSTRAP session, copied once */
+#if PW_WINE_CHILD_UI_ENABLED
+    PwWineChildUiChannel *ui; /* process-lifetime frame producer, input disabled */
+#endif
 } PwWineChildBootstrapOps;
 typedef struct PwWineChildBootstrap {
     PwWineStart start;
@@ -46,6 +53,10 @@ typedef struct PwWineChildBootstrap {
     unsigned stage, prepared, started;
     int status;
     int (*socket_failure)(PwWineFixtureSocketResult *);
+#if PW_WINE_CHILD_UI_ENABLED
+    void (*ui_set_present)(PwWinePresentSink,void *);
+    unsigned ui_attached;
+#endif
 } PwWineChildBootstrap;
 /* All required native env precedes module load/constructors. No ownership of
  * server_fd is consumed here. It passes to ntdll only after start succeeds.

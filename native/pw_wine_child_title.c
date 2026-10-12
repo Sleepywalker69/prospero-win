@@ -14,6 +14,20 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef PW_WINE_CHILD_UI_COHORT
+#define PW_WINE_CHILD_UI_COHORT 0
+#endif
+_Static_assert(PW_WINE_CHILD_UI_COHORT==PW_WINE_CHILD_UI_ENABLED,"title/worker child UI cohort");
+#if PW_WINE_CHILD_UI_ENABLED
+static PwWineChildUiMailbox ui_mailbox;
+static int ui_frame(void *context,PwWineChildUiIdentity id,const void *p,uint32_t w,uint32_t h,uint32_t stride)
+{(void)context;return pw_wine_child_ui_mailbox_put(&ui_mailbox,id,p,w,h,stride);}
+static void ui_retired(void *context,PwWineChildUiIdentity id)
+{(void)context;pw_wine_child_ui_mailbox_retire(&ui_mailbox,id);}
+int pw_wine_child_title_preview(PwWineChildUiPreview *out)
+{return pw_wine_child_ui_mailbox_take(&ui_mailbox,out);}
+#endif
+
 const char pw_wine_child_title_marker[] = "pw-wine-child-fixture/1";
 extern const unsigned char pw_wine_child_image[];
 extern const size_t pw_wine_child_image_size;
@@ -191,6 +205,9 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
      * these generations are never recycled within this native process. */
     title.session = (uint64_t)(unsigned)pid << 32 | (uint32_t)now;
     if (profile == 1 || profile == 3 || profile == 4) memcpy(title.child_hash, fixture_hash, sizeof(title.child_hash));
+#if PW_WINE_CHILD_UI_ENABLED
+    if(pw_wine_child_ui_mailbox_init(&ui_mailbox))goto failure;
+#endif
     unsigned bytes = pw_wine_fixture_owner_bytes();
     if (!bytes || bytes > 1024u * 1024u) goto failure;
     title.owner = calloc(1, bytes);
@@ -204,6 +221,9 @@ int pw_wine_child_title_prepare(unsigned profile, const char *fixture_hash)
         .helper_image = pw_wine_child_image, .helper_bytes = (uint32_t)pw_wine_child_image_size,
         .build_id = PW_WINE_CHILD_BUILD_ID, .context = &title,
         .clock_ms = clock_ms, .cancelled = cancelled, .record = record
+#if PW_WINE_CHILD_UI_ENABLED
+        , .ui_frame=ui_frame, .ui_retired=ui_retired
+#endif
     };
     status = pw_wine_fixture_owner_init(title.owner, bytes, &config, &title.provider);
     if (status) goto failure;

@@ -2,6 +2,9 @@
 #include "pw_wine_child_bootstrap.h"
 #include <stdio.h>
 #include <string.h>
+#if PW_WINE_CHILD_UI_ENABLED
+static int refuse_child_display(void *unused){(void)unused;return -1;}
+#endif
 static int step(PwWineChildBootstrap *b,PwNativeChildIo *io,const PwWineChildBootstrapOps *o,unsigned stage,int status)
 {
     unsigned left;b->stage=stage;
@@ -20,6 +23,9 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
     if((profile!=PW_WC_PROFILE_FIXTURE&&profile!=PW_WC_PROFILE_BATTLENET&&profile!=PW_WC_PROFILE_USER&&profile!=PW_WC_PROFILE_NET)||
        (machine!=PW_WC_MACHINE_AMD64&&machine!=PW_WC_MACHINE_I386)||
        ((profile==PW_WC_PROFILE_FIXTURE||profile==PW_WC_PROFILE_USER||profile==PW_WC_PROFILE_NET)&&machine!=PW_WC_MACHINE_AMD64))return -1;
+#if PW_WINE_CHILD_UI_ENABLED
+    if(!o->ui||!o->ui->initialized||o->ui->tx.identity.generation!=o->child.generation)return -1;
+#endif
     if(o->child.abi!=PW_WINE_CREATION_ABI||o->child.bytes!=sizeof(o->child)||
        !o->child.generation||!o->child.wine_pid||!o->child.wine_tid||
        o->child.profile!=profile||o->child.machine!=machine)return -1;
@@ -84,6 +90,13 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
         pw_prx_lookup(b->start.descriptor,"pw_wine_fixture_socket_set_sink");
     b->socket_failure=(int(*)(PwWineFixtureSocketResult*))(uintptr_t)
         pw_prx_lookup(b->start.descriptor,"pw_wine_fixture_socket_failure");
+#if PW_WINE_CHILD_UI_ENABLED
+    b->ui_set_present=(void(*)(PwWinePresentSink,void*))(uintptr_t)
+        pw_prx_lookup(b->start.descriptor,"pw_wine_set_present_sink");
+    void (*ui_set_release)(PwWineDisplayRelease,void*)=(void(*)(PwWineDisplayRelease,void*))(uintptr_t)
+        pw_prx_lookup(b->start.descriptor,"pw_wine_set_display_release");
+    if(!b->ui_set_present||!ui_set_release)return step(b,io,o,PW_WCB_EXPORTS,-1);
+#endif
     if(!creation_abi||!creation_protocol||!creation_install||
        (profile==PW_WC_PROFILE_BATTLENET&&!wow64_abi)||!private_abi||!local_threads||!cwd||!sink||!socket_sink||!b->socket_failure||!b->start.adopted||
        !pw_prx_lookup(b->start.descriptor,"module_start"))return step(b,io,o,PW_WCB_EXPORTS,-1);
@@ -97,6 +110,11 @@ int pw_wine_child_bootstrap_prepare(PwWineChildBootstrap *b,PwNativeChildIo *io,
     if(step(b,io,o,PW_WCB_CWD,cwd(logical_cwd)))return -1;
     if(step(b,io,o,PW_WCB_REGISTRY,local_threads(o->register_thread,o->unregister_thread)))return -1;
     if(step(b,io,o,PW_WCB_SOCKET,socket_sink(o->socket_sink,o->context)))return -1;
+#if PW_WINE_CHILD_UI_ENABLED
+    /* No worker input API is installed until focus/release settlement exists. */
+    ui_set_release(refuse_child_display,NULL); /* children cannot acquire native display ownership */
+    b->ui_set_present(pw_wine_child_ui_channel_present,o->ui);b->ui_attached=1;
+#endif
     if(step(b,io,o,PW_WCB_PREPARED,0))return -1;
     b->prepared=1;return 0;
 }

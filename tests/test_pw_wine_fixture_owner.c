@@ -77,7 +77,8 @@ static struct {
     int record_action,step_result,root_during_send,wire_cancelled,async_idle;
     int add_cancel,add_partial_failure;
     int helper_open_error[2],helper_mismatch[2],fd_helper[128];
-    unsigned helper_matches,launch_paths;
+    unsigned helper_matches,launch_paths,hello_bad,hello_refused,bootstrap_sent,bootstrap_stopped,stop_control;
+    int64_t hello_mismatch,stop_phase,stop_progress,stop_helper,stop_status,stop_api,stop_raw;
     int64_t launch_read_index,launch_service_index;
     const char *record_event;
     unsigned inject_progress, progress_auto, progress_stage, progress_mutation, progress_records, progress_mask_refused;
@@ -112,6 +113,10 @@ static void record_cb(void *c,const char *event,uint64_t generation,int64_t a,in
 {
     CHECK(c==&m&&event);(void)generation;(void)a;(void)b;(void)d;m.records++;
     if(!strcmp(event,"bootstrap_progress"))m.progress_records++;
+    if(!strcmp(event,"hello_refused")){m.hello_refused++;m.hello_mismatch=a;CHECK(!b&&!d);}
+    if(!strcmp(event,"bootstrap_sent")){m.bootstrap_sent++;CHECK(a==owner.config.profile&&b==owner.generations[0].machine&&!d);}
+    if(!strcmp(event,"bootstrap_stopped")){m.bootstrap_stopped++;m.stop_phase=a;m.stop_progress=b;m.stop_helper=d;}
+    if(!strcmp(event,"bootstrap_stop_control")){m.stop_control++;m.stop_status=a;m.stop_api=b;m.stop_raw=d;}
     if(!strcmp(event,"first_failure")){
         CHECK(!m.inside_callback&&!m.first_failures);
         m.first_failures++;m.first_index=m.records;m.first_api=a;m.first_raw=b;m.first_errno=d;
@@ -245,7 +250,8 @@ static int progress_frame(uint32_t kinds,PwWineChildFrame *out,PwWineChildWireRe
 int pw_wine_child_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *out,int *right,PwWineChildWireResult *r)
 {
     CHECK(io&&fd==80&&*right==-1);m.receives++;
-    if(m.receive_error){r->status=1;r->raw_result=-1;return PW_WC_ERROR;}
+    if(m.receive_error){r->status=m.receive_error==2?PW_WC_PROTOCOL:1;
+        r->api=PW_WC_API_RECEIVE;r->raw_result=m.receive_error==2?7:-1;return PW_WC_ERROR;}
     if(m.receive_eof){r->channel_zero_observed=r->hangup_observed=1;return PW_WC_CHANNEL_CLOSED;}
     if(m.inject_progress&&(kinds&PW_WC_KIND(PW_WC_BOOTSTRAP_ACK)))return progress_frame(kinds,out,r);
     if(m.failure_frame){
@@ -266,7 +272,7 @@ int pw_wine_child_wire_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineC
         return PW_WC_RECORD;
     }
     memset(out,0,sizeof(*out));
-    if(kinds==PW_WC_KIND(PW_WC_HELLO)){out->kind=PW_WC_HELLO;out->child_pid=600;out->child_ppid=53;memcpy(out->build_id,build40,41);}
+    if(kinds==PW_WC_KIND(PW_WC_HELLO)){out->kind=PW_WC_HELLO;out->child_pid=600;out->child_ppid=53;memcpy(out->build_id,build40,41);if(m.hello_bad)out->build_id[0]='f';}
     else{*out=m.sent;out->kind=PW_WC_BOOTSTRAP_ACK;if(m.ack_bad)out->generation++;}
     if(m.extra_right)*right=82;
     return PW_WC_RECORD;
@@ -284,9 +290,12 @@ int pw_wine_child_wire_receive_nowait(PwNativeChildIo *io,int fd,uint32_t kinds,
         return pw_wine_child_wire_receive(io,fd,kinds,out,right,r);
     return pw_wine_child_wire_receive_step(io,fd,kinds,out,right,r);
 }
+#ifndef PW_WFO_UI_TEST_CONFIG
+#define PW_WFO_UI_TEST_CONFIG
+#endif
 static PwWineFixtureOwnerConfig config(unsigned profile)
 {
-    PwWineFixtureOwnerConfig c={.session=0x123400,.profile=profile,.child_unix_path="/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe",.child_sha256=hash64,.helper_image=helper_bytes,.helper_bytes=4,.build_id=build40,.context=&m,.clock_ms=clock_cb,.cancelled=cancel_cb,.record=record_cb};return c;
+    PwWineFixtureOwnerConfig c={.session=0x123400,.profile=profile,.child_unix_path="/data/prospero-win/prefixes/windows-child-fixture-v1/drive_c/windows-child-fixture/child.exe",.child_sha256=hash64,.helper_image=helper_bytes,.helper_bytes=4,.build_id=build40,.context=&m,.clock_ms=clock_cb,.cancelled=cancel_cb,.record=record_cb PW_WFO_UI_TEST_CONFIG};return c;
 }
 static void reset(unsigned profile)
 {
@@ -418,6 +427,65 @@ static void list_launch_tests(void)
         CHECK(m.adds==(bad!=3));if(bad==3)CHECK(!m.closes[80]&&!m.closes[81]);
     }
 }
+/* Headroom is a pre-dispatch policy, never a certificate for existing
+ * services or helper transactions. All service boundaries remain mocked. */
+static void list_headroom_tests(void)
+{
+    for(unsigned count=14;count<=16;count++){
+        Generation *g=bound(2);PwWineCreationProvider creation;
+        CHECK(!pw_wine_fixture_owner_creation(&owner,&creation));
+        m.auto_present=0;m.list_count=(int)count;
+        for(unsigned i=0;i<count;i++)m.list_ids[i]=800+(int)i;
+        g->stream_fd=71;g->wine_tid=47;atomic_store(&g->state,G_LAUNCH);
+        start_generation_attempt(&owner,g);
+        if(count==14){
+            CHECK(m.adds==1&&m.pairs==1&&g->service_id==900&&g->start_phase==1);
+            CHECK(!atomic_load(&owner.blocked)&&!atomic_load(&owner.uncertain));
+            CHECK(!m.closes[71]&&!m.closes[80]&&m.closes[81]==1);
+            /* Our new entry fits at15. An unrelated concurrent addition
+             * then makes the next16-entry observation ambiguous. */
+            m.list_ids[14]=900;m.list_count=15;
+            CHECK(service_list(&owner,g,0)==1&&!atomic_load(&owner.uncertain));
+            m.list_ids[15]=901;m.list_count=16;
+            CHECK(service_list(&owner,g,0)<0&&atomic_load(&owner.uncertain));
+            CHECK(!m.kills&&!g->hello&&!g->ack&&!g->helper_possible);
+            CHECK(!pw_wine_fixture_owner_release_ready(&owner));
+        }else{
+            CHECK(!m.adds&&!m.pairs&&!m.sends&&!m.receives&&!m.kills);
+            CHECK(atomic_load(&g->state)==G_RETIRED&&!g->launch_possible&&!g->service_id);
+            CHECK(m.closes[71]==1&&!m.closes[80]&&!m.closes[81]);
+            CHECK(atomic_load(&owner.blocked)&&!atomic_load(&owner.uncertain));
+            CHECK(owner.failure_api==API_LIST&&owner.failure_raw==(int64_t)count);
+            CHECK(!g->hello&&!g->ack&&!g->helper_possible&&!atomic_load(&g->startup_success));
+            CHECK(!pw_wine_fixture_owner_release_ready(&owner));
+        }
+        printf("service headroom: baseline=%u adds=%u uncertain=%u release=%d\n",count,m.adds,
+               atomic_load(&owner.uncertain),pw_wine_fixture_owner_release_ready(&owner));
+    }
+    Generation *existing=bound(2);PwWineCreationProvider creation;
+    CHECK(!pw_wine_fixture_owner_creation(&owner,&creation));
+    existing->service_id=900;existing->hello=1;existing->helper_possible=1;
+    existing->session.child_pid=600;atomic_store(&existing->identity_ready,1);
+    atomic_store(&existing->state,G_STARTING);
+    uint64_t id=0,bound_id=0;
+    const char *path="/data/prospero-win/prefixes/battlenet-experimental-v1/drive_c/Agent.exe";
+    CHECK(!provider.admit(&owner,44,48,PW_WINE_FIXTURE_AMD64,path,&id));
+    CHECK(!provider.bind_process(&owner,44,48,49,&bound_id)&&bound_id==id);
+    Generation *g=find(&owner,id);CHECK(g&&g!=existing);
+    g->stream_fd=71;g->wine_tid=50;atomic_store(&g->state,G_LAUNCH);
+    m.auto_present=0;m.list_count=15;m.list_ids[0]=900;
+    for(unsigned i=1;i<15;i++)m.list_ids[i]=800+(int)i;
+    start_generation_attempt(&owner,g);
+    CHECK(!m.adds&&!m.pairs&&atomic_load(&g->state)==G_RETIRED);
+    CHECK(existing->helper_possible&&atomic_load(&existing->state)==G_STARTING&&!existing->closed);
+    CHECK(!existing->ack&&!atomic_load(&existing->startup_success)&&!atomic_load(&existing->released));
+    CHECK(!pw_wine_fixture_owner_release_ready(&owner));
+    CHECK(!report_root_exit(&owner,0));pw_wine_fixture_owner_pump(&owner);
+    CHECK(existing->helper_possible&&atomic_load(&existing->state)==G_UNCERTAIN&&!m.kills);
+    CHECK(!pw_wine_fixture_owner_release_ready(&owner)&&!atomic_load(&existing->released));
+    puts("service headroom: saturated refusal preserves existing helper hold; no release or terminal success");
+}
+
 static void release_tests(void)
 {
     release_deadlock();
@@ -1011,12 +1079,43 @@ static void cleanup_owner_tests(void)
     CHECK(atomic_load(&g->state)==G_CLEANUP&&!atomic_load(&owner.uncertain));
 }
 
+static void startup_observation_tests(void)
+{
+    Generation *g=progress_waiter();
+    CHECK(m.bootstrap_sent==1&&!m.bootstrap_stopped);
+    CHECK(!pw_wine_fixture_owner_pump(&owner));
+    CHECK(g->ack&&!m.bootstrap_stopped&&!m.stop_control);
+    for(unsigned kind=0;kind<4;kind++){
+        g=progress_waiter();
+        if(kind==0)m.receive_error=2; /* malformed payload at existing codec boundary */
+        if(kind==1)m.receive_eof=1;
+        if(kind==2)m.ack_bad=1;
+        if(kind==3){m.inject_progress=1;m.progress_stage=PW_WCP_DATA_OBSERVED;
+            CHECK(!pw_wine_fixture_owner_pump(&owner));m.now=g->startup_end;}
+        pw_wine_fixture_owner_pump(&owner);
+        CHECK(m.bootstrap_sent==1&&m.bootstrap_stopped==1&&m.stop_control==1);
+        CHECK(m.stop_phase==3&&m.stop_helper==1&&!g->ack&&!m.kills);
+        CHECK(m.stop_progress==(kind==3?PW_WCP_DATA_OBSERVED:0));
+        if(kind==0)CHECK(m.stop_status==PW_WC_PROTOCOL&&m.stop_api==PW_WC_API_RECEIVE&&m.stop_raw==7);
+        if(kind==1)CHECK(!m.stop_status&&g->wire.channel_zero_observed&&g->wire.hangup_observed);
+        if(kind==2)CHECK(m.stop_status==PW_WC_PROTOCOL&&m.stop_api==PW_WC_API_RECEIVE);
+        for(unsigned i=0;i<3;i++)pw_wine_fixture_owner_pump(&owner);
+        CHECK(m.bootstrap_stopped==1&&m.stop_control==1);
+    }
+    g=bound(1);m.sleep_action=1;m.hello_bad=1;
+    CHECK(provider.spawn(&owner,g->generation,70,46,47)!=WF_OK);
+    CHECK(m.hello_refused==1&&m.hello_mismatch==32&&!m.bootstrap_sent);
+    CHECK(m.bootstrap_stopped==1&&m.stop_phase==1&&!m.stop_progress&&!m.stop_helper);
+}
+
 int main(int argc,char **argv)
 {
+    startup_observation_tests();
     queued_terminal_before_cancel_tests();
     cleanup_owner_tests();
     if(argc==2&&!strcmp(argv[1],"cleanup-only"))return 0;
     progress_owner_tests();
+    if(argc==2&&!strcmp(argv[1],"list-headroom")){list_headroom_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"creation-status")){creation_status_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"creation-queue")){creation_queue_tests();return 0;}
     if(argc==2&&!strcmp(argv[1],"async-helper-hold")){asynchronous_helper_hold();return 0;}
@@ -1031,6 +1130,6 @@ int main(int argc,char **argv)
     if(argc==2&&!strcmp(argv[1],"retired-missing")){retired_missing_result();return 0;}
     if(argc==2&&!strcmp(argv[1],"wire-root-closure")){wire_root_closure();return 0;}
     if(argc==2&&!strcmp(argv[1],"seal-race")){seal_race_test();return 0;}
-    creation_status_tests();creation_queue_tests();asynchronous_helper_hold();init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();helper_alias_tests();helper_identity_tests();launch_path_callback_tests();
+    list_headroom_tests();creation_status_tests();creation_queue_tests();asynchronous_helper_hold();init_preflight_tests();admission_tests();callbacks_tests();spawn_tests();list_launch_tests();release_tests();stop_budget_tests();signal_close_tests();missing_caller_tests();retired_missing_result();wire_root_closure();detach_gate_tests();seal_race_test();first_failure_tests();launch_failure_tests(0);launch_failure_tests(1);launch_wait_status_tests();launch_cancel_publication_tests();helper_alias_tests();helper_identity_tests();launch_path_callback_tests();
     printf("Actual Wine owner with mocked native/transport boundaries: %u checks passed\n",checks);return 0;
 }

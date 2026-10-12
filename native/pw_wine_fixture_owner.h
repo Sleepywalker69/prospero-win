@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #ifndef PW_WINE_FIXTURE_OWNER_H
 #define PW_WINE_FIXTURE_OWNER_H
+#include "pw_wine_child_ui_config.h"
+#if PW_WINE_CHILD_UI_ENABLED
+#include "pw_wine_child_ui.h"
+#endif
 #include "../wine/ps5/pw_wine_fixture_provider.h"
 #include "../wine/ps5/pw_wine_creation.h"
 #include "../wine/ps5/pw_wine_fixture_socket.h"
@@ -27,6 +31,10 @@ typedef struct PwWineFixtureOwnerConfig {
     void *context;
     int (*clock_ms)(void *,uint64_t *);
     int (*cancelled)(void *);
+#if PW_WINE_CHILD_UI_ENABLED
+    int (*ui_frame)(void *,PwWineChildUiIdentity,const void *,uint32_t,uint32_t,uint32_t);
+    void (*ui_retired)(void *,PwWineChildUiIdentity);
+#endif
     /* Called from supervisor only, after mutable records are copied. */
     void (*record)(void *,const char *event,uint64_t generation,
                    int64_t first,int64_t second,int64_t third);

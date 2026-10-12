@@ -19,6 +19,7 @@
 #   PW_WINE64_WAIT_WATCHDOG 1 turns on Wine's wait watchdog (patch 0680) in
 #                          every game: a snapshot of the server's waits every
 #                          two seconds, for diagnosing stalls (default 0)
+#   PW_WINE_CHILD_UI_ENABLED 1 opts into matched v3 child preview; input disabled (default 0)
 #   PW_NATIVE_CHILD_PROBE  1 builds manual original native diagnostics
 #                          instead of a game-launching UI (default 0)
 #   PW_NATIVE_CHILD_MODE hello (default), fd, peer-exit, or multi-test suite
@@ -40,6 +41,9 @@ wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 native_child_probe=${PW_NATIVE_CHILD_PROBE:-0}
 wine_child_fixture=${PW_WINE_CHILD_FIXTURE_MODE:-0}
+wine_child_ui=${PW_WINE_CHILD_UI_ENABLED:-0}
+child_ui_args=()
+[[ $wine_child_ui != 1 ]] || child_ui_args+=(--child-ui)
 wine_child_user=${PW_WINDOWS_CHILD_USER_DIR:-}
 wine_child_network=${PW_WINDOWS_CHILD_NETWORK_DIR:-}
 wine_network_enabled=0
@@ -53,6 +57,9 @@ title_id=PPSA99995
     echo "PW_WINE_CHILD_FIXTURE_MODE must be 0 or 1" >&2; exit 2; }
 [[ $wine_child_fixture == 0 || ( $native_child_probe == 0 && $output_suffix == -windows-child-fixture ) ]] || {
     echo "Wine child experiment needs its isolated output and cannot combine native probe mode" >&2; exit 2; }
+
+[[ $wine_child_ui == 0 || ( $wine_child_ui == 1 && $wine_child_fixture == 1 ) ]] || {
+    echo "PW_WINE_CHILD_UI_ENABLED must be 0, or 1 for an isolated matched Wine child title" >&2; exit 2; }
 
 [[ $wine_user_enabled == 0 || $wine_child_fixture == 1 ]] || {
     echo "USER child reference requires the isolated Wine child title" >&2; exit 2; }
@@ -213,7 +220,7 @@ if [[ $wine_child_fixture == 1 ]]; then
         --foundation "${PW_WINE_CHILD_FOUNDATION:?Wine child needs the pinned PRX foundation}" \
         --runtime "${PW_WINE_CHILD_RUNTIME:?Wine child needs the matched runtime work directory}" \
         --helper-directory "$build/owned-helper" \
-        --out "$build/wine-child" --llvm-bindir "$llvm_bindir"
+        --out "$build/wine-child" --llvm-bindir "$llvm_bindir" "${child_ui_args[@]}"
     python3 - "$root" "$build" "${PW_WINDOWS_CHILD_FIXTURE_DIR:?Wine child needs the original fixture pair}" \
         "$wine_child_user" "${GITHUB_RUN_ID:-}" "${GITHUB_RUN_ATTEMPT:-}" "$wine_child_network" <<'PYWINEINPUT'
 import json, pathlib, sys
@@ -227,7 +234,7 @@ record, header, _, _, _ = title_profiles_input_contract(root, build / 'wine-chil
 (build / 'wine-child-title-inputs.json').write_text(json.dumps(record, indent=2) + '\n')
 (build / 'wine-child-title-config.h').write_text(header)
 PYWINEINPUT
-    common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled" -I"$build" -I"$build/wine-child")
+    common+=(-DPW_WINE_CHILD_FIXTURE_MODE=1 -DPW_WINE_CHILD_UI_ENABLED="$wine_child_ui" -DPW_WINE_USER_PROFILE_ENABLED="$wine_user_enabled" -I"$build" -I"$build/wine-child")
     if [[ $wine_network_enabled == 1 ]]; then
         common+=(-DPW_WINE_NET_PROFILE_ENABLED=1)
     fi
@@ -258,7 +265,9 @@ fi
 if [[ $wine_child_fixture == 1 ]]; then
     sources+=(native/pw_wine_child_title.c native/pw_wine_fixture_owner.c
               native/pw_wine_child_wire.c native/pw_wine_child_bootstrap.c
-              native/pw_native_child_protocol.c wine/ps5/pw_wine_fixture_socket.c)
+              native/pw_native_child_protocol.c wine/ps5/pw_wine_fixture_socket.c
+              native/pw_wine_child_ui.c native/pw_wine_child_ui_handoff.c native/pw_wine_child_ui_channel.c
+              native/pw_wine_child_ui_runtime.c native/pw_wine_child_ui_preview.c)
 fi
 objects=()
 for source in "${sources[@]}"; do
@@ -389,7 +398,7 @@ if [[ $wine_child_fixture == 1 ]]; then
         --build "$build" --app "$dist" --service-work "$build/wine-child" \
         --fixture "$PW_WINDOWS_CHILD_FIXTURE_DIR" "${user_title_args[@]}" --llvm-bindir "$llvm_bindir" \
         --sdk-source-archive "${PW_NATIVE_SDK_SOURCE_ARCHIVE:?Wine child needs the pinned SDK source archive}" \
-        --out "$build-wine-child-title-inspection"
+        --out "$build-wine-child-title-inspection" "${child_ui_args[@]}"
 fi
 
 sha256sum "$build/eboot.elf" "$dist/eboot.bin"

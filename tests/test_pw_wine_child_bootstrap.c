@@ -3,13 +3,21 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-enum{EXPORTS=13};
+enum{EXPORTS=13+2*PW_WINE_CHILD_UI_ENABLED};
 _Alignas(PW_PRX_ALIGN) static struct{struct{uint64_t magic;uint32_t version,count;PwPrxExport exports[EXPORTS];}d;char names[EXPORTS][64];}module;
 static struct{uint64_t now;int cancel,envs,loads,starts,adopts,bindings,cwds,sinks,threads;
     uint32_t profile,machine;int wow64_abi;
     int env_fail,load_fail,abi,cwd_fail,register_fail,sink_fail,thread_fail,late_thread,wrong_path;
     int missing,log[64],logs;void(*entry)(void*);void *arg;}m;
 static PwWineChildBootstrap b;static PwNativeChildIo io;
+#if PW_WINE_CHILD_UI_ENABLED
+static PwWineChildUiChannel test_ui;
+static unsigned ui_present_sets,ui_release_sets;
+static void ui_present_set(PwWinePresentSink sink,void *context)
+{assert(sink==pw_wine_child_ui_channel_present&&context==&test_ui);ui_present_sets++;}
+static void ui_release_set(PwWineDisplayRelease release,void *context)
+{assert(release&&!context&&release(context)==-1);ui_release_sets++;}
+#endif
 static const char hash[]="0123456789012345678901234567890123456789012345678901234567890123";
 static void fake_main(int argc,char **argv){assert(argc==2&&!strcmp(argv[1],PW_WINE_CHILD_IMAGE)&&!argv[2]);}
 static int module_start(size_t n,const void*p){assert(!n&&!p);m.starts++;return 0;}
@@ -51,7 +59,11 @@ static int set_env(const char *name,const char *value)
     return m.env_fail==m.envs?-3:0;
 }
 static int thread(void(*entry)(void*),void*arg,size_t stack)
-{assert(m.bindings&&m.cwds&&m.sinks&&stack==(16u<<20));m.threads++;m.entry=entry;m.arg=arg;if(m.late_thread)m.now=1000;return m.thread_fail;}
+{assert(m.bindings&&m.cwds&&m.sinks&&stack==(16u<<20));
+#if PW_WINE_CHILD_UI_ENABLED
+ assert(b.ui_attached&&ui_present_sets==1&&ui_release_sets==1);
+#endif
+ m.threads++;m.entry=entry;m.arg=arg;if(m.late_thread)m.now=1000;return m.thread_fail;}
 static int runtime(void *c,const char *h,char*out,size_t size)
 {assert(c==&m&&!strcmp(h,hash)&&size>100);strcpy(out,m.wrong_path?"/untrusted":PW_WINE_CHILD_RUNTIME);return 0;}
 static int directory(void*c,const char*p){assert(c==&m&&(!strcmp(p,m.profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_PREFIX:PW_WINE_CHILD_BATTLENET_PREFIX)||!strcmp(p,m.profile==PW_WC_PROFILE_FIXTURE?PW_WINE_CHILD_CWD:PW_WINE_CHILD_BATTLENET_CWD)));return 0;}
@@ -63,13 +75,29 @@ static void reset(void)
 {
     memset(&m,0,sizeof(m));memset(&b,0,sizeof(b));memset(&module,0,sizeof(module));m.now=100;m.abi=1;m.wow64_abi=1;m.profile=PW_WC_PROFILE_FIXTURE;m.machine=PW_WC_MACHINE_AMD64;
     const char *names[]={"__wine_main","module_start","pw_wine_dl_adopt","__wine_ps5_private_dispatch_abi",
-        "pw_cwd_set","__wine_ps5_set_output_sink","pw_wine_fixture_local_threads","pw_wine_fixture_socket_set_sink","pw_wine_fixture_socket_failure","__wine_ps5_private_dispatch_wow64_abi","__wine_ps5_creation_abi","__wine_ps5_creation_protocol","pw_wine_creation_child_install"};
-    const void *fns[]={(void*)fake_main,(void*)module_start,(void*)adopt,(void*)abi,(void*)cwd,(void*)sink,(void*)bind_threads,(void*)set_socket_sink,(void*)socket_failure,(void*)wow64_abi,(void*)creation_abi,(void*)creation_protocol,(void*)creation_install};
+        "pw_cwd_set","__wine_ps5_set_output_sink","pw_wine_fixture_local_threads","pw_wine_fixture_socket_set_sink","pw_wine_fixture_socket_failure","__wine_ps5_private_dispatch_wow64_abi","__wine_ps5_creation_abi","__wine_ps5_creation_protocol","pw_wine_creation_child_install"
+#if PW_WINE_CHILD_UI_ENABLED
+        ,"pw_wine_set_present_sink","pw_wine_set_display_release"
+#endif
+    };
+    const void *fns[]={(void*)fake_main,(void*)module_start,(void*)adopt,(void*)abi,(void*)cwd,(void*)sink,(void*)bind_threads,(void*)set_socket_sink,(void*)socket_failure,(void*)wow64_abi,(void*)creation_abi,(void*)creation_protocol,(void*)creation_install
+#if PW_WINE_CHILD_UI_ENABLED
+        ,(void*)ui_present_set,(void*)ui_release_set
+#endif
+    };
     module.d.magic=PW_PRX_MAGIC;module.d.version=PW_PRX_VERSION;module.d.count=EXPORTS;
     for(unsigned i=0;i<EXPORTS;i++){strcpy(module.names[i],names[i]);module.d.exports[i]=(PwPrxExport){module.names[i],fns[i]};}
     io=(PwNativeChildIo){.clock_ms=clock_ms,.cancelled=cancelled,.ready=1,.last_clock=100,.stage_end=500,.total_end=1000};
+#if PW_WINE_CHILD_UI_ENABLED
+    memset(&test_ui,0,sizeof(test_ui));test_ui.initialized=1;test_ui.tx.identity.generation=7;
+    ui_present_sets=ui_release_sets=0;
+#endif
     ops=(PwWineChildBootstrapOps){.context=&m,.wine={load,info,set_env,thread},.runtime=runtime,.directory=directory,
-        .register_thread=add,.unregister_thread=remove_thread,.output=output,.socket_sink=socket_sink,.record=record};
+        .register_thread=add,.unregister_thread=remove_thread,.output=output,.socket_sink=socket_sink,.record=record
+#if PW_WINE_CHILD_UI_ENABLED
+        ,.ui=&test_ui
+#endif
+    };
 }
 static int prepare(void){ops.child=(PwWineCreationChild){PW_WINE_CREATION_ABI,sizeof(PwWineCreationChild),7,20,24,m.profile,m.machine};return pw_wine_child_bootstrap_prepare(&b,&io,9,hash,1,m.profile,m.machine,&ops);}
 static void hashes(void)
@@ -109,5 +137,9 @@ int main(void)
     reset();m.machine=PW_WC_MACHINE_I386;assert(prepare()&&!m.loads&&!m.envs);
     reset();m.profile=5;assert(prepare()&&!m.loads&&!m.envs);
     reset();m.profile=PW_WC_PROFILE_BATTLENET;m.machine=0xaa64;assert(prepare()&&!m.loads&&!m.envs);
+#if PW_WINE_CHILD_UI_ENABLED
+    reset();ops.ui=NULL;assert(prepare()&&!m.loads);
+    reset();test_ui.tx.identity.generation=8;assert(prepare()&&!m.loads);
+#endif
     puts("wine child bootstrap: all mocked controls and SHA256 vectors passed");return 0;
 }
