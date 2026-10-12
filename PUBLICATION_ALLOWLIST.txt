@@ -804,3 +804,7 @@ wine/ps5/pw_d3d9_gamma_wire.c
 wine/ps5/pw_d3d9_gamma_wire.h
 tests/test_d3d9_gamma_wire.c
 docs/d3d9-gamma-wire.md
+tests/fixtures/windows_process_memory.c
+tests/fixtures/windows_process_memory.md
+tools/build_windows_memory_reference.ps1
+.github/workflows/windows-memory-reference.yml
