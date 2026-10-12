@@ -23,7 +23,7 @@ def row(stage, result='pass', **overrides):
 
 
 def good_rows(case='self-memory', role='parent'):
-    stages = check.PARENT_STAGES[case] if role == 'parent' else {'handle_list_excluded'}
+    stages = check.PARENT_STAGES[case] if role == 'parent' else {'handle_list_acknowledged'}
     rows = [row(stage, case=case, role=role) for stage in sorted(stages)]
     rows += [row('guest_cleanup', case=case, role=role),
              row('native_settlement', 'unverified', case=case, role=role),
@@ -40,7 +40,11 @@ def paired_rows(case):
     for item in parent:
         if item['stage'] == 'CreateProcessW_handle_list': item['a'] = 101
         if item['stage'] == 'final': item['a'] = check.CHILD_EXIT
-    child_stages = {'handle_list_excluded'}
+        if item['stage'] == 'identity_different_control': item['error'] = 1656
+        if item['stage'] in ('identity_child_live', 'identity_child_still_live'): item['a'] = 258
+        if item['stage'] == 'identity_capture_child_handle': item['a'] = 1
+        if item['stage'] == 'handle_list_excluded': item['a'] = 1;item['error'] = 1656
+    child_stages = {'handle_list_acknowledged'}
     if case in ('live-memory', 'suspended-memory'):
         child_stages |= {'child_actual_private_value', 'WaitForSingleObject_release'}
     elif case.startswith('section-'):
@@ -50,6 +54,7 @@ def paired_rows(case):
     elif case == 'mojo-pipe':
         child_stages |= {'CreateIoCompletionPort', 'GetQueuedCompletionStatus', 'iocp_peer_record'}
     child = [row(stage, case=case, role='child', pid=101) for stage in sorted(child_stages)]
+    next(r for r in child if r['stage'] == 'handle_list_acknowledged')['a'] = 1
     child += [row('guest_cleanup', case=case, role='child', pid=101),
               row('final', case=case, role='child', pid=101, a=check.CHILD_EXIT)]
     if case.startswith('section-'):
@@ -178,6 +183,28 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(check.verify(self.directory, 'page-regression', 64, 0)['windows_reference'], 'pass')
         write(self.path, [r for r in rows if r['stage'] != 'VirtualAlloc_recommit_4KiB'])
         with self.assertRaises(ValueError): check.verify(self.directory, 'page-regression', 64, 0)
+
+    def test_identity_requires_object_controls_live_child_and_bounded_ack(self):
+        case = 'live-memory';parent, child = paired_rows(case);child_path = self.directory / 'ipc-10-101.log'
+        write(child_path, child)
+        for stage, key, bad in (('identity_same_control', 'error', 1656),
+                                ('identity_different_control', 'error', 0),
+                                ('identity_capture_included', 'error', 6), ('identity_included_control', 'error', 1656),
+                                ('identity_child_live', 'a', 0), ('identity_child_still_live', 'a', 0),
+                                ('identity_capture_child_handle', 'error', 5),
+                                ('handle_list_excluded', 'error', 0)):
+            rows = [r.copy() for r in parent];next(r for r in rows if r['stage'] == stage)[key] = bad
+            write(self.path, rows)
+            with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
+        # A genuinely absent child handle also passes, with both source-child
+        # liveness observations and the parent's acknowledged conclusion.
+        for stage in ('identity_capture_child_handle', 'handle_list_excluded'):
+            item = next(r for r in parent if r['stage'] == stage);item['error'] = 6;item['a'] = 0
+        write(self.path, parent)
+        self.assertEqual(check.verify(self.directory, case, 64, 0)['windows_reference'], 'pass')
+        next(r for r in child if r['stage'] == 'handle_list_acknowledged')['a'] = 0
+        write(child_path, child)
+        with self.assertRaises(ValueError): check.verify(self.directory, case, 64, 0)
 
     def test_source_safety_and_independent_identity(self):
         source = (ROOT / 'tests/fixtures/windows_chromium_ipc.c').read_text()

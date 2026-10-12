@@ -17,7 +17,10 @@ RESULTS = {'attempt', 'pass', 'fail', 'pending', 'immediate', 'timeout', 'not_ru
 WIDE = {'elapsed_ms', 'bytes', 'a', 'b'}
 COMMON_CHILD = {'Windows_child_identity', 'child_hello', 'CreateProcessW_handle_list',
                 'InitializeProcThreadAttributeList_size', 'InitializeProcThreadAttributeList',
-                'UpdateProcThreadAttribute_HANDLE_LIST', 'wait_child_exit', 'GetExitCodeProcess'}
+                'UpdateProcThreadAttribute_HANDLE_LIST', 'wait_child_exit', 'GetExitCodeProcess',
+                'identity_same_control', 'identity_different_control', 'identity_child_live',
+                'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
+                'identity_capture_child_handle', 'handle_list_excluded'}
 PARENT_STAGES = {
     'self-memory': {'OpenProcess_self', 'self_actual_value', 'reduced_WriteProcessMemory', 'reduced_NtWriteVirtualMemory', 'reduced_ReadProcessMemory',
         'reduced_NtReadVirtualMemory', 'self_reduced_unchanged'} |
@@ -120,7 +123,28 @@ def verify(directory, case, bits, exit_code):
         child = children[0]
         if child[0]['pid'] == parent[0]['pid']:
             raise ValueError('child must be a distinct Windows process')
-        require_pass(child, {'handle_list_excluded'})
+        require_pass(child, {'handle_list_acknowledged'})
+        identity = {}
+        for stage in ('identity_same_control', 'identity_different_control', 'identity_child_live',
+                      'identity_child_still_live', 'identity_capture_included', 'identity_included_control',
+                      'identity_capture_child_handle', 'handle_list_excluded'):
+            matches = [r for r in parent if r['stage'] == stage and r['result'] != 'attempt']
+            if len(matches) != 1:
+                raise ValueError('one conclusive object-identity observation per stage required')
+            identity[stage] = matches[0]
+        if identity['identity_same_control']['error'] != 0 or identity['identity_different_control']['error'] != 1656:
+            raise ValueError('same/different object identity controls invalid')
+        if any(identity[stage]['error'] != 0 for stage in ('identity_capture_included', 'identity_included_control')):
+            raise ValueError('included child event must calibrate foreign handle capture')
+        if any(identity[stage]['a'] != 258 for stage in ('identity_child_live', 'identity_child_still_live')):
+            raise ValueError('child must remain live across object capture')
+        captured = identity['identity_capture_child_handle']
+        excluded = identity['handle_list_excluded']
+        if (captured['error'], captured['a'], excluded['error'], excluded['a']) not in ((0, 1, 1656, 1), (6, 0, 6, 0)):
+            raise ValueError('exclusion requires absent handle or proven distinct captured object')
+        acknowledgements = [r for r in child if r['stage'] == 'handle_list_acknowledged' and r['result'] != 'attempt']
+        if len(acknowledgements) != 1 or acknowledgements[0]['a'] != 1:
+            raise ValueError('child did not acknowledge the parent identity verdict')
         if child[-1]['a'] != CHILD_EXIT or parent[-1]['a'] != CHILD_EXIT:
             raise ValueError('full child exit code mismatch')
         if not any(r['stage'] == 'CreateProcessW_handle_list' and r['result'] == 'pass' and

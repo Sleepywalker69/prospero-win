@@ -93,19 +93,38 @@ there is separately admitted, actual PE32 target-child support.
 
 All child cases use `STARTUPINFOEX`/`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` with only
 the required endpoints, event and optional section/client handle. A deliberately
-inheritable decoy event is excluded. Before opening its log, the child must see
-that numeric handle as invalid, and the parent's decoy remains unsignaled. A
-loader handle-number collision is conservatively a failed/inconclusive control,
-never proof of unexpected inherited authority. The test is deliberately narrow;
-it does not enumerate all process handles or claim security isolation.
+inheritable decoy event is excluded. The child reports its expected numeric
+value in its nonce/PID-bound HELLO, then waits up to 5 seconds for a parent
+acknowledgement before touching the test payload. Numeric values can be reused
+by the loader, CRT or log file; a valid numeric handle is not itself leakage.
+
+The parent duplicates that candidate from the still-live child into its own
+table, pinning its object without closing or signaling the child's original.
+An invalid candidate is absence only with successful child-liveness checks
+before and after capture. A valid candidate must compare different from the
+parent's excluded event using `CompareObjectHandles`, with
+`ERROR_NOT_SAME_OBJECT`. Same-object leakage fails. Both a parent-local duplicate
+of the decoy and an independently created event calibrate same/different-object
+comparisons first. The known included release event is also duplicated back
+from the child and must compare equal to the parent's event, ensuring that a
+broken foreign-duplication path cannot pass by reporting every handle invalid.
+No unknown child object is signaled, waited on or mutated.
+Only successfully acquired parent-local copies are closed.
+
+This is a narrow explicit-handle-list test, not a complete handle enumeration or
+security-isolation claim. The identity test requires cross-process
+`DuplicateHandle` and dynamically resolved `CompareObjectHandles` (Windows 10 /
+Server 2016 or newer; also present in the pinned Wine source). Unsupported or
+unexpected errors remain nonpass; they do not establish a leak or exclusion.
+A 5-second acknowledgement timeout and external 90-second process deadline bound
+the exchange; child termination during capture cannot satisfy the control.
 
 ## Evidence and bounded cleanup
 
 Each machine-readable line includes schema, case, role, nonce, Windows PID,
 claimed parent, pointer width, elapsed time, stage wait budget, result, Win32
 error, NTSTATUS, transferred bytes and two stage-specific numeric observations.
-API attempts precede measured calls, except the child's decoy check, performed
-before opening any fixture log can reuse its numeric handle. Child addresses
+API attempts precede measured calls. Child addresses
 are only fixture-owned writable memory. No command lines, authentication data,
 network contents or installer arguments are recorded.
 
@@ -213,6 +232,7 @@ Only the Windows x64/x86 MSVC jobs establish build and reference execution.
 ## API references
 
 - [Explicit handle list](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+- [CompareObjectHandles identity and error contract](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles)
 - [DuplicateHandle access and source-close semantics](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)
 - [CancelIoEx and completion lifetime](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)
 - [Chromium PlatformChannel](https://github.com/chromium/chromium/blob/da53563ceb66412e2637507c8724bd0cab05e453/mojo/public/cpp/platform/platform_channel.cc)

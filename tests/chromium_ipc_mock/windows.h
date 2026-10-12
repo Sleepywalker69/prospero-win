@@ -18,6 +18,7 @@ typedef struct { char unused[64]; } SECURITY_DESCRIPTOR;
 typedef struct { char unused[8]; } ACL;
 typedef struct { void *BaseAddress,*AllocationBase; DWORD AllocationProtect; SIZE_T RegionSize; DWORD State,Protect,Type; } MEMORY_BASIC_INFORMATION;
 #define NTAPI
+#define WINAPI
 #define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
 #define GENERIC_WRITE 0x40000000u
 #define GENERIC_READ 0x80000000u
@@ -49,6 +50,8 @@ typedef struct { void *BaseAddress,*AllocationBase; DWORD AllocationProtect; SIZ
 #define SECURITY_DESCRIPTOR_REVISION 1u
 #define ACL_REVISION 2u
 #define DUPLICATE_CLOSE_SOURCE 1u
+#define DUPLICATE_SAME_ACCESS 2u
+#define ERROR_NOT_SAME_OBJECT 1656u
 #define PIPE_ACCESS_DUPLEX 3u
 #define PIPE_TYPE_BYTE 0u
 #define PIPE_READMODE_BYTE 0u
