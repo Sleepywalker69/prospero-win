@@ -9,6 +9,8 @@ on:
       - 'tests/test_wine_incremental_source.py'
       - 'tests/test_wine_build_performance.py'
       - 'tests/test_reuse_host_wine.py'
+      - 'tests/test_network_workflow.py'
+      - 'tests/test_user_workflow_join.py'
       - 'tools/reuse_host_wine.py'
       - '.github/workflows/wine-incremental-policy.yml'
       - '.github/workflows/windows-child-fixture.yml'
@@ -33,6 +35,8 @@ jobs:
         run: |
           python3 tests/test_wine_build_performance.py
           python3 tests/test_reuse_host_wine.py
+          python3 tests/test_network_workflow.py
+          python3 tests/test_user_workflow_join.py
       - name: Read pinned Wine dependency-generator contract
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
