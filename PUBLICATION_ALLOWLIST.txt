@@ -1174,3 +1174,6 @@ tests/test_pw_pad_ps5_observed.c
 # Host-only reference tagged sink and mocked completion contract.
 tests/reference_tagged_sink.h
 tests/test_reference_tagged_sink.c
+wine/ps5/pw_wine_tagged_transport.h
+wine/ps5/pw_wine_tagged_transport.c
+tests/test_pw_wine_tagged_transport.c
