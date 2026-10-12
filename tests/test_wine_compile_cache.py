@@ -306,11 +306,14 @@ class NeutralSelection(CacheFixture, unittest.TestCase):
             self.assertEqual(default['abi_contracts'][name]['value'], 962)
             self.assertEqual(selected['abi_contracts'][name]['value'], 963)
         focus = selected['focus']
-        self.assertEqual(len(focus['optional_patches']), 3)
+        self.assertEqual(tuple(focus['optional_patches']), (
+            '0001-server-adapter.patch', '0002-server-requests.patch',
+            '0003-neutral-cohort.patch', '0004-tracked-mouse-button.patch'))
         self.assertGreater(len(focus['contract']['sources']), 100)
         self.assertRegex(focus['generated_header_sha256'], '^[a-f0-9]{64}$')
         self.assertFalse(focus['contract']['runtime_validated'])
-        for path in ('tools/wine_focus_neutral.py', 'wine/focus-neutral/0003-neutral-cohort.patch'):
+        for path in ('tools/wine_focus_neutral.py', 'wine/focus-neutral/0003-neutral-cohort.patch',
+                     'wine/focus-neutral/0004-tracked-mouse-button.patch'):
             self.assertIn(path, cache.recipe_inputs(self.repo))
 
     @unittest.skipUnless(shutil.which('gcc'), 'GCC unavailable for actual preprocessing')
