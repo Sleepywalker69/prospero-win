@@ -39,6 +39,7 @@ static UINT order[70],order_count,presents,redraws,raises,focuses;
 static int token,bad_bridge;
 static struct {HWND hwnd;UINT type,code;DWORD flags;} sent[1024];
 static UINT sends;
+static unsigned boundary_space_held,boundary_refuse_up;
 static char trace[2048];static UINT trace_n;
 static void mark(char c){CHECK(trace_n+1<sizeof(trace));trace[trace_n++]=c;trace[trace_n]=0;}
 static void no_screen_lock(void){CHECK(!pthread_mutex_trylock(&screen_lock));pthread_mutex_unlock(&screen_lock);}
@@ -62,7 +63,7 @@ static BOOL NtUserSetWindowPos(HWND h,HWND after,INT x,INT y,INT w,INT height,UI
 static BOOL NtUserRedrawWindow(HWND h,const RECT *r,HRGN region,UINT flags){no_screen_lock();redraws++;mark('R');return TRUE;}
 static UINT NtUserMapVirtualKeyEx(UINT code,UINT type,HKL layout){return code^0x5a;}
 static HKL NtUserGetKeyboardLayout(DWORD thread){return (HKL)(uintptr_t)1;}
-static void NtUserSendHardwareInput(HWND h,UINT a,const INPUT *in,UINT b){no_screen_lock();CHECK(sends<1024&&h);sent[sends].hwnd=h;sent[sends].type=in->type;sent[sends].code=in->ki.wVk;sent[sends++].flags=in->type==INPUT_KEYBOARD?in->ki.dwFlags:in->mi.dwFlags;mark(in->type==INPUT_KEYBOARD?(in->ki.dwFlags&KEYEVENTF_KEYUP?'u':'d'):(in->mi.dwFlags&(MOUSEEVENTF_LEFTUP|MOUSEEVENTF_RIGHTUP|MOUSEEVENTF_MIDDLEUP)?'u':'d'));if(click_focus&&in->type==INPUT_MOUSE&&(in->mi.dwFlags&MOUSEEVENTF_LEFTDOWN))foreground=click_focus;}
+static void NtUserSendHardwareInput(HWND h,UINT a,const INPUT *in,UINT b){no_screen_lock();if(in->type==INPUT_KEYBOARD&&in->ki.wVk==VK_SPACE){if(!(in->ki.dwFlags&KEYEVENTF_KEYUP))boundary_space_held=1;else if(!boundary_refuse_up)boundary_space_held=0;}CHECK(sends<1024&&h);sent[sends].hwnd=h;sent[sends].type=in->type;sent[sends].code=in->ki.wVk;sent[sends++].flags=in->type==INPUT_KEYBOARD?in->ki.dwFlags:in->mi.dwFlags;mark(in->type==INPUT_KEYBOARD?(in->ki.dwFlags&KEYEVENTF_KEYUP?'u':'d'):(in->mi.dwFlags&(MOUSEEVENTF_LEFTUP|MOUSEEVENTF_RIGHTUP|MOUSEEVENTF_MIDDLEUP)?'u':'d'));if(click_focus&&in->type==INPUT_MOUSE&&(in->mi.dwFlags&MOUSEEVENTF_LEFTDOWN))foreground=click_focus;}
 static void move_cursor(HWND h,INT x,INT y){CHECK(h==foreground);mark('M');}
 static BOOL intersect_rect(RECT *out,const RECT *a,const RECT *b){RECT r={a->left>b->left?a->left:b->left,a->top>b->top?a->top:b->top,a->right<b->right?a->right:b->right,a->bottom<b->bottom?a->bottom:b->bottom};if(r.left>=r.right||r.top>=r.bottom){memset(out,0,sizeof(*out));return FALSE;}*out=r;return TRUE;}
 static void clear_screen_rect(const RECT *r){(void)r;}
@@ -71,7 +72,7 @@ static int real_next(struct ps5_input *e){PwWineInput input;if(!pw_wine_next_inp
 static int (*next_input)(struct ps5_input*)=real_next;
 static int (*input_fd)(void)=NULL;
 /* ACTUAL_FUNCTIONS */
-static void reset(void){PwWineInput e;while(pw_wine_next_input(&e)){}memset(windows,0,sizeof(windows));memset(user,0,sizeof(user));memset(held_keys,0,sizeof(held_keys));memset(held_buttons,0,sizeof(held_buttons));memset(pixels,0,sizeof(pixels));window_count=0;window_generation=0;input_owner=NULL;input_generation=0;foreground=focus_fail=kill_on_focus=click_focus=focus_redirect=walk_foreground=NULL;restores=restore_mode=z_walks=0;z_loop=FALSE;order_count=presents=redraws=raises=focuses=sends=trace_n=0;trace[0]=0;token=bad_bridge=0;}
+static void reset(void){boundary_space_held=boundary_refuse_up=0;PwWineInput e;while(pw_wine_next_input(&e)){}memset(windows,0,sizeof(windows));memset(user,0,sizeof(user));memset(held_keys,0,sizeof(held_keys));memset(held_buttons,0,sizeof(held_buttons));memset(pixels,0,sizeof(pixels));window_count=0;window_generation=0;input_owner=NULL;input_generation=0;foreground=focus_fail=kill_on_focus=click_focus=focus_redirect=walk_foreground=NULL;restores=restore_mode=z_walks=0;z_loop=FALSE;order_count=presents=redraws=raises=focuses=sends=trace_n=0;trace[0]=0;token=bad_bridge=0;}
 static void add(UINT n,UINT root,DWORD style,DWORD exstyle){user[n].hwnd=H(n);user[n].root=H(root);user[n].style=style;user[n].exstyle=exstyle;user[n].process=9;user[n].thread=11;user[n].live=TRUE;order[order_count++]=n;struct window_rects r={.visible={0,0,8,8}};ps5_WindowPosChanged(H(n),NULL,NULL,0,&r,NULL);}
 static BOOL NtUserShowWindow(HWND h,INT cmd)
 {
@@ -184,4 +185,29 @@ static void unrelated_foreground_and_bounded_walk(void)
     z_loop=FALSE;focus_redirect=H(68);user[3].style&=~WS_MINIMIZE;post(4,0,1,1);
     CHECK(ps5_ProcessEvents(0));CHECK(foreground==H(68)&&!raises&&!restores);
 }
-int main(void){minimized_restore();minimized_filters_and_modal();restore_callbacks();unrelated_foreground_and_bounded_walk();basic();modal();filters();destruction();external_focus();idle_focus();failure();sink_validation();clipping();offset_clipping();hidden_and_destroyed_activation();registry_limit();printf("PS5 window switcher: %u source-body / real-sink checks passed (inert USER boundaries)\n",checks);return 0;}
+
+/* Characterize actual legacy bodies, not the proposed tagged contract.
+ * USER mock can refuse an UP. A send attempt is intentionally not a receipt. */
+static void input_receipt_gaps(void)
+{
+    reset();add(2,2,WS_VISIBLE,0);add(3,3,WS_VISIBLE,0);foreground=H(2);
+    post(1,VK_SPACE,0,1);
+    CHECK(!boundary_space_held&&!held_keys[VK_SPACE]); /* only admitted */
+    CHECK(ps5_ProcessEvents(0)&&boundary_space_held&&held_keys[VK_SPACE]);
+    boundary_refuse_up=1;foreground=H(3);
+    CHECK(ps5_ProcessEvents(0));
+    CHECK(boundary_space_held&&!held_keys[VK_SPACE]&&!input_owner);
+    /* Current release bookkeeping has no truthful completion receipt. */
+    CHECK(sends==2&&sent[1].hwnd==H(2));
+    boundary_refuse_up=0;CHECK(!ps5_ProcessEvents(0)&&boundary_space_held);
+
+    reset();add(2,2,WS_VISIBLE,0);foreground=H(2);
+    /* Two conceptual producers share one untagged key. The legacy sink
+     * cannot express provenance: A-UP clears B's still-held contribution. */
+    post(1,VK_SPACE,0,1);post(1,VK_SPACE,0,1);post(1,VK_SPACE,0,0);
+    CHECK(ps5_ProcessEvents(0)&&sends==3&&!boundary_space_held);
+    CHECK(!held_keys[VK_SPACE]);
+    puts("actual driver receipt/provenance gaps characterized; USER boundary mocked");
+}
+
+int main(void){input_receipt_gaps();minimized_restore();minimized_filters_and_modal();restore_callbacks();unrelated_foreground_and_bounded_walk();basic();modal();filters();destruction();external_focus();idle_focus();failure();sink_validation();clipping();offset_clipping();hidden_and_destroyed_activation();registry_limit();printf("PS5 window switcher: %u source-body / real-sink checks passed (inert USER boundaries)\n",checks);return 0;}
