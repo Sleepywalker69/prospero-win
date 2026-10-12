@@ -1,0 +1,171 @@
+Subject: win32u: restore validated local minimized roots when cycling
+
+One same-GUI-thread restore attempt; no queued cross-process activation.
+
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+index 36a676d..c88423c 100644
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -598,6 +598,18 @@ static BOOL is_extended_key( WORD vk )
+     return FALSE;
+ }
+
++static UINT64 window_input_generation( HWND hwnd )
++{
++    struct ps5_window *window;
++    UINT64 generation;
++
++    pthread_mutex_lock( &screen_lock );
++    window = find_window( hwnd );
++    generation = window ? window->generation : 0;
++    pthread_mutex_unlock( &screen_lock );
++    return generation;
++}
++
+ /* A switcher snapshot contains only process-local, live registry identities.
+  * It intentionally does not enumerate Wine child-process transport surfaces. */
+ struct ps5_window_choice
+@@ -619,35 +631,60 @@ static BOOL window_choice_live( const struct ps5_window_choice *choice )
+     return live && is_window( choice->hwnd );
+ }
+
++/* Revalidate USER state as well as registry identity at each action boundary.
++ * Restoring only a root owned by this GUI thread avoids an unbounded synchronous
++ * cross-thread ShowWindow send or a queued restore that activates much later. */
++static BOOL window_choice_eligible( const struct ps5_window_choice *choice )
++{
++    DWORD process = 0, root_process = 0, thread, style, exstyle;
++    HWND root;
++
++    if (!window_choice_live( choice ) ||
++        !(thread = NtUserGetWindowThread( choice->hwnd, &process )) ||
++        process != GetCurrentProcessId()) return FALSE;
++    style = NtUserGetWindowLongW( choice->hwnd, GWL_STYLE );
++    exstyle = NtUserGetWindowLongW( choice->hwnd, GWL_EXSTYLE );
++    if (!(style & WS_VISIBLE) || (style & (WS_DISABLED | WS_CHILD)) ||
++        (exstyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW))) return FALSE;
++    root = NtUserGetAncestor( choice->hwnd, GA_ROOTOWNER );
++    if (!root || (choice->root && root != choice->root) ||
++        !NtUserGetWindowThread( root, &root_process ) || root_process != GetCurrentProcessId()) return FALSE;
++    if ((style & WS_MINIMIZE) && (root != choice->hwnd || thread != GetCurrentThreadId())) return FALSE;
++    return TRUE;
++}
++
++static BOOL cycle_foreground_unchanged( HWND current, UINT64 generation )
++{
++    DWORD process = 0;
++
++    return current && generation && NtUserGetForegroundWindow() == current && is_window( current ) &&
++           window_input_generation( current ) == generation && NtUserGetWindowThread( current, &process ) &&
++           process == GetCurrentProcessId();
++}
++
+ /* Do not bypass a disabled modal owner. Owned dialogs remain in their owner's
+- * slot, and the topmost enabled dialog wins within that family. Popups marked
+- * NOACTIVATE, tool windows and minimized windows never become cycle targets. */
++ * slot, and the topmost enabled dialog wins within that family. Minimized roots
++ * can be restored once; hidden, disabled and foreign-thread roots stay excluded. */
+ static HWND cycle_window( HWND current, INT direction )
+ {
+     struct ps5_window_choice choices[PS5_MAX_WINDOWS], target;
+-    HWND roots[PS5_MAX_WINDOWS], current_root, hwnd, root;
+-    UINT count = 0, roots_count = 0, i, j, step;
++    HWND roots[PS5_MAX_WINDOWS], current_root, hwnd, root, foreground;
++    UINT count = 0, roots_count = 0, i, j, step, scanned;
++    UINT64 current_generation = window_input_generation( current );
+     INT current_index = -1, index;
+-    DWORD style, exstyle, process;
+
++    if ((direction != 1 && direction != -1) ||
++        !cycle_foreground_unchanged( current, current_generation )) return NtUserGetForegroundWindow();
+     pthread_mutex_lock( &screen_lock );
+     for (i = 0; i < window_count; i++)
+         if (windows[i].shown && !bridge_service_window( windows[i].hwnd ))
+             choices[count++] = (struct ps5_window_choice){windows[i].hwnd, 0, windows[i].generation};
+     pthread_mutex_unlock( &screen_lock );
+-    current_root = current ? NtUserGetAncestor( current, GA_ROOTOWNER ) : 0;
++    current_root = NtUserGetAncestor( current, GA_ROOTOWNER );
+     for (i = 0; i < count; i++)
+     {
+-        hwnd = choices[i].hwnd;
+-        process = 0;
+-        if (!window_choice_live( &choices[i] ) || !NtUserGetWindowThread( hwnd, &process ) ||
+-            process != GetCurrentProcessId()) continue;
+-        style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
+-        exstyle = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE );
+-        if (!(style & WS_VISIBLE) || (style & (WS_DISABLED | WS_MINIMIZE | WS_CHILD)) ||
+-            (exstyle & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW))) continue;
+-        root = NtUserGetAncestor( hwnd, GA_ROOTOWNER );
+-        if (!root) continue;
++        if (!window_choice_eligible( &choices[i] )) continue;
++        root = NtUserGetAncestor( choices[i].hwnd, GA_ROOTOWNER );
+         choices[i].root = root;
+         for (j = 0; j < roots_count && roots[j] != root; j++) {}
+         if (j == roots_count) roots[roots_count++] = root;
+@@ -659,42 +696,44 @@ static HWND cycle_window( HWND current, INT direction )
+         index = current_index < 0 ? (direction > 0 ? (INT)step - 1 : (INT)roots_count - (INT)step) :
+                 (current_index + direction * (INT)step + (INT)roots_count) % (INT)roots_count;
+         root = roots[index];
+-        /* USER's z-order also maintains owned popup ordering. Find the first
+-         * eligible member there instead of selecting a disabled owner. */
++        /* Bound a concurrently changing USER z-order walk. A malformed or
++         * oversized desktop fails closed instead of spinning the input pump. */
+         target = (struct ps5_window_choice){0};
+-        for (hwnd = NtUserGetWindowRelative( get_desktop_window(), GW_CHILD ); hwnd;
+-             hwnd = NtUserGetWindowRelative( hwnd, GW_HWNDNEXT ))
++        for (scanned = 0, hwnd = NtUserGetWindowRelative( get_desktop_window(), GW_CHILD );
++             hwnd && scanned < PS5_MAX_WINDOWS * 4;
++             scanned++, hwnd = NtUserGetWindowRelative( hwnd, GW_HWNDNEXT ))
+         {
+             for (i = 0; i < count; i++)
+-                if (choices[i].hwnd == hwnd && choices[i].root == root && window_choice_live( &choices[i] ))
++                if (choices[i].hwnd == hwnd && choices[i].root == root && window_choice_eligible( &choices[i] ))
+                 { target = choices[i]; break; }
+             if (target.hwnd) break;
+         }
+-        if (!target.hwnd || !window_choice_live( &target )) continue;
+-        if (NtUserGetWindowLongW( target.hwnd, GWL_STYLE ) & (WS_DISABLED | WS_MINIMIZE)) continue;
++        if (!target.hwnd || !window_choice_eligible( &target )) continue;
++        if (!cycle_foreground_unchanged( current, current_generation )) return NtUserGetForegroundWindow();
++        if (NtUserGetWindowLongW( target.hwnd, GWL_STYLE ) & WS_MINIMIZE)
++        {
++            /* USER preserves restore-to-maximized and honors WM_QUERYOPEN/CBT.
++             * Its BOOL is previous visibility, NOT restore success. No retry or
++             * second family activation follows a veto, destruction or callback. */
++            NtUserShowWindow( target.hwnd, SW_RESTORE );
++            foreground = NtUserGetForegroundWindow();
++            if (!window_choice_eligible( &target ) ||
++                (NtUserGetWindowLongW( target.hwnd, GWL_STYLE ) & WS_MINIMIZE) ||
++                (foreground != target.hwnd &&
++                 !cycle_foreground_unchanged( current, current_generation ))) return foreground;
++        }
+         /* USER owns activation/focus notifications and owner z-order. Never
+          * synthesize WM_SETFOCUS or directly mutate its foreground handle. */
+-        if (!NtUserSetForegroundWindow( target.hwnd )) return current;
+-        if (!window_choice_live( &target )) return NtUserGetForegroundWindow();
++        if (!NtUserSetForegroundWindow( target.hwnd )) return NtUserGetForegroundWindow();
++        if (!window_choice_eligible( &target ) || NtUserGetForegroundWindow() != target.hwnd ||
++            (NtUserGetWindowLongW( target.hwnd, GWL_STYLE ) & WS_MINIMIZE)) return NtUserGetForegroundWindow();
+         NtUserSetWindowPos( target.hwnd, HWND_TOP, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE );
+         NtUserRedrawWindow( get_desktop_window(), NULL, 0,
+                             RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
+         return NtUserGetForegroundWindow();
+     }
+-    return current;
+-}
+-
+-static UINT64 window_input_generation( HWND hwnd )
+-{
+-    struct ps5_window *window;
+-    UINT64 generation;
+-
+-    pthread_mutex_lock( &screen_lock );
+-    window = find_window( hwnd );
+-    generation = window ? window->generation : 0;
+-    pthread_mutex_unlock( &screen_lock );
+-    return generation;
++    return NtUserGetForegroundWindow();
+ }
+
+ /* input_lock held; release against the old HWND before USER changes focus.

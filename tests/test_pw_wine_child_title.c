@@ -123,6 +123,10 @@ static struct Descriptor { uint64_t magic; uint32_t version, count; PwPrxExport 
 static const PwPrxDescriptor *desc(void) { return (const PwPrxDescriptor *)&descriptor; }
 static void reset(void)
 {
+#if PW_WINE_CHILD_UI_ENABLED
+    if(ui_mailbox.initialized)assert(!pthread_mutex_destroy(&ui_mailbox.lock));
+    memset(&ui_mailbox,0,sizeof(ui_mailbox));
+#endif
     memset(&title, 0, sizeof(title)); memset(owner_storage, 0, sizeof(owner_storage));
     memset(&captured, 0, sizeof(captured)); memset(logs, 0, sizeof(logs));
     init_result = create_result = clock_result = alloc_fail = 0; pid_value = 599;

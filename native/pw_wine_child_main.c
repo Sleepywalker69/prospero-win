@@ -1,11 +1,24 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* Headless application main, linked with the unchanged foundation app_crt.
  * Child-local data readiness precedes logs and all Wine threads. */
+/* The target preview uses the SDK's BSD MAP_ANON extension. Keep its default
+ * visibility there; retain POSIX-only visibility for hosts and default-off. */
+#if !defined(__PROSPERO__) || !defined(PW_WINE_CHILD_UI_ENABLED) || !PW_WINE_CHILD_UI_ENABLED
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "pw_wine_child_bootstrap.h"
 #include "pw_wine_child_data.h"
 #include "../wine/ps5/pw_wine_threads.h"
 #include "wine-child-build.h"
+#if PW_WINE_CHILD_UI_ENABLED
+#include "pw_wine_child_ui_handoff.h"
+#include <sys/mman.h>
+#include <sys/socket.h>
+#endif
+#ifndef PW_WINE_CHILD_UI_COHORT
+#define PW_WINE_CHILD_UI_COHORT 0
+#endif
+_Static_assert(PW_WINE_CHILD_UI_COHORT==PW_WINE_CHILD_UI_ENABLED,"child UI matched cohort");
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -29,6 +42,11 @@ _Static_assert(PW_WINE_CHILD_CREATION_PROTOCOL==PW_WINE_CREATION_PROTOCOL,"creat
 static PwNativeChildIo child_io;
 static PwWineChildWireResult wire_result;
 static PwWineChildBootstrap bootstrap;
+#if PW_WINE_CHILD_UI_ENABLED
+static PwWineChildUiHandoff ui_handoff;
+static PwWineChildUiChannel ui_channel;
+static int ui_descriptor=-1;
+#endif
 static PwWineChildData data_readiness;
 static uint64_t child_cleanup_end;
 static unsigned owner_cancel_received;
@@ -44,6 +62,19 @@ static atomic_int runtime_failure;
 static atomic_uint socket_failure_attempted;
 static atomic_flag send_claim=ATOMIC_FLAG_INIT;
 static pthread_mutex_t log_lock=PTHREAD_MUTEX_INITIALIZER;
+/* Main-thread checkpoints only. These never send traffic, observe a clock,
+ * change a deadline, or certify that another thread entered Windows. */
+enum { PW_WCS_ENTRY=1, PW_WCS_CHANNEL, PW_WCS_HELLO, PW_WCS_RECEIVE,
+       PW_WCS_IDENTITY, PW_WCS_PROFILE, PW_WCS_ACCEPT, PW_WCS_DATA,
+       PW_WCS_DATA_READY, PW_WCS_LOG_BEGIN, PW_WCS_LOG_OPEN, PW_WCS_LOG_READY,
+       PW_WCS_BOOTSTRAP_BEGIN, PW_WCS_PREPARE, PW_WCS_CANCEL, PW_WCS_ACK,
+       PW_WCS_START, PW_WCS_CONTROL };
+static unsigned startup_phase;
+static uint32_t startup_seen;
+static void startup_checkpoint(unsigned phase)
+{
+    startup_phase=phase;startup_seen|=UINT32_C(1)<<phase;
+}
 static struct {void(*entry)(void*);void *arg;} thread_start;
 /* Only the pre-Wine main thread writes this snapshot. Copy errno at the failed
  * native call, before observers, budget checks or once-only cleanup run. */
@@ -347,22 +378,90 @@ static int open_log(const PwWineChildFrame *session)
     }
     return atomic_load(&runtime_failure)?-1:0;
 }
+/* One optional final snapshot in the already-open child log. This is not the
+ * Wine output sink: diagnostic failure cannot alter the result/runtime state.
+ * No early file opens, stdout setup, wire retries, signal handlers, or waits.
+ * Quota/lock contention may omit it; absence never proves a particular exit. */
+static void record_startup_stop(int result)
+{
+    int saved_errno=errno;
+    if(log_fd>=0&&!pthread_mutex_trylock(&log_lock)){
+        char line[512];
+        unsigned hold=!data_readiness.no_dispatch&&data_readiness.attempted&&!data_readiness.terminal;
+        int n=snprintf(line,sizeof(line),
+            "PW_WINE_CHILD_STOP result=%d phase=%u seen=%u bootstrap=%u prepared=%u started=%u runtime=%d boot_api=%u boot_raw=%d boot_errno_valid=%u boot_errno=%d wire_status=%d wire_api=%d wire_raw=%lld errno_valid=%u native_errno=%d zero=%u hup=%u helper_hold=%u\n",
+            result,startup_phase,startup_seen,bootstrap.stage,bootstrap.prepared,bootstrap.started,
+            atomic_load(&runtime_failure),bootstrap_failure.api,bootstrap_failure.raw,
+            bootstrap_failure.errno_valid,bootstrap_failure.error,
+            wire_result.status,wire_result.api,(long long)wire_result.raw_result,
+            wire_result.errno_valid,wire_result.errno_valid?wire_result.native_error:0,
+            wire_result.channel_zero_observed,wire_result.hangup_observed,hold);
+        if(n>0&&(size_t)n<sizeof(line)&&log_bytes<=65536&&(size_t)n<=65536-log_bytes){
+            ssize_t written=write(log_fd,line,(size_t)n);
+            if(written>0&&(size_t)written<=(size_t)n)log_bytes+=(size_t)written;
+        }
+        (void)pthread_mutex_unlock(&log_lock);
+    }
+    errno=saved_errno;
+}
+#if PW_WINE_CHILD_UI_ENABLED
+static int ui_detach(void *unused)
+{
+    (void)unused;
+    if(bootstrap.ui_attached){bootstrap.ui_set_present(NULL,NULL);bootstrap.ui_attached=0;}
+    return 0; /* frame producer only; cross-process input was never installed */
+}
+static void ui_retire(void)
+{
+    if(ui_channel.initialized)(void)pw_wine_child_ui_channel_retire(&ui_channel,ui_detach,NULL);
+    else if(ui_descriptor>=0){int fd=ui_descriptor;ui_descriptor=-1;(void)close(fd);}
+    /* The mapping/object remain process-lifetime even after UI retirement. */
+}
+static void ui_pump(void)
+{
+    if(!ui_channel.initialized||ui_channel.retired)return;
+    for(unsigned n=0;n<32;n++){
+        int rc=pw_wine_child_ui_channel_pump(&ui_channel);
+        if(rc<0){ui_retire();return;}
+        if(!rc)break;
+    }
+    /* Sender-only endpoint: no receive/input path is installed. Owner loss
+     * is detected on the next bounded write or the existing absolute lifetime.
+     * No unneeded recv can acquire ancillary descriptors on this endpoint. */
+}
+#endif
 static int run_child(void)
 {
+    startup_seen=0;startup_checkpoint(PW_WCS_ENTRY);
     uint64_t begun;int fd=-1;
     if(clock_ms(NULL,&begun)||begun>UINT64_MAX-PW_WC_BATTLENET_LIFETIME_MS)return 10;
     child_io=(PwNativeChildIo){.clock_ms=clock_ms,.cancelled=cancelled,.ready=1,
         .last_clock=begun,.stage_end=begun+PW_WC_STARTUP_MS,.total_end=begun+PW_WC_BATTLENET_LIFETIME_MS};
     PwWineChildFrame hello={.kind=PW_WC_HELLO,.child_pid=(uint32_t)getpid(),.child_ppid=(uint32_t)getppid()};
     memcpy(hello.build_id,PW_WINE_CHILD_BUILD_ID,41);
-    if(pw_wine_child_wire_validate(&child_io,3,&wire_result)||
-       send_record(&hello))return 11;
+    startup_checkpoint(PW_WCS_CHANNEL);
+    if(pw_wine_child_wire_validate(&child_io,3,&wire_result))return 11;
+    startup_checkpoint(PW_WCS_HELLO);
+    if(send_record(&hello))return 11;
     PwWineChildFrame *session=&active_session;
+    startup_checkpoint(PW_WCS_RECEIVE);
+#if PW_WINE_CHILD_UI_ENABLED
+    int received;
+    do {
+        received=pw_wine_child_ui_handoff_receive(&ui_handoff,&child_io,3,&hello,&fd,&ui_descriptor);
+        if(received==PW_WC_IDLE){struct timespec delay={0,1000000};(void)nanosleep(&delay,NULL);}
+    }while(received==PW_WC_IDLE);
+    if(received==PW_WC_RECORD)*session=ui_handoff.bootstrap;
+    else wire_result=ui_handoff.result;
+#else
     int received=pw_wine_child_wire_receive(&child_io,3,PW_WC_KIND(PW_WC_BOOTSTRAP),session,&fd,&wire_result);
+#endif
     if(received!=PW_WC_RECORD)return 12;
+    startup_checkpoint(PW_WCS_IDENTITY);
     if(session->child_pid!=hello.child_pid||session->child_ppid!=hello.child_ppid||
        memcmp(session->build_id,hello.build_id,41)){
         pw_wine_child_wire_close(&fd,&wire_result);return 13;}
+    startup_checkpoint(PW_WCS_PROFILE);
     unsigned lifetime;
     switch(session->profile){
     case PW_WC_PROFILE_FIXTURE:lifetime=PW_WC_LIFETIME_MS;break;
@@ -374,16 +473,29 @@ static int run_child(void)
     child_io.total_end=begun+lifetime;
     child_cleanup_end=child_io.total_end-child_io.stage_end<PW_WINE_CHILD_CLEANUP_MS?
         child_io.total_end:child_io.stage_end+PW_WINE_CHILD_CLEANUP_MS;
+#if PW_WINE_CHILD_UI_ENABLED
+    PwWineChildUiIdentity ui_identity;
+    if(pw_wine_child_ui_handoff_identity(&ui_handoff,session,&ui_identity)){
+        pw_wine_child_wire_close(&fd,&wire_result);return 13;}
+    void *ui_storage=mmap(NULL,PW_WCU_HEADER+PW_WCU_MAX_BYTES,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    if(ui_storage==MAP_FAILED||pw_wine_child_ui_channel_init(&ui_channel,&ui_descriptor,ui_identity,
+            PW_WCU_FRAME,ui_storage,PW_WCU_HEADER+PW_WCU_MAX_BYTES,child_io.total_end,1000,clock_ms,cancelled,NULL)){
+        pw_wine_child_wire_close(&fd,&wire_result);return 13;}
+#endif
     const PwWineChildBootstrapOps ops={.context=session,.wine={sceKernelLoadStartModule,sceKernelGetModuleInfo,set_env,start_thread},
         .runtime=runtime,.directory=directory,.register_thread=pw_wine_thread_register,
         .unregister_thread=pw_wine_thread_unregister,.output=output,.socket_sink=socket_failure_sink,.record=record,
+#if PW_WINE_CHILD_UI_ENABLED
+        .ui=&ui_channel,
+#endif
         .child={PW_WINE_CREATION_ABI,sizeof(PwWineCreationChild),session->generation,
                 session->wine_pid,session->wine_tid,session->profile,session->machine}};
     data_readiness.progress=send_progress;data_readiness.progress_context=session;
     data_readiness.no_dispatch=1;
     const PwWineChildDataConfig data_config={session->generation,owner_cancel_probe,session};
+    startup_checkpoint(PW_WCS_ACCEPT);
     int rc=send_progress(session,PW_WCP_BOOTSTRAP_ACCEPTED);
-    if(!rc)rc=pw_wine_child_data_prepare(&data_readiness,&child_io,PW_WINE_CHILD_HELPER_SHA256,&data_config);
+    if(!rc){startup_checkpoint(PW_WCS_DATA);rc=pw_wine_child_data_prepare(&data_readiness,&child_io,PW_WINE_CHILD_HELPER_SHA256,&data_config);}
     if(rc){
         bootstrap.stage=PW_WCB_DATA;
         boot_failure(data_readiness.api,data_readiness.raw,
@@ -391,14 +503,14 @@ static int run_child(void)
                      (int32_t)(data_readiness.api==PW_WCD_CONTROL?data_readiness.control_revents:
                                data_readiness.api==PW_WCD_RESOLVE?data_readiness.resolution_index:data_readiness.helper_status));
     }
-    if(!rc)rc=send_progress(session,PW_WCP_DATA_READY);
-    if(!rc)rc=send_progress(session,PW_WCP_LOG_BEGIN);
-    if(!rc)rc=open_log(session);
-    if(!rc)rc=send_progress(session,PW_WCP_LOG_READY);
-    if(!rc)rc=send_progress(session,PW_WCP_BOOTSTRAP_BEGIN);
-    if(!rc)rc=pw_wine_child_bootstrap_prepare(&bootstrap,&child_io,fd,PW_WINE_CHILD_NTDLL_SHA256,
-                                             PW_WINE_CHILD_PRIVATE_DISPATCH_ABI,session->profile,session->machine,&ops);
-    if(!rc){int stop=owner_cancel_probe(session);
+    if(!rc){startup_checkpoint(PW_WCS_DATA_READY);rc=send_progress(session,PW_WCP_DATA_READY);}
+    if(!rc){startup_checkpoint(PW_WCS_LOG_BEGIN);rc=send_progress(session,PW_WCP_LOG_BEGIN);}
+    if(!rc){startup_checkpoint(PW_WCS_LOG_OPEN);rc=open_log(session);}
+    if(!rc){startup_checkpoint(PW_WCS_LOG_READY);rc=send_progress(session,PW_WCP_LOG_READY);}
+    if(!rc){startup_checkpoint(PW_WCS_BOOTSTRAP_BEGIN);rc=send_progress(session,PW_WCP_BOOTSTRAP_BEGIN);}
+    if(!rc){startup_checkpoint(PW_WCS_PREPARE);rc=pw_wine_child_bootstrap_prepare(&bootstrap,&child_io,fd,PW_WINE_CHILD_NTDLL_SHA256,
+                                             PW_WINE_CHILD_PRIVATE_DISPATCH_ABI,session->profile,session->machine,&ops);}
+    if(!rc){startup_checkpoint(PW_WCS_CANCEL);int stop=owner_cancel_probe(session);
         if(stop){rc=-1;data_readiness.cancel_requested=1;
             boot_failure(PW_WCD_CONTROL,stop,0,0,0);}}
     PwWineChildFrame reply=*session;
@@ -420,19 +532,28 @@ static int run_child(void)
         reply.returned_value=bootstrap_failure.detail;
         (void)send_bootstrap_failure(&reply);
         pw_wine_child_wire_close(&fd,&wire_result);return 14;}
+    startup_checkpoint(PW_WCS_ACK);
     reply.kind=PW_WC_BOOTSTRAP_ACK;
     if(send_record(&reply)){
         pw_wine_child_wire_close(&fd,&wire_result);return 15;}
+    startup_checkpoint(PW_WCS_START);
     rc=pw_wine_child_bootstrap_start(&bootstrap,&child_io,&ops);
     if(bootstrap.started)fd=-1; /* only ntdll now owns the transferred stream */
     if(rc){pw_wine_child_wire_close(&fd,&wire_result);return 16;}
     child_io.stage_end=child_io.total_end; /* original lifetime, never renewed */
+    startup_checkpoint(PW_WCS_CONTROL);
     uint32_t sequence=2;
     for(;;){PwWineChildFrame request;int unexpected=-1;PwWineFixtureSocketResult failure;
         report_log_loss();
         if(bootstrap.socket_failure(&failure)){socket_failure_sink(session,&failure);return 21;}
+#if PW_WINE_CHILD_UI_ENABLED
+        ui_pump();
+        rc=pw_wine_child_wire_receive_nowait(&child_io,3,PW_WC_KIND(PW_WC_SIGNAL),&request,&unexpected,&wire_result);
+        if(rc==PW_WC_IDLE){struct timespec delay={0,1000000};(void)nanosleep(&delay,NULL);continue;}
+#else
         rc=pw_wine_child_wire_receive_step(&child_io,3,PW_WC_KIND(PW_WC_SIGNAL),&request,&unexpected,&wire_result);
         if(rc==PW_WC_IDLE)continue;
+#endif
         if(rc!=PW_WC_RECORD)return 17;
         if(!pw_wine_child_wire_same_session(session,&request)||request.sequence!=sequence||
            request.target_tid>LONG_MAX)return 18;
@@ -447,6 +568,10 @@ static int run_child(void)
 int main(int argc,char **argv)
 {
     (void)argc;(void)argv;int result=run_child();
+    record_startup_stop(result);
+#if PW_WINE_CHILD_UI_ENABLED
+    ui_retire(); /* UI detaches independently before any unresolved-helper hold. */
+#endif
     /* After starting Wine another thread may be sending a failure or writing
      * its sink. Do not close/reuse those descriptors beneath a live callback;
      * finite whole-process teardown settles them. Before that, this is the

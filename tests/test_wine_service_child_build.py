@@ -213,6 +213,33 @@ class WineServiceChildBuild(unittest.TestCase):
             with self.assertRaises(ValueError):build.child_header(wrong,'a'*40)
         with self.assertRaises(ValueError):build.child_header(bound,'old-build')
 
+    def test_child_ui_contract_is_default_off_and_identity_bound(self):
+        disabled = build.child_ui_contract()
+        enabled = build.child_ui_contract(True)
+        self.assertFalse(disabled['enabled'])
+        self.assertEqual((enabled['bootstrap_version'], enabled['bootstrap_rights']), (3, 2))
+        self.assertTrue(enabled['preview_only'])
+        self.assertFalse(enabled['input_enabled'])
+        self.assertFalse(enabled['runtime_validated'])
+        self.assertNotEqual(build.identity({'child_ui': disabled}), build.identity({'child_ui': enabled}))
+        for wrong in [1, '1', None]:
+            with self.assertRaises(ValueError): build.child_ui_contract(wrong)
+        for key, value in [('input_enabled', True), ('runtime_validated', True), ('bootstrap_rights', 1)]:
+            changed = dict(enabled); changed[key] = value
+            with self.assertRaises(ValueError): build.checked_child_ui({'child_ui': changed})
+        bound = {'runtime': {'creation_abi':1, 'creation_protocol':962, 'private_dispatch_abi':1,
+                            'private_dispatch_wow64_abi':1, 'ntdll_sha256':'b'*64},
+                 'project': {'commit':'a'*40, 'tree':'b'*40},
+                 'helper': {'elf': {'sha256':'ab'*32}, 'project': {'commit':'a'*40, 'tree':'b'*40},
+                            'toolchain_reverified':True, 'runtime_validated':False}, 'child_ui': enabled}
+        self.assertIn('#define PW_WINE_CHILD_UI_COHORT 1\n', build.child_header(bound, 'a'*40))
+        bound['child_ui'] = disabled
+        self.assertIn('#define PW_WINE_CHILD_UI_COHORT 0\n', build.child_header(bound, 'a'*40))
+        for name in ['native/pw_wine_child_ui_handoff.c','native/pw_wine_child_ui_channel.c']:
+            self.assertIn(name, build.UNITS)
+        for name in ['native/pw_wine_child_ui_config.h','native/pw_wine_child_ui_preview.c','native/pw_wine_child_ui_runtime.c']:
+            self.assertIn(name, build.TITLE_USER_SOURCES)
+
     def test_title_fixture_hash_is_current_standalone_and_read_only(self):
         digest='a'*64
         pair={'files':{name:{'bytes':123,'sha256':digest} for name in ('parent.exe','child.exe')}}

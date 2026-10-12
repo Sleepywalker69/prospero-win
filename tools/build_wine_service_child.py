@@ -32,10 +32,13 @@ CRT_SHA = 'a99fe406e36d8ce82e68e0245898ba064e28a56a9853f746e9cf13d23cc17a00'
 LAYOUT_SHA = '72ee9a1605cce2836d2290fa9a6a6fba0c3c277e78094e7f07562e92dd5b4e49'
 WRAPPER_SHA = 'c90881bd828048981da08644ae1e1730a0ef10692b6322cbd6a294de8c5c5346'
 UNITS = ('native/pw_wine_child_wire.c', 'native/pw_wine_child_bootstrap.c', 'native/pw_wine_child_main.c', 'native/pw_wine_child_data.c',
-         'native/pw_native_child_protocol.c', 'src/pw_wine_start.c', 'wine/ps5/pw_wine_prx.c', 'wine/ps5/pw_wine_threads.c')
+         'native/pw_native_child_protocol.c', 'src/pw_wine_start.c', 'wine/ps5/pw_wine_prx.c', 'wine/ps5/pw_wine_threads.c',
+         'native/pw_wine_child_ui.c', 'native/pw_wine_child_ui_handoff.c', 'native/pw_wine_child_ui_channel.c')
 HEADERS = ('native/pw_wine_child_data.h', 'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_wine_child_wire.h', 'native/pw_wine_child_bootstrap.h', 'src/pw_wine_start.h',
            'native/pw_native_child_protocol.h', 'src/pw_wine_launch.h', 'include/prospero_win.h',
-           'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h', 'wine/ps5/pw_wine_creation.h')
+           'wine/ps5/pw_wine_prx.h', 'wine/ps5/pw_wine_threads.h', 'wine/ps5/pw_wine_fixture_socket.h', 'wine/ps5/pw_wine_creation.h',
+           'native/pw_wine_child_ui_config.h', 'native/pw_wine_child_ui.h', 'native/pw_wine_child_ui_handoff.h',
+           'native/pw_wine_child_ui_channel.h', 'wine/ps5/pw_wine_sink.h')
 PROVIDERS = {'libSceLibcInternal.sprx': 'libSceLibcInternal.so', 'libkernel.sprx': 'libkernel.so',
              'libSceNet.sprx': 'libSceNet.so'}
 NET_FUNCTIONS = ('sceNetSocket', 'sceNetConnect', 'sceNetSend', 'sceNetRecv',
@@ -46,6 +49,21 @@ CRT_IMPORTS = {'_init_env': 'libSceLibcInternal.sprx', 'atexit': 'libSceLibcInte
                **{name: 'libSceNet.sprx' for name in NET_FUNCTIONS}}
 TITLE_MARKER = 'pw-wine-child-fixture/1'
 TITLE_FUNCTIONS = ('pw_wine_fixture_owner_init', 'pw_wine_fixture_owner_pump')
+
+
+def child_ui_contract(enabled=False):
+    require(type(enabled) is bool, 'child UI flag must be boolean')
+    return {'enabled': enabled, 'bootstrap_version': 3 if enabled else 2,
+            'bootstrap_rights': 2 if enabled else 1, 'preview_only': enabled,
+            'input_enabled': False, 'socket_identity': 'nonzero-distinct-fstat' if enabled else None,
+            'runtime_validated': False}
+
+
+def checked_child_ui(bound):
+    value = bound.get('child_ui', child_ui_contract(False))
+    require(isinstance(value, dict) and value == child_ui_contract(value.get('enabled')),
+            'child UI contract differs')
+    return value
 
 
 def sha(path):
@@ -205,7 +223,8 @@ def inputs(args, commands):
             'child requires actual matched creation protocol and broker')
     helper = helper_inputs(args, root, project, sdk)
     net = net_inputs(sdk, bindir, commands)
-    result = {'helper': helper, 'net_transport': net, 'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
+    result = {'helper': helper, 'net_transport': net, 'child_ui': child_ui_contract(getattr(args, 'child_ui', False)),
+              'project': project, 'sources': sources, 'runtime': {'ntdll_sha256': sha(runtime / 'prx/sce_module/ntdll.prx'),
               'creation_abi': 1, 'creation_protocol': 962, 'private_dispatch_abi': 1, 'private_dispatch_wow64_abi': 1, 'report_sha256': sha(runtime / 'report.json'), 'abi_check': abi},
               'candidate_capabilities': [
                   {'mode': 1, 'prefix': 'windows-child-fixture-v1', 'guest_machine': 'AMD64',
@@ -233,7 +252,9 @@ def child_header(bound, build_id):
     require(re.fullmatch('[0-9a-f]{40}', build_id) and
             re.fullmatch('[0-9a-f]{64}', bound['runtime']['ntdll_sha256']) and
             helper_digest(bound), 'invalid child header identity')
-    return ('#define PW_WINE_CHILD_BUILD_ID "' + build_id + '"\n' +
+    child_ui = checked_child_ui(bound)
+    return ('#define PW_WINE_CHILD_UI_COHORT ' + str(int(child_ui['enabled'])) + '\n' +
+            '#define PW_WINE_CHILD_BUILD_ID "' + build_id + '"\n' +
             '#define PW_WINE_CHILD_NTDLL_SHA256 "' + bound['runtime']['ntdll_sha256'] + '"\n' +
             '#define PW_WINE_CHILD_PRIVATE_DISPATCH_ABI 1\n' +
             '#define PW_WINE_CHILD_WOW64_ABI 1\n' +
@@ -262,7 +283,7 @@ def build(args):
     for name in UNITS:
         obj = out / (name.replace('/', '_') + '.o')
         commands.run(*cc, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-ffunction-sections', '-fdata-sections',
-                     '-fasynchronous-unwind-tables',
+                     '-fasynchronous-unwind-tables', '-DPW_WINE_CHILD_UI_ENABLED=' + str(int(bound['child_ui']['enabled'])),
                      '-I' + str(out), '-I' + str(root / 'include'), '-I' + str(root / 'src'), '-I' + str(root / 'native'),
                      '-I' + str(root / 'wine/ps5'), '-c', root / name, '-o', obj)
         objects.append(obj)
@@ -417,7 +438,19 @@ TITLE_USER_SOURCES = ('native/wine64_main.c', 'native/pw_wine_child_title.c', 'n
                       'native/pw_wine_fixture_owner.c', 'native/pw_wine_fixture_owner.h',
                       'native/pw_data_mount.c', 'native/pw_data_mount.h',
                       'native/pw_lapy_elevation.c', 'native/pw_lapy_elevation.h',
-                      'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_sha256.h')
+                      'native/lapy_elevation_protocol.h', 'native/pw_lapy_client.h', 'native/pw_sha256.h',
+                      'native/pw_wine_child_ui_config.h', 'native/pw_wine_child_ui.c', 'native/pw_wine_child_ui.h',
+                      'native/pw_wine_child_ui_handoff.c', 'native/pw_wine_child_ui_handoff.h',
+                      'native/pw_wine_child_ui_channel.c', 'native/pw_wine_child_ui_channel.h',
+                      'native/pw_wine_child_ui_runtime.c', 'native/pw_wine_child_ui_runtime.h',
+                      'native/pw_wine_child_ui_preview.c', 'native/pw_wine_child_ui_preview.h',
+                      'native/pw_wine_controller_settings.c', 'native/pw_wine_controller_settings.h',
+                      'src/pw_controller_settings.c', 'src/pw_controller_settings.h',
+                      'native/pw_wine_display.c', 'native/pw_wine_display.h',
+                      'native/pw_wine_library.c', 'native/pw_wine_library.h',
+                      'src/pw_game_profile.c', 'src/pw_game_profile.h',
+                      'src/pw_launcher_render.c', 'src/pw_launcher_render.h',
+                      'src/pw_pad.c', 'src/pw_pad.h', 'native/pw_pad_ps5.c', 'native/pw_pad_ps5.h')
 
 
 def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=None, run_attempt=None):
@@ -431,6 +464,7 @@ def title_input_contract(root, service_work, fixture, user_fixture=None, run_id=
     child_sha = pair['files']['child.exe']['sha256']
     result = {'schema': 'pw-windows-child-title-inputs/1', 'project': manifest['project'],
               'mode': 1, 'define': 'PW_WINE_CHILD_FIXTURE_MODE=1', 'fixture_child_sha256': child_sha,
+              'child_ui': checked_child_ui(manifest),
               'build_script_sha256': sha(root / 'tools/build_native.sh'), 'service_manifest_sha256': sha(manifest_path)}
     user_pair = None
     if user_fixture is not None:
@@ -532,7 +566,7 @@ def title_compile_record(root, build, project, compiler, common, units):
             'native_source_inputs': {name: record(root / name) for name in TITLE_USER_SOURCES}}
 
 
-def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False):
+def verify_title_compile_record(root, build, project, enabled, sdk, title, network_enabled=False, child_ui_enabled=False):
     path = build / 'wine-child-title-compile.json'
     actual = json.loads(path.read_text())
     require(actual.get('schema') == 'pw-windows-child-title-compile/1' and actual.get('project') == project,
@@ -545,7 +579,8 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             Path(compiler[3]).resolve() == (title / 'tooling/prospero-clang18').resolve() and
             sha(Path(compiler[3])) == WRAPPER_SHA, 'title compiler launcher/wrapper differs')
     require(not any(v in ('-D', '-U', '-include', '-imacros', '-undef') or
-                    v.startswith(('-UPW_WINE_USER_PROFILE_ENABLED', '-UPW_WINE_NET_PROFILE_ENABLED')) for v in common), 'ambiguous title preprocessor flags')
+                    v.startswith(('-UPW_WINE_USER_PROFILE_ENABLED', '-UPW_WINE_NET_PROFILE_ENABLED', '-UPW_WINE_CHILD_UI_ENABLED',
+                                  '-DPW_WINE_CHILD_UI_COHORT', '-UPW_WINE_CHILD_UI_COHORT')) for v in common), 'ambiguous title preprocessor flags')
     require([v for v in common if v.startswith('-DPW_WINE_USER_PROFILE_ENABLED')] ==
             ['-DPW_WINE_USER_PROFILE_ENABLED=' + str(int(enabled))] and
             [v for v in common if v.startswith('-DPW_WINE_CHILD_FIXTURE_MODE')] == ['-DPW_WINE_CHILD_FIXTURE_MODE=1'],
@@ -554,6 +589,10 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
             [v for v in common if v.startswith('-DPW_WINE_NET_PROFILE_ENABLED')] ==
             (['-DPW_WINE_NET_PROFILE_ENABLED=1'] if network_enabled else []),
             'title network compile enable flags differ')
+    require(type(child_ui_enabled) is bool, 'child UI title flag must be boolean')
+    ui_flags = [v for v in common if v.startswith('-DPW_WINE_CHILD_UI_ENABLED')]
+    require(ui_flags == ['-DPW_WINE_CHILD_UI_ENABLED=1'] if child_ui_enabled else
+            ui_flags in ([], ['-DPW_WINE_CHILD_UI_ENABLED=0']), 'title child UI enable flag differs')
     require(not any(v.startswith(('-DPW_WINE_NET_CHILD_SHA256', '-UPW_WINE_NET_CHILD_SHA256')) for v in common),
             'network child hash must come only from the validated generated header')
     from build_owned_helper import validate_owned_helper
@@ -567,6 +606,7 @@ def verify_title_compile_record(root, build, project, enabled, sdk, title, netwo
     require(actual == title_compile_record(root, build, project, compiler, common, list(units)),
             'title actual source/object/command record differs')
     return {**record(path), 'user_enabled': bool(enabled), 'network_enabled': network_enabled,
+            'child_ui': child_ui_contract(child_ui_enabled),
             'network_hash_source': 'validated-generated-header' if network_enabled else None, 'record': actual,
             'source_to_binary_reproducibility_verified': False}
 
@@ -586,7 +626,8 @@ def check_title(args):
     fixture_sha = pair['files']['child.exe']['sha256']
     require(title_inputs == expected_inputs and (build / 'wine-child-title-config.h').read_text() == header,
             'title fixture/USER macro/source input record differs')
-    compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None)
+    compile_inputs = verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None,
+                                                checked_child_ui(manifest)['enabled'])
     # Retain actual bytes before parser/analyzer refusal for independent review.
     for name, original in (('title.linked.elf', build / 'llvm-pie.elf'), ('title.converted.elf', build / 'eboot.elf'),
                             ('title.self', app / 'eboot.bin')):
@@ -643,7 +684,8 @@ def check_title(args):
     require(title_profiles_input_contract(root, args.service_work, args.fixture, user_fixture,
         getattr(args, 'run_id', None), getattr(args, 'run_attempt', None), network_fixture) ==
         (expected_inputs, header, pair, user_pair, network_pair), 'original/USER/network fixture changed during title inspection')
-    require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None) == compile_inputs,
+    require(verify_title_compile_record(root, build, manifest['project'], user_pair is not None, sdk, title, network_pair is not None,
+                                                checked_child_ui(manifest)['enabled']) == compile_inputs,
             'title compile inputs changed during inspection')
     report = {'schema': 'pw-windows-child-title/2', 'project': manifest['project'],
               'build_id': manifest['project']['commit'], 'compiler': manifest['host_llvm'],
@@ -671,6 +713,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--work', type=Path, default=ROOT)
     parser.add_argument('--check-title', action='store_true')
+    parser.add_argument('--child-ui', action='store_true', help='opt-in matched v3 child software-frame preview; input disabled')
     for name in ('sdk', 'foundation', 'runtime', 'out', 'llvm-bindir'):
         parser.add_argument('--' + name, type=Path, required=True)
     for name in ('build', 'app', 'service-work', 'sdk-source-archive', 'fixture', 'user-fixture', 'network-fixture', 'helper-directory'):

@@ -717,3 +717,59 @@ register each suite. Host and synthetic PE/package controls do not establish
 service startup, a Windows result on PS5, actual DNS/Internet/TLS behavior,
 child presentation/input, or Battle.net installation. The separate matched
 Windows reference and exact console result remain required.
+
+
+### Bounded startup-stop observations
+
+The existing parent log now records `bootstrap_sent` once after a complete
+BOOTSTRAP send (`profile`, `machine`, reserved zero). It does not prove receipt,
+child validation, data readiness, or Wine entry. On interrupted startup,
+`bootstrap_stopped` records the last parent phase, last accepted progress stage,
+and the conservative helper-possible latch. Its companion
+`bootstrap_stop_control` records the existing wire status, API and raw result.
+The pair is emitted at most once per generation. Existing `wire_receive` and
+`wire_channel` retain byte-count, poll, ancillary and EOF/HUP evidence.
+`hello_refused` carries a fixed mismatch mask only: generation=1, sequence=2,
+missing child PID=4, missing PPID=8, parent/child PID equality=16, build mismatch=32.
+No untrusted build ID or other payload text is copied into these diagnostics.
+
+After `run_child` returns, the child makes one best-effort
+`PW_WINE_CHILD_STOP` write to its already-open log. This records the original
+result, last main-thread phase, visited-phase bitset, bootstrap state, runtime
+failure, the first captured bootstrap API/return/errno, wire error and EOF/HUP observations, and `helper_hold`. Result and
+ownership policy are unchanged. This write uses at most 511 bytes of remaining
+64 KiB quota, one try-lock and one write, without retries or waits. Failure,
+partial write, quota exhaustion or lock contention does not change the child
+result or runtime failure state. The record contains numeric values only.
+No signal handler, additional listener, wire record, early file open, permission
+change, or deadline extension is introduced.
+
+Main-thread phase values are: entry=1, channel validation=2, HELLO send=3,
+BOOTSTRAP receive=4, identity validation=5, profile selection=6, accepted-progress
+send=7, data preparation=8, data-ready progress=9, log-begin progress=10,
+log open=11, log-ready progress=12, bootstrap-begin progress=13,
+Wine preparation=14, owner-cancel observation=15, ACK send=16,
+Wine start invocation=17, and control loop=18. Bit `1 << phase` in `seen` means
+that call boundary was reached, not that it completed successfully.
+Result codes remain unchanged: 10=initial clock, 11=channel validation or HELLO
+send, 12=BOOTSTRAP receive, 13=identity/profile refusal, 14=pre-ACK preparation,
+15=ACK send, 16=Wine start, 17=control-channel stop, 18=control-request refusal,
+19=signal ACK send, 20=signal delivery or sequence limit, 21=Wine socket failure.
+These are supervisor return reasons, never a Windows exit code.
+ACK still precedes Wine start; neither `bootstrap_ready` nor phase 17 alone
+certifies that a Windows process executed.
+
+Limitations are intentional. Before child-local data readiness, there is no
+child log. A malformed BOOTSTRAP, EOF, or identity/profile rejection can stop
+before any child snapshot is writable; the parent can report only its own
+observations, not infer the child's reason. An abrupt process exit or signal
+may also omit the final snapshot. A `helper_hold=1` snapshot describes the
+existing unresolved-helper park, not process termination or safe closure.
+Absence of progress, a stop record, or channel EOF never proves helper
+settlement and never relaxes the existing recovery latch.
+
+Host regression coverage includes malformed input and EOF at the main/codec
+boundary, identity and profile refusals, missing data, Wine prepare failure,
+successful preparation/ACK/start, parent interruption records, and snapshot
+quota/lock/write failures. These mocked tests do not establish console runtime
+behavior or reproduce a hardware crash.

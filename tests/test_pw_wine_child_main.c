@@ -37,10 +37,14 @@ static int fake_start(PwWineChildBootstrap*,PwNativeChildIo*,const PwWineChildBo
 /* This older diagnostic suite models an already ready data boundary.
  * Separate functional controls link the real data adapter and main. */
 #include "../native/pw_wine_child_data.h"
+static int data_prepare_error;
 static int fake_data_prepare(PwWineChildData *value,PwNativeChildIo *io,const char *hash,const PwWineChildDataConfig *config)
 {
     assert(value&&io&&hash&&strlen(hash)==64&&config&&config->transaction_id&&config->cancel_probe);
     value->transaction_id=config->transaction_id;
+    if(data_prepare_error){value->attempted=value->no_dispatch=1;
+        value->api=PW_WCD_DATA_STAT;value->raw=-1;
+        value->errno_valid=1;value->native_error=ENOENT;return -1;}
     value->attempted=value->ready=value->data_before=value->data_after=value->lstat_before=1;
     value->before_observations=3;return 0;
 }
@@ -102,7 +106,7 @@ static struct {
     unsigned cancel_mode,cancel_reads,last_proof;PwWineChildFrame proof_frame;
     uint64_t ms;int battle;int prepare_rc,start_rc,start_owns,wrong_session,kill_rc,log_fail;
     int sends,steps,closes,closed[20],kills,prepares,starts,exit_code,query_failure,send_rc,idle_timeout,bad_sequence;
-    int writes,trylock_rc,unlock_rc,write_short;char last_write[512];
+    int writes,trylock_rc,unlock_rc,write_short,stop_write_error,receive_mode,bad_profile;char last_write[512];
     int log_error,data_error,data_nondir,data_stats,close_error,open_mask,alias_open;
     int stat_error,read_error;
     int attr_init_rc,attr_stack_rc,attr_destroy_rc,thread_rc,thread_calls,reads,bad_hash;
@@ -112,7 +116,11 @@ static struct {
 static jmp_buf done;
 static int fake_clock(clockid_t id,struct timespec*t){assert(id==CLOCK_MONOTONIC);t->tv_sec=(time_t)(m.ms/1000);t->tv_nsec=(long)((m.ms%1000)*1000000);return 0;}
 static pid_t fake_pid(void){return 600;}static pid_t fake_ppid(void){return 53;}
-static void fake_exit(int code){m.exit_code=code;longjmp(done,1);}
+static void fake_exit(int code){
+#if PW_WINE_CHILD_UI_ENABLED
+ assert(ui_descriptor==-1&&(!ui_channel.initialized||ui_channel.retired));
+#endif
+ m.exit_code=code;longjmp(done,1);}
 static int fake_open(const char*p,int flags,...)
 {
     if(strstr(p,"/logs/wine-child-")){assert(flags&(O_EXCL|O_CREAT));va_list a;va_start(a,flags);assert(va_arg(a,int)==0600);va_end(a);if(m.log_fail){errno=m.log_error;return -1;}return 5;}
@@ -125,7 +133,7 @@ static int fake_stat(const char*p,struct stat*s)
  memset(s,0,sizeof(*s));s->st_mode=m.data_nondir?S_IFREG:S_IFDIR;return 0;}
 static int fake_fstat(int fd,struct stat*s){assert(fd==9);if(m.stat_error){errno=m.stat_error;return -1;}memset(s,0,sizeof(*s));s->st_mode=S_IFREG;s->st_size=3;s->st_ino=1;return 0;}
 static ssize_t fake_read(int fd,void*p,size_t n){assert(fd==9);if(m.read_error){errno=m.read_error;return -1;}if(m.reads++)return 0;assert(n==3);memcpy(p,m.bad_hash?"abd":"abc",3);return 3;}
-static ssize_t fake_write(int fd,const void*p,size_t n){assert(fd==5&&p&&n<=65536);m.writes++;size_t take=n<sizeof(m.last_write)-1?n:sizeof(m.last_write)-1;memcpy(m.last_write,p,take);m.last_write[take]=0;return m.write_short?(ssize_t)n-1:(ssize_t)n;}
+static ssize_t fake_write(int fd,const void*p,size_t n){assert(fd==5&&p&&n<=65536);m.writes++;size_t take=n<sizeof(m.last_write)-1?n:sizeof(m.last_write)-1;memcpy(m.last_write,p,take);m.last_write[take]=0;if(m.stop_write_error&&strstr(m.last_write,"PW_WINE_CHILD_STOP ")==m.last_write){errno=EIO;return -1;}return m.write_short?(ssize_t)n-1:(ssize_t)n;}
 static int fake_close(int fd){assert(m.closes<20);m.closed[m.closes++]=fd;if(m.close_error){errno=m.close_error;return -1;}return 0;}
 static int fake_setenv(const char*a,const char*b,int c){(void)a;(void)b;assert(c==1);return 0;}
 static int fake_attr_init(pthread_attr_t*a){(void)a;return m.attr_init_rc;}
@@ -154,7 +162,10 @@ static int fake_send(int fd,const PwWineChildFrame*f,int right,PwWineChildWireRe
 static int fake_same(const PwWineChildFrame*a,const PwWineChildFrame*b)
 {return a->generation==b->generation&&a->child_pid==b->child_pid&&a->parent_pid==b->parent_pid&&a->wine_pid==b->wine_pid;}
 static int fake_receive(PwNativeChildIo*i,int fd,uint32_t k,PwWineChildFrame*f,int*right,PwWineChildWireResult*r)
-{assert(i==&child_io&&fd==3&&k==PW_WC_KIND(PW_WC_BOOTSTRAP)&&r==&wire_result);*f=session();if(m.wrong_session)f->child_pid=601;*right=9;return PW_WC_RECORD;}
+{assert(i==&child_io&&fd==3&&k==PW_WC_KIND(PW_WC_BOOTSTRAP)&&r==&wire_result);
+ if(m.receive_mode==1){r->status=PW_WC_PROTOCOL;r->api=PW_WC_API_RECEIVE;r->raw_result=7;return PW_WC_ERROR;}
+ if(m.receive_mode==2){r->channel_zero_observed=r->hangup_observed=1;return PW_WC_CHANNEL_CLOSED;}
+ *f=session();if(m.wrong_session)f->child_pid=601;if(m.bad_profile)f->profile=99;*right=9;return PW_WC_RECORD;}
 static int fake_step(PwNativeChildIo*i,int fd,uint32_t k,PwWineChildFrame*f,int*right,PwWineChildWireResult*r)
 {assert(i==&child_io&&fd==3&&k==PW_WC_KIND(PW_WC_SIGNAL)&&*right==-1&&r==&wire_result);
  if(m.idle_timeout){unsigned left;m.ms+=10000;return pw_native_child_remaining(i,&left)?PW_WC_ERROR:PW_WC_IDLE;}
@@ -162,6 +173,9 @@ static int fake_step(PwNativeChildIo*i,int fd,uint32_t k,PwWineChildFrame*f,int*
  *f=session();f->kind=PW_WC_SIGNAL;f->sequence=m.bad_sequence?3:2;f->signal=30;f->target_tid=123;return PW_WC_RECORD;}
 static int fake_cancel_receive(PwNativeChildIo *io,int fd,uint32_t kinds,PwWineChildFrame *f,int *right,PwWineChildWireResult *r)
 {
+#if PW_WINE_CHILD_UI_ENABLED
+ if(kinds==PW_WC_KIND(PW_WC_SIGNAL))return fake_step(io,fd,kinds,f,right,r);
+#endif
  assert(io&&fd==3&&kinds==PW_WC_KIND(PW_WC_CANCEL)&&*right==-1&&r);
  assert(!io->cancelled&&io->stage_end==child_cleanup_end&&io->stage_end<=io->total_end);
  m.cancel_reads++;
@@ -178,19 +192,79 @@ static int query(PwWineFixtureSocketResult*r)
 {if(!m.query_failure)return 0;*r=(PwWineFixtureSocketResult){.status=-1,.api=5,.raw_result=0,.returned_length=4,.returned_value=0};return 1;}
 static int fake_prepare(PwWineChildBootstrap*b,PwNativeChildIo*i,int fd,const char*h,unsigned abi,uint32_t profile,uint32_t machine,const PwWineChildBootstrapOps*o)
 {assert(i==&child_io&&fd==9&&!strcmp(h,PW_WINE_CHILD_NTDLL_SHA256)&&abi==1&&profile==(m.battle?PW_WC_PROFILE_BATTLENET:PW_WC_PROFILE_FIXTURE)&&machine==(m.battle?PW_WC_MACHINE_I386:PW_WC_MACHINE_AMD64)&&o->socket_sink==socket_failure_sink&&o->context==&active_session);
+
+#ifdef PW_WCU_MAIN_PREPARE
+ PW_WCU_MAIN_PREPARE(b,o);
+#endif
  m.prepares++;b->stage=PW_WCB_PREPARED;b->socket_failure=query;return m.prepare_rc;}
 static int fake_start(PwWineChildBootstrap*b,PwNativeChildIo*i,const PwWineChildBootstrapOps*o)
 {assert(i==&child_io&&o);m.starts++;b->started=m.start_owns;return m.start_rc;}
 static void reset(void)
-{owner_cancel_received=0;child_cleanup_end=0;memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&data_readiness,0,sizeof(data_readiness));memset(&wire_result,0,sizeof(wire_result));
+{data_prepare_error=0;owner_cancel_received=0;child_cleanup_end=0;startup_phase=0;startup_seen=0;memset(&m,0,sizeof(m));m.ms=100;m.start_owns=1;memset(&bootstrap,0,sizeof(bootstrap));memset(&data_readiness,0,sizeof(data_readiness));memset(&wire_result,0,sizeof(wire_result));
+#if PW_WINE_CHILD_UI_ENABLED
+ memset(&ui_channel,0,sizeof(ui_channel));memset(&ui_handoff,0,sizeof(ui_handoff));ui_descriptor=-1;
+#endif
+
  memset(&bootstrap_failure,0,sizeof(bootstrap_failure));
  memset(&child_io,0,sizeof(child_io));memset(&active_session,0,sizeof(active_session));log_fd=-1;log_bytes=0;log_loss_marker=0;atomic_store(&log_dropped_records,0);atomic_store(&log_dropped_bytes,0);atomic_store(&log_counts_incomplete,0);atomic_store(&runtime_failure,0);atomic_store(&socket_failure_attempted,0);atomic_flag_clear(&send_claim);}
 static void run(void){if(!setjmp(done))child_main(0,NULL);}
 static unsigned closed(int fd){unsigned n=0;for(int i=0;i<m.closes;i++)n+=m.closed[i]==fd;return n;}
 static void dummy(void*p){(void)p;}
 static int external_cancel(void*p){(void)p;return 1;}
-int main(void)
+#ifndef PW_WCU_MAIN_TEST_ENTRY
+#define PW_WCU_MAIN_TEST_ENTRY main
+#endif
+int PW_WCU_MAIN_TEST_ENTRY(void)
 {
+    /* Before /data readiness there is deliberately no file or new transport:
+     * distinguish outcomes locally without adding failure/ACK traffic. */
+    for(int receive=1;receive<=2;receive++){
+        reset();m.receive_mode=receive;run();
+        assert(m.exit_code==12&&startup_phase==PW_WCS_RECEIVE);
+        assert(m.sends==1&&!m.progress&&!m.prepares&&!m.starts&&!m.writes);
+        assert(closed(3)==1&&!closed(9)&&log_fd==-1);
+        assert(!(startup_seen&(UINT32_C(1)<<PW_WCS_IDENTITY)));
+        if(receive==1)assert(wire_result.status==PW_WC_PROTOCOL&&wire_result.raw_result==7);
+        else assert(!wire_result.status&&wire_result.channel_zero_observed&&wire_result.hangup_observed);
+    }
+    reset();m.wrong_session=1;run();
+    assert(m.exit_code==13&&startup_phase==PW_WCS_IDENTITY&&!m.progress&&!m.writes&&closed(9)==1);
+    reset();m.bad_profile=1;run(); /* defense in depth; real codec refuses this earlier */
+    assert(m.exit_code==13&&startup_phase==PW_WCS_PROFILE&&!m.progress&&!m.writes&&closed(9)==1);
+    reset();data_prepare_error=1;run();
+    assert(m.exit_code==14&&startup_phase==PW_WCS_DATA&&!m.prepares&&!m.starts&&!m.writes);
+    assert(m.progress==1&&m.sends==2&&m.frames[1].failure_api==PW_WCD_DATA_STAT);
+    assert(m.frames[1].native_error==ENOENT&&m.last_proof==(PW_WCD_NO_DISPATCH<<PW_WCD_STATE_SHIFT));
+    reset();m.prepare_rc=-1;run();
+    assert(m.exit_code==14&&startup_phase==PW_WCS_PREPARE&&!m.starts);
+    assert(strstr(m.last_write,"PW_WINE_CHILD_STOP result=14 phase=14 "));
+    assert(strstr(m.last_write,"prepared=0 started=0 runtime=0 ")&&strstr(m.last_write,"helper_hold=0\n"));
+    assert(!strstr(m.last_write,"/data")&&!strstr(m.last_write,"child.exe")&&!strstr(m.last_write,PW_WINE_CHILD_BUILD_ID));
+    reset();run();
+    assert(m.exit_code==17&&startup_phase==PW_WCS_CONTROL&&m.starts==1&&m.sends==3&&m.progress==5);
+    assert(strstr(m.last_write,"PW_WINE_CHILD_STOP result=17 phase=18 ")&&strstr(m.last_write,"started=1 runtime=0 "));
+    assert(startup_seen==((UINT32_C(1)<<(PW_WCS_CONTROL+1))-2));
+    /* Best-effort observation changes neither lifecycle nor failure state. */
+    reset();m.stop_write_error=1;run();
+    assert(m.exit_code==17&&m.sends==3&&m.progress==5&&!atomic_load(&runtime_failure));
+    for(unsigned refused=0;refused<4;refused++){
+        reset();log_fd=5;startup_checkpoint(PW_WCS_PREPARE);errno=ERANGE;
+        if(refused==0)log_bytes=65536;
+        if(refused==1)m.trylock_rc=EBUSY;
+        if(refused==2)m.trylock_rc=EINVAL;
+        if(refused==3)log_fd=-1;
+        record_startup_stop(14);
+        assert(!m.writes&&!atomic_load(&runtime_failure)&&errno==ERANGE);
+    }
+    reset();log_fd=5;m.write_short=1;errno=ERANGE;record_startup_stop(14);
+    assert(m.writes==1&&!atomic_load(&runtime_failure)&&errno==ERANGE&&log_bytes==strlen(m.last_write)-1);
+    reset();log_fd=5;m.unlock_rc=EINVAL;record_startup_stop(14);
+    assert(m.writes==1&&!atomic_load(&runtime_failure));
+    reset();log_fd=5;bootstrap_failure.api=PW_WC_DIAG_RUNTIME_OPEN;bootstrap_failure.raw=-1;
+    bootstrap_failure.errno_valid=1;bootstrap_failure.error=ENOENT;record_startup_stop(14);
+    assert(strstr(m.last_write,"boot_api=263 boot_raw=-1 boot_errno_valid=1 boot_errno=2 "));
+    reset();log_fd=5;data_readiness.attempted=1;record_startup_stop(14);
+    assert(strstr(m.last_write,"helper_hold=1\n")&&!m.sends&&!m.starts);
     reset();m.cancel_mode=1;run();
     assert(m.exit_code==14&&!m.starts&&m.cancel_reads==1&&owner_cancel_received);
     assert(m.proof_frame.kind==PW_WC_FAILURE&&m.proof_frame.status<0);

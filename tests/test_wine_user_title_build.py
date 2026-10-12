@@ -39,7 +39,7 @@ class TitleInputs(unittest.TestCase):
   return b.title_input_contract(self.root,self.service,self.fixture,self.user if enabled else None,run,attempt)
  def test_disabled_keeps_original_record_and_does_not_validate_user(self):
   record,header,pair,user=self.inputs(False,None,None)
-  self.assertEqual(set(record),{'schema','project','mode','define','fixture_child_sha256','build_script_sha256','service_manifest_sha256'})
+  self.assertEqual(set(record),{'schema','project','mode','define','fixture_child_sha256','build_script_sha256','service_manifest_sha256','child_ui'})
   self.assertIn('PW_WINE_USER_PROFILE_ENABLED 0\n',header);self.assertNotIn('PW_WINE_USER_CHILD_SHA256',header);self.assertFalse(self.calls);self.assertIsNone(user)
  def test_enabled_binds_distinct_child_raw_reference_and_external_run(self):
   record,header,pair,user=self.inputs();self.assertTrue(record['user_enabled']);self.assertEqual(record['user_child_sha256'],'e'*64);self.assertEqual(record['user_reference_sha256'],b.sha(self.user/'user-source.json'));self.assertIn('PW_WINE_USER_PROFILE_ENABLED 1\n',header);self.assertIn('PW_WINE_USER_CHILD_SHA256 "'+'e'*64+'"\n',header);self.assertEqual(self.calls[-1],(self.user,self.project,self.root,'123','2'));self.assertEqual(pair,self.pair)
@@ -91,6 +91,41 @@ class TitleInputs(unittest.TestCase):
     with self.assertRaises(ValueError):self.check_compile(True)
    wrong=copy.deepcopy(record);wrong['sources'].pop('native/pw_wine_child_title.c');p.write_text(json.dumps(wrong))
    with self.assertRaises(ValueError):self.check_compile(True)
+ def test_child_ui_compile_flag_and_source_binding(self):
+  record,wrapper=self.compile_record();path=self.build/'wine-child-title-compile.json'
+  def write(flags):
+   value=b.title_compile_record(self.root,self.build,self.project,record['compiler_argv'],flags,list(record['sources']))
+   path.write_text(json.dumps(value))
+  with patch.object(b,'WRAPPER_SHA',b.sha(wrapper)):
+   with self.assertRaises(ValueError):b.verify_title_compile_record(self.root,self.build,self.project,True,self.sdk,self.title,False,True)
+   flags=record['common_flags']+['-DPW_WINE_CHILD_UI_ENABLED=1'];write(flags)
+   self.assertTrue(b.verify_title_compile_record(self.root,self.build,self.project,True,self.sdk,self.title,False,True)['child_ui']['preview_only'])
+   with self.assertRaises(ValueError):self.check_compile(True)
+   for extra in ['-DPW_WINE_CHILD_UI_ENABLED=0','-UPW_WINE_CHILD_UI_ENABLED','-DPW_WINE_CHILD_UI_COHORT=0']:
+    write(flags+[extra])
+    with self.assertRaises(ValueError):b.verify_title_compile_record(self.root,self.build,self.project,True,self.sdk,self.title,False,True)
+   write(flags);source=self.root/'native/pw_wine_child_ui_runtime.c';source.write_text('changed after compile')
+   with self.assertRaises(ValueError):b.verify_title_compile_record(self.root,self.build,self.project,True,self.sdk,self.title,False,True)
+ def test_combined_controller_settings_sources_and_headers_bound(self):
+  required=['native/pw_wine_controller_settings.c','native/pw_wine_controller_settings.h',
+            'src/pw_controller_settings.c','src/pw_controller_settings.h',
+            'native/pw_wine_display.c','native/pw_wine_display.h',
+            'native/pw_wine_library.c','native/pw_wine_library.h',
+            'src/pw_game_profile.c','src/pw_game_profile.h',
+            'src/pw_launcher_render.c','src/pw_launcher_render.h',
+            'src/pw_pad.c','src/pw_pad.h','native/pw_pad_ps5.c','native/pw_pad_ps5.h']
+  self.assertTrue(set(required)<=set(b.TITLE_USER_SOURCES))
+  record,wrapper=self.compile_record();receipt=self.build/'wine-child-title-compile.json'
+  with patch.object(b,'WRAPPER_SHA',b.sha(wrapper)):
+   self.assertTrue(self.check_compile(True)['user_enabled'])
+   for name in required:
+    source=self.root/name;raw=source.read_bytes();source.write_bytes(raw+b'changed controller/settings input')
+    with self.assertRaises(ValueError):self.check_compile(True)
+    source.write_bytes(raw)
+    if name.endswith('.c'):
+     wrong=copy.deepcopy(record);wrong['sources'].pop(name);receipt.write_text(json.dumps(wrong))
+     with self.assertRaisesRegex(ValueError,'source cohort incomplete'):self.check_compile(True)
+     receipt.write_text(json.dumps(record))
  def test_worker_metadata_declares_exact_four_compiled_capabilities(self):
   tree=ast.parse((ROOT/'tools/build_wine_service_child.py').read_text())
   function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='inputs')

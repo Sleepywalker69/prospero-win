@@ -373,6 +373,19 @@ static void wine_output_sink(const char *str, size_t len)
  * of the low range PE32 executables occupy, and libc's heap is too small. */
 static PwWineFrameBox frames;
 static uint8_t *frame_shown;
+#if PW_WINE_CHILD_FIXTURE_MODE && PW_WINE_CHILD_UI_ENABLED
+static PwWineChildUiPreview child_preview;
+static uint8_t *child_composite;
+/* The root cache retains its existing mode badge but never child pixels. */
+static void child_preview_view(PwPresentView *view)
+{
+    if(child_composite&&child_preview.valid&&
+       !pw_wine_child_ui_preview_overlay(&child_preview,view->pixels,view->width,view->height,view->stride,
+                                         child_composite,PW_WINE64_MAX_FRAME)){
+        view->pixels=child_composite;view->stride=view->width*4;view->bytes=(size_t)view->width*view->height*4;
+    }
+}
+#endif
 
 static int wine_present(void *context, const void *bgra, uint32_t width, uint32_t height,
                         uint32_t stride)
@@ -1483,6 +1496,12 @@ int main(int argc, char **argv)
                 pw_wine_frame_box_init(&frames, storage, PW_WINE64_MAX_FRAME) == 0) {
                 frame_shown = storage + PW_WINE64_MAX_FRAME;
                 if (set_present) set_present(wine_present, NULL);
+#if PW_WINE_CHILD_FIXTURE_MODE && PW_WINE_CHILD_UI_ENABLED
+                if(child_profile){
+                    void *preview=mmap(NULL,PW_WINE64_MAX_FRAME,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+                    if(preview!=MAP_FAILED)child_composite=preview;
+                }
+#endif
             }
         }
         {
@@ -1682,21 +1701,33 @@ int main(int argc, char **argv)
 
             int frame_taken = pw_wine_frame_box_take(&frames, &shown_sequence, frame_shown,
                                                      PW_WINE64_MAX_FRAME, &view);
+#if PW_WINE_CHILD_FIXTURE_MODE && PW_WINE_CHILD_UI_ENABLED
+            int preview_changed = pw_wine_child_title_preview(&child_preview);
+#else
+            const int preview_changed = 0;
+#endif
             if (frame_taken == 1) gdi_view.pixels = NULL;
             if (frame_taken == 1 && loading_admits(&loading, &view)) {
                 gdi_view = view;
                 const PwPresentTarget badge = { frame_shown, view.width, view.height,
                                                 view.stride, view.bytes };
                 (void)pw_launcher_input_badge(pw_wine_input_mode_name(&input_router, &game_input), &badge);
+#if PW_WINE_CHILD_FIXTURE_MODE && PW_WINE_CHILD_UI_ENABLED
+                child_preview_view(&view);
+#endif
                 if (show_scaled(&video, &view, scaling) == PW_OK) {
                     shown++;          /* present waits for the vblank */
                     presented = 1;
                 }
-            } else if (old_mode != input_router.mouse_mode && gdi_view.pixels) {
+            } else if ((old_mode != input_router.mouse_mode || preview_changed) && gdi_view.pixels) {
                 const PwPresentTarget badge = { frame_shown, gdi_view.width, gdi_view.height,
                                                 gdi_view.stride, gdi_view.bytes };
                 (void)pw_launcher_input_badge(pw_wine_input_mode_name(&input_router, &game_input), &badge);
-                if (show_scaled(&video, &gdi_view, scaling) == PW_OK) { shown++; presented = 1; }
+                view = gdi_view;
+#if PW_WINE_CHILD_FIXTURE_MODE && PW_WINE_CHILD_UI_ENABLED
+                child_preview_view(&view);
+#endif
+                if (show_scaled(&video, &view, scaling) == PW_OK) { shown++; presented = 1; }
             } else if ((next = loading_frame(&loading, now, started, &spinner)) &&
                        pw_videoout_ps5_present_scaled(&video, next, PW_PRESENT_SCALE_FIT, 0) == PW_OK) {
                 presented = 1;

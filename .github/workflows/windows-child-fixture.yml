@@ -2,6 +2,12 @@
 name: Matched original Windows child fixture
 on:
   workflow_dispatch:
+    inputs:
+      child_ui_preview:
+        description: Also build the isolated child software preview for static validation only
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [perf/windows-child-incremental-cache]
   pull_request:
@@ -9,7 +15,24 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: windows-child-fixture-${{ github.ref }}
+  # Skipped events must not replace a pending admitted build in its group.
+  group: >-
+    windows-child-fixture-${{ (github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' &&
+         github.ref == 'refs/heads/perf/windows-child-incremental-cache' &&
+         github.event.deleted == false) ||
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+         (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+            github.event.action == 'reopened') &&
+           (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+            contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+          (github.event.action == 'labeled' &&
+           ((github.event.label.name == 'build-windows-child-fixture' &&
+             contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+            (github.event.label.name == 'build-child-ui-preview-static' &&
+             contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))))))) && github.ref || github.run_id }}
   cancel-in-progress: false
 env:
   PYTHONDONTWRITEBYTECODE: "1"
@@ -24,7 +47,15 @@ jobs:
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-           contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -86,7 +117,15 @@ jobs:
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-           contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -116,7 +155,15 @@ jobs:
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-           contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -146,7 +193,15 @@ jobs:
           (github.event_name == 'pull_request' &&
            github.event.pull_request.head.repo.full_name == github.repository &&
            github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
-           contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) }}
+           (((github.event.action == 'opened' || github.event.action == 'synchronize' ||
+              github.event.action == 'reopened') &&
+             (contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') ||
+              contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static'))) ||
+            (github.event.action == 'labeled' &&
+             ((github.event.label.name == 'build-windows-child-fixture' &&
+               contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture')) ||
+              (github.event.label.name == 'build-child-ui-preview-static' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static')))))) }}
     permissions:
       contents: read
       actions: read
@@ -620,6 +675,128 @@ jobs:
           path: ${{ runner.temp }}/windows-child-fixture/windows-child-fixture.tar.gz
           retention-days: 7
           if-no-files-found: error
+      - name: Build the opt-in enabled preview in fresh isolated outputs
+        if: >-
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+              (github.event_name == 'pull_request' &&
+               github.event.pull_request.head.repo.full_name == github.repository &&
+               github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+               (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+                github.event.action == 'reopened' ||
+                (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static'))) }}
+        env:
+          PW_WINE_CHILD_FIXTURE_MODE: "1"
+          PW_WINE_CHILD_UI_ENABLED: "1"
+          PW_WINDOWS_CHILD_FIXTURE_DIR: ${{ runner.temp }}/fixture-x64
+          PW_WINDOWS_CHILD_USER_DIR: ${{ runner.temp }}/user-x64
+          PW_WINDOWS_CHILD_NETWORK_DIR: ${{ runner.temp }}/network-x64
+          PW_OUTPUT_SUFFIX: -windows-child-fixture
+          PW_FOUNDATION_READY: "1"
+          PW_WINE64_SCRIPT: "0"
+          PS5_NATIVE_FOUNDATION: ${{ runner.temp }}/title-foundation
+          PW_WINE_CHILD_FOUNDATION: ${{ runner.temp }}/prx-foundation
+          PW_WINE_CHILD_RUNTIME: ${{ runner.temp }}/wine-ps5
+          PW_NATIVE_SDK_SOURCE_ARCHIVE: ${{ runner.temp }}/sdk-source.tar.gz
+          PS5LOG_DEV_CONF: ${{ runner.temp }}/no-private-dev-conf
+        run: |
+          mkdir "$RUNNER_TEMP/preview-evidence"
+          [[ ! -e "$RUNNER_TEMP/preview-source" && ! -L "$RUNNER_TEMP/preview-source" ]]
+          git worktree add --detach "$RUNNER_TEMP/preview-source" HEAD
+          [[ $(git -C "$RUNNER_TEMP/preview-source" rev-parse HEAD) == $(git rev-parse HEAD) ]]
+          [[ $(git -C "$RUNNER_TEMP/preview-source" rev-parse 'HEAD^{tree}') == $(git rev-parse 'HEAD^{tree}') ]]
+          timeout 30m bash "$RUNNER_TEMP/preview-source/tools/build_native.sh" 2>&1 | tee "$RUNNER_TEMP/preview-evidence/title-build.log"
+          python3 "$RUNNER_TEMP/preview-source/tools/build_wine_service_child.py" --check-title --child-ui --work "$RUNNER_TEMP/preview-source" \
+            --sdk "$PS5_PAYLOAD_SDK" --foundation "$FOUNDATION" --runtime "$WINE_WORK" \
+            --llvm-bindir "$("$LLVM_CONFIG" --bindir)" --build "$RUNNER_TEMP/preview-source/build/native-windows-child-fixture" \
+            --app "$RUNNER_TEMP/preview-source/dist/PPSA99995-windows-child-fixture" \
+            --service-work "$RUNNER_TEMP/preview-source/build/native-windows-child-fixture/wine-child" --fixture "$RUNNER_TEMP/fixture-x64" \
+            --user-fixture "$RUNNER_TEMP/user-x64" --network-fixture "$RUNNER_TEMP/network-x64" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --sdk-source-archive "$RUNNER_TEMP/sdk-source.tar.gz" --out "$RUNNER_TEMP/preview-title-inspection" \
+            2>&1 | tee "$RUNNER_TEMP/preview-evidence/title-check.log"
+      - name: Recheck both modes and collect static-only preview evidence with exact sources
+        if: >-
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+              (github.event_name == 'pull_request' &&
+               github.event.pull_request.head.repo.full_name == github.repository &&
+               github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+               (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+                github.event.action == 'reopened' ||
+                (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static'))) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          temp, repo = Path(os.environ['RUNNER_TEMP']), Path(os.environ['GITHUB_WORKSPACE'])
+          source = json.loads((temp / 'source-inputs.json').read_text())
+          source['paths']['repo'] = str(temp / 'preview-source')
+          source['paths']['title_build'] = str(temp / 'preview-source/build/native-windows-child-fixture')
+          (temp / 'preview-source-inputs.json').write_text(json.dumps(source, indent=2) + '\n')
+          PY
+          python3 tools/package_windows_child_fixture.py retain-sources --inputs "$RUNNER_TEMP/preview-source-inputs.json" \
+            --out "$RUNNER_TEMP/preview-retained-sources" --report "$RUNNER_TEMP/preview-retained-sources.json" \
+            2>&1 | tee "$RUNNER_TEMP/preview-evidence/source-retention.log"
+          python3 tools/collect_child_ui_preview_validation.py --inputs "$RUNNER_TEMP/package-inputs.json" \
+            --repo "$RUNNER_TEMP/preview-source" \
+            --build "$RUNNER_TEMP/preview-source/build/native-windows-child-fixture" \
+            --app "$RUNNER_TEMP/preview-source/dist/PPSA99995-windows-child-fixture" \
+            --report "$RUNNER_TEMP/preview-title-inspection/native-wine-child-title.json" \
+            --sources "$RUNNER_TEMP/preview-retained-sources" --sources-report "$RUNNER_TEMP/preview-retained-sources.json" \
+            --out "$RUNNER_TEMP/child-ui-preview-static-validation" \
+            2>&1 | tee "$RUNNER_TEMP/preview-evidence/static-validation.log"
+      - name: Upload the isolated preview static-validation artifact
+        if: >-
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+              (github.event_name == 'pull_request' &&
+               github.event.pull_request.head.repo.full_name == github.repository &&
+               github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+               (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+                github.event.action == 'reopened' ||
+                (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static'))) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: child-ui-preview-static-validation-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/child-ui-preview-static-validation/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain bounded isolated preview compiler diagnostics
+        if: >-
+          ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+              (github.event_name == 'pull_request' &&
+               github.event.pull_request.head.repo.full_name == github.repository &&
+               github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+               (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+                github.event.action == 'reopened' ||
+                (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static')))) }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools')
+          from retain_windows_child_failure import collect_preview_inspection
+          temp = Path(os.environ['RUNNER_TEMP'])
+          collect_preview_inspection(temp / 'preview-source/build/native-windows-child-fixture',
+                                     temp / 'preview-title-inspection', temp / 'preview-evidence/compiler-inspection')
+          PY
+      - name: Keep bounded preview logs even when its validation fails
+        if: >-
+          ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.child_ui_preview == true) ||
+              (github.event_name == 'pull_request' &&
+               github.event.pull_request.head.repo.full_name == github.repository &&
+               github.event.pull_request.head.ref != 'perf/windows-child-incremental-cache' &&
+               contains(github.event.pull_request.labels.*.name, 'build-child-ui-preview-static') &&
+               (github.event.action == 'opened' || github.event.action == 'synchronize' ||
+                github.event.action == 'reopened' ||
+                (github.event.action == 'labeled' && github.event.label.name == 'build-child-ui-preview-static')))) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: child-ui-preview-static-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/preview-evidence/
+          retention-days: 7
+          if-no-files-found: warn
       - name: Preserve bounded build evidence without raw prefix contents
         if: ${{ always() }}
         run: |

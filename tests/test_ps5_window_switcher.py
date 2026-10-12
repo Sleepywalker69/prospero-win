@@ -29,7 +29,7 @@ def main():
     if supplied.exists() and supplied.read_text()!=driver:
         raise RuntimeError('supplied composed PS5 driver differs from this repository patch chain')
     declarations='\n'.join(re.search(r'struct '+name+r'\n\{.*?\n\};',driver,re.S).group() for name in ['ps5_input','ps5_window','ps5_surface','ps5_window_choice'])
-    names=['find_window','ps5_surface_set_clip','ps5_surface_flush','ps5_surface_destroy','ps5_WindowPosChanged','ps5_DestroyWindow','last_shown_window','send_mouse','is_extended_key','window_choice_live','cycle_window','window_input_generation','release_window_input','ps5_ProcessEvents']
+    names=['find_window','ps5_surface_set_clip','ps5_surface_flush','ps5_surface_destroy','ps5_WindowPosChanged','ps5_DestroyWindow','last_shown_window','send_mouse','is_extended_key','window_input_generation','window_choice_live','window_choice_eligible','cycle_foreground_unchanged','cycle_window','release_window_input','ps5_ProcessEvents']
     bodies='\n'.join(function(driver,re.search(r'^static [^\n]+\b'+name+r'\(',driver,re.M).group()) for name in names)
     fixture=root/'tests/fixtures/ps5_window_switcher.c'
     generated=a.out/'control.c';generated.write_text(fixture.read_text().replace('/* ACTUAL_DECLARATIONS */',declarations).replace('/* ACTUAL_FUNCTIONS */',bodies))

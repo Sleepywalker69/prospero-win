@@ -70,6 +70,27 @@ $(eval $(call test_rule,test_pw_wine_threads,tests/test_pw_wine_threads.c wine/p
 $(eval $(call test_rule,test_pw_wine_sink,tests/test_pw_wine_sink.c wine/ps5/pw_wine_sink.c,-pthread))
 $(eval $(call test_rule,test_pw_wine_child_ui,tests/test_pw_wine_child_ui.c native/pw_wine_child_ui.c wine/ps5/pw_wine_sink.c,-pthread))
 $(BUILD)/test_pw_wine_child_ui: native/pw_wine_child_ui.h wine/ps5/pw_wine_sink.h
+$(eval $(call test_rule,test_pw_wine_child_ui_channel,tests/test_pw_wine_child_ui_channel.c native/pw_wine_child_ui.c,-pthread -D_DEFAULT_SOURCE))
+$(eval $(call test_rule,test_pw_wine_child_ui_handoff,tests/test_pw_wine_child_ui_handoff.c native/pw_wine_child_ui_handoff.c native/pw_wine_child_ui_channel.c native/pw_wine_child_ui.c native/pw_wine_child_wire.c native/pw_native_child_protocol.c wine/ps5/pw_wine_sink.c,-pthread -D_DEFAULT_SOURCE))
+$(eval $(call test_rule,test_pw_wine_child_ui_handoff_faults,tests/test_pw_wine_child_ui_handoff_faults.c native/pw_wine_child_wire.c native/pw_native_child_protocol.c,-pthread -D_DEFAULT_SOURCE))
+$(BUILD)/test_pw_wine_child_ui_channel $(BUILD)/test_pw_wine_child_ui_handoff: native/pw_wine_child_ui_channel.h native/pw_wine_child_ui_channel.c native/pw_wine_child_ui.h
+$(BUILD)/test_pw_wine_child_ui_handoff $(BUILD)/test_pw_wine_child_ui_handoff_faults: native/pw_wine_child_ui_handoff.h native/pw_wine_child_ui_handoff.c native/pw_wine_child_wire.h
+# Opt-in UI runtime controls run alongside default-off legacy controls.
+PW_WCU_RUNTIME_TEST_FLAGS := -pthread -D_DEFAULT_SOURCE
+PW_WCU_ENTRY_TEST_FLAGS := $(PW_WCU_RUNTIME_TEST_FLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections -iquote tests/wine_child_fixture
+PW_WCU_OWNER_TEST_FLAGS := $(PW_WCU_RUNTIME_TEST_FLAGS) -Inative
+PW_WCU_BOOTSTRAP_TEST_FLAGS := $(PW_WCU_ENTRY_TEST_FLAGS) -DPW_WINE_CHILD_UI_ENABLED=1
+PW_WCU_TITLE_TEST_FLAGS := $(PW_WCU_RUNTIME_TEST_FLAGS) -Itests/wine_child_title_fixture
+$(eval $(call test_rule,test_pw_wine_child_ui_runtime,tests/test_pw_wine_child_ui_runtime.c native/pw_wine_child_ui_runtime.c native/pw_wine_child_ui_preview.c native/pw_wine_child_ui_handoff.c native/pw_wine_child_ui_channel.c native/pw_wine_child_ui.c native/pw_wine_child_wire.c native/pw_native_child_protocol.c wine/ps5/pw_wine_sink.c,$(PW_WCU_RUNTIME_TEST_FLAGS)))
+$(eval $(call test_rule,test_pw_wine_child_ui_runtime_faults,tests/test_pw_wine_child_ui_runtime_faults.c native/pw_wine_child_ui_handoff.c native/pw_wine_child_ui.c native/pw_wine_child_wire.c native/pw_native_child_protocol.c,$(PW_WCU_RUNTIME_TEST_FLAGS)))
+$(BUILD)/test_pw_wine_child_ui_runtime_faults: native/pw_wine_child_ui_runtime.c
+$(eval $(call test_rule,test_pw_wine_child_ui_owner,tests/test_pw_wine_child_ui_owner.c,$(PW_WCU_OWNER_TEST_FLAGS)))
+$(eval $(call test_rule,test_pw_wine_child_ui_main,tests/test_pw_wine_child_ui_main.c native/pw_wine_child_bootstrap.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c native/pw_native_child_protocol.c,$(PW_WCU_ENTRY_TEST_FLAGS)))
+$(eval $(call test_rule,test_pw_wine_child_ui_bootstrap,tests/test_pw_wine_child_bootstrap.c native/pw_wine_child_bootstrap.c native/pw_wine_child_ui_channel.c native/pw_wine_child_ui.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c native/pw_native_child_protocol.c,$(PW_WCU_BOOTSTRAP_TEST_FLAGS)))
+$(eval $(call test_rule,test_pw_wine_child_ui_title,tests/test_pw_wine_child_ui_title.c native/pw_wine_child_ui_preview.c,$(PW_WCU_TITLE_TEST_FLAGS)))
+$(BUILD)/test_pw_wine_child_ui_owner: tests/test_pw_wine_fixture_owner.c native/pw_wine_fixture_owner.c
+$(BUILD)/test_pw_wine_child_ui_main: tests/test_pw_wine_child_main.c native/pw_wine_child_main.c tests/wine_child_fixture/wine-child-build.h
+$(BUILD)/test_pw_wine_child_ui_title: tests/test_pw_wine_child_title.c native/pw_wine_child_title.c tests/wine_child_title_fixture/native-wine-child-build.h
 $(eval $(call test_rule,test_pw_wine_start,tests/test_pw_wine_start.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,-I.))
 $(eval $(call test_rule,test_windows_chromium_ipc_contract,tests/test_windows_chromium_ipc_contract.c,-Itests/fixtures))
 $(BUILD)/test_windows_chromium_ipc_contract: tests/fixtures/windows_chromium_ipc_contract.h
@@ -334,7 +355,8 @@ TESTS := test_windows_chromium_ipc_contract test_windows_chromium_ipc_fixture te
 	test_pw_script_input test_pw_game_profile test_pw_controller_settings test_pw_wine_controller_settings test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc \
 	test_d3d9_bridge_wire test_vk_replay test_d3d9_objects test_d3d9_program_query test_d3d9_program_wire test_d3d9_factory_wire test_d3d9_resource_wire \
 	test_d3d9_texture_wire test_d3d9_window test_d3d9_window_driver test_vk_wire test_vk_codec test_pw_wine_library test_pw_wine_display \
-	test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_wine_child_ui test_pw_wine_threads test_pw_wine_compat \
+	test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_wine_child_ui test_pw_wine_child_ui_channel test_pw_wine_child_ui_handoff test_pw_wine_child_ui_handoff_faults \
+	test_pw_wine_child_ui_runtime test_pw_wine_child_ui_runtime_faults test_pw_wine_child_ui_owner test_pw_wine_child_ui_main test_pw_wine_child_ui_bootstrap test_pw_wine_child_ui_title test_pw_wine_threads test_pw_wine_compat \
 	test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad test_d3d9_gamma_wire test_d3d9_query_wire \
 	test_d3d9_stateblock_wire test_pw_guest_fp test_d3d9_cursor_wire test_d3d9_up_wire test_pw_vm test_pw_x86_block test_pw_x86_flat \
 	test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top test_pw_x86_engine \
@@ -402,6 +424,9 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_network_workflow.py
 	python3 tests/test_battlenet_prefix.py
 	python3 tests/test_wine_service_child_build.py
+	python3 tests/test_child_ui_build.py
+	python3 tests/test_child_ui_preview_workflow.py
+	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_child_ui_composition.py
 	python3 tests/test_windows_child_failure_retention.py
 	python3 tests/test_package_windows_child_fixture.py
 	python3 tests/test_publish_release.py
