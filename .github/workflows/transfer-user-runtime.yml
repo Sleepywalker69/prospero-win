@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Transfer exact existing matched113 runtime
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  transfer:
+    if: >-
+      ${{ github.repository == 'Sleepywalker69/prospero-win' &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event.pull_request.head.repo.full_name == github.repository &&
+            github.event.label.name == 'transfer-existing-matched113-runtime')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Test transport splitter
+        run: |
+          python3 -m unittest discover -s tests -p test_split_verified_artifact.py -v
+          python3 -m unittest discover -s tests -p test_inspect_matched_artifact.py -v
+      - name: Download the original unchanged artifact ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11747362547 > "$RUNNER_TEMP/source-artifact.json"
+          python3 - "$RUNNER_TEMP/source-artifact.json" <<'PYCODE'
+          import json,sys
+          x=json.load(open(sys.argv[1]))
+          assert x['id']==11747362547 and x['workflow_run']['id']==38241186538
+          assert x['workflow_run']['head_sha']=='bbfa02476c6794538be1aad46886ec45976a4af9'
+          assert x['name']=='windows-child-fixture-7acf08abea63640a737c7cec0cae4c0da61b82f5-1'
+          assert not x['expired'] and x['size_in_bytes']==754378842
+          assert x['digest']=='sha256:542e980e3ac21d3064481daf22a5817c666aa35a194e55a22cf3bd7dfd88a6d8'
+          PYCODE
+          gh api repos/Sleepywalker69/prospero-win/actions/artifacts/11747362547/zip > "$RUNNER_TEMP/original-runtime.zip"
+      - name: Verify original identity and split bytes without extraction
+        run: python3 tools/split_verified_artifact.py "$RUNNER_TEMP/original-runtime.zip" "$RUNNER_TEMP/byte-parts"
+      - name: Inspect bounded selected native proof and fixture-only inventory
+        run: python3 tools/inspect_matched_artifact.py "$RUNNER_TEMP/original-runtime.zip" "$RUNNER_TEMP/matched-evidence"
+      - name: Retain selected unchanged proof and inventory receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: matched113-runtime-selected-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/matched-evidence/selected/
+            ${{ runner.temp }}/matched-evidence/*.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain exact byte part 1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: matched113-runtime-byte-part01-${{ github.run_id }}
+          path: ${{ runner.temp }}/byte-parts/runtime.zip.part01
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain exact byte part 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: matched113-runtime-byte-part02-${{ github.run_id }}
+          path: ${{ runner.temp }}/byte-parts/runtime.zip.part02
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain exact byte part 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: matched113-runtime-byte-part03-${{ github.run_id }}
+          path: ${{ runner.temp }}/byte-parts/runtime.zip.part03
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain exact byte part 4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: matched113-runtime-byte-part04-${{ github.run_id }}
+          path: ${{ runner.temp }}/byte-parts/runtime.zip.part04
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain transport receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: matched113-runtime-byte-manifest-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/byte-parts/MANIFEST.json
+            ${{ runner.temp }}/source-artifact.json
+          retention-days: 7
+          if-no-files-found: error
