@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: Export exact reviewed host compiler cache
+on:
+  pull_request:
+    types: [synchronize, reopened]
+    paths:
+      - '.github/workflows/export-host-compiler-cache.yml'
+      - 'tools/export_host_compiler_cache.py'
+      - 'tests/test_export_host_compiler_cache.py'
+      - 'docs/host-cache-113-save.json'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: export-host-compiler-cache-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  export:
+    if: >-
+      ${{ github.event.pull_request.number == 113 &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          !contains(github.event.pull_request.labels.*.name, 'build-windows-child-fixture') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install only reader dependency
+        run: python -m pip install --only-binary=:all: PyYAML==6.0.1
+      - name: Test bounded export admission and archive contracts
+        run: python -m unittest discover -s tests -p test_export_host_compiler_cache.py -v
+      - name: Validate original component and unique exact cache metadata
+        run: python tools/export_host_compiler_cache.py prepare --out "$RUNNER_TEMP/host-cache-export"
+      - name: Restore exact donor cache or stop
+        id: restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/ccache-host
+          key: wine-ccache-v2-host-b00746243624c07795511efe030575672cc9a3f18458b93705cb126fac7d6d8a-52a8dc3deb6c085d346cd9ceab2a8591b893785b75fc17e83fce1f88a81c6a7e
+          fail-on-cache-miss: true
+      - name: Require exact restore and export measured opaque bytes
+        env:
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        run: python tools/export_host_compiler_cache.py export --out "$RUNNER_TEMP/host-cache-export"
+      - name: Retain compiler cache and original source provenance in this repository
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: host-compiler-cache-export-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/host-cache-export/compiler-cache.tar.gz
+            ${{ runner.temp }}/host-cache-export/inventory.json
+            ${{ runner.temp }}/host-cache-export/EXPORT-RECEIPT.json
+            ${{ runner.temp }}/host-cache-export/receipts/
+            ${{ runner.temp }}/host-cache-export/host.zip
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
